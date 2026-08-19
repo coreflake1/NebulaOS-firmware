@@ -8,8 +8,9 @@ Scope: the two pieces of first-boot state a user cannot recover from without a s
 `/usr/data/nebulaos` is covered by `NEBULAOS_MUTABLE_RUNTIME_ARCHITECTURE.md` and
 `NEBULAOS_PERSISTENT_LIFECYCLE.md`; this document does not restate them.
 
-Written 2026-08-16 (Phase 0 safety/cleanup closeout). Every path below was read out of the
-overlay/init scripts as they exist at that commit, not from memory.
+Written 2026-08-16 (Phase 0 safety/cleanup closeout); WiFi paths updated 2026-08-18 (Phase 1.5
+persistent-namespace mission — see `NEBULAOS_PERSISTENT_NAMESPACE.md`). Every path below was read
+out of the overlay/init scripts as they exist at the commit noted, not from memory.
 
 ## Ownership
 
@@ -18,7 +19,8 @@ overlay/init scripts as they exist at that commit, not from memory.
 | `/opt/guppyscreen/guppyconfig.json` (in-image) | `scripts/build/overlay/opt/guppyscreen/guppyconfig.json` | immutable factory default, squashfs |
 | `/usr/data/nebulaos/guppyscreen/guppyconfig.json` | `S01persistent-datastore` (`seed_once`) | persistent user state, ext4 `mmcblk0p10` |
 | `/opt/guppyscreen/guppyconfig.json` (at runtime) | `S01persistent-datastore` (`mount --bind`) | the persistent file, made visible where GuppyScreen looks |
-| `/usr/data/nebulaos/wpa_supplicant.conf` | `S01wifi` (`seed_default_conf`) | persistent user state, ext4 `mmcblk0p10` |
+| `/usr/data/nebulaos/network/wpa_supplicant.conf` | `/etc/nebulaos-wifi-migrate.sh` (`nebulaos_wifi_migrate`), sourced by `S01wifi` | canonical persistent user state, ext4 `mmcblk0p10` |
+| `/usr/data/nebulaos/wpa_supplicant.conf` | same, as a compatibility symlink to the canonical file above | kept only for anything still expecting the pre-Phase-1.5 path; both paths are inside `/usr/data/nebulaos`, so this is a convenience, not a namespace-ownership exception |
 | `/var/run/wpa_supplicant/wlan0` | `wpa_supplicant`, started by `S01wifi` | runtime control socket, tmpfs |
 
 No other script in this image writes any of these files. The GuppyScreen repo's own build tree
@@ -78,42 +80,52 @@ hardcoded path resolve to real writable storage. Without it, `Config::init()`'s 
 `std::ofstream o(config_path)` would fail against the read-only squashfs and nothing GuppyScreen
 saves — touch calibration, sleep timeout, sensor layout — would persist.
 
-The `/usr/data` top-level compatibility symlinks are guarded the same way, for a real reason:
-
-```sh
-[ -e /usr/data/printer_data ] || ln -s /opt/printer_data /usr/data/printer_data
-[ -e /usr/data/guppyscreen ] || ln -s /opt/guppyscreen /usr/data/guppyscreen
-```
-
-`mmcblk0p10` is shared with stock, so a device can already have a real stock GuppyScreen install at
-`/usr/data/guppyscreen`. An unguarded `ln -sf` treats an existing *directory* destination as
-"create the link inside it", which once overwrote a real stock binary on this project's own test
-device. The `[ -e ... ] ||` guard is load-bearing and must not be relaxed to `ln -sf`.
+**Phase 1.5 persistent-namespace mission (2026-08-18):** the `/usr/data` top-level compatibility
+symlinks this section used to document here (`/usr/data/printer_data -> /opt/printer_data`,
+`/usr/data/guppyscreen -> /opt/guppyscreen`) are REMOVED. They existed only because GuppyScreen's
+own compiled binary hardcoded a handful of `/usr/data/printer_data/...` and
+`/usr/data/guppyscreen/...` paths instead of the already-correct `/opt/...` bind-mount paths this
+guarantee documents; that GuppyScreen-side hardcoding is fixed (see `NebulaOS-guppyscreen`'s
+`phase1.5/persistent-namespace` branch), so nothing in the shipped image needs the top-level
+aliases anymore. The incident this section used to warn about (`ln -sf` silently landing inside a
+real pre-existing stock directory and overwriting a real stock binary) is now moot for these two
+paths specifically, because nothing creates the symlink at all — see
+`NEBULAOS_PERSISTENT_NAMESPACE.md` for the full ownership reasoning and
+`S01persistent-datastore`'s own history comments for the forensic incident record.
 
 ## Guarantee 3 — a valid, credential-free WiFi config exists if none is saved
 
-`S01wifi` runs before anything that needs the network, and before `wpa_supplicant` starts:
+`S01wifi` runs before anything that needs the network, and before `wpa_supplicant` starts. As of
+Phase 1.5, the config-path decision itself is delegated to `/etc/nebulaos-wifi-migrate.sh`'s
+`nebulaos_wifi_migrate()`, which sets `NEBULAOS_WIFI_CONF` to the canonical path — this is a safe
+migration, not a plain seed-once, because the same file is also this device's primary SSH access
+path (see `NEBULAOS_PERSISTENT_NAMESPACE.md` §"Wi-Fi migration" for the full case-by-case
+algorithm and `tests/nebulaos-wifi-migrate-tests.sh` for its test matrix). On a genuinely virgin
+device (case C — neither the new canonical path nor the old one exists), the effective behavior is
+unchanged from before this mission:
 
 ```sh
-CONF=/usr/data/nebulaos/wpa_supplicant.conf
-
-seed_default_conf() {
-	[ -e "$CONF" ] && return 0
-	...
-	umask 077
-	cat > "$CONF" <<-EOF
-	ctrl_interface=/var/run/wpa_supplicant
-	update_config=1
-	EOF
-	...
-}
+NEW=/usr/data/nebulaos/network/wpa_supplicant.conf
+...
+umask 077
+cat > "$NEW" <<-EOF
+ctrl_interface=/var/run/wpa_supplicant
+update_config=1
+EOF
+...
 ```
 
-- **Virgin boot:** the file is created with exactly those two directives, mode `0600`, and zero
-  SSID/PSK/country material. `wpa_supplicant` is then started as
-  `wpa_supplicant -i wlan0 -c /usr/data/nebulaos/wpa_supplicant.conf`.
-- **Every later boot:** the file exists, so the function returns immediately. A saved network is
-  never replaced by the skeleton.
+- **Virgin boot:** the file is created at the new canonical path with exactly those two directives,
+  mode `0600`, and zero SSID/PSK/country material. `wpa_supplicant` is then started as
+  `wpa_supplicant -i wlan0 -c /usr/data/nebulaos/network/wpa_supplicant.conf`.
+- **A device already provisioned before this mission** (old path is a real file, new path absent —
+  case B): the credentials are copied to the new canonical path through a verified atomic
+  copy-then-rename, the old path becomes a compatibility symlink to the new one only after that
+  copy is verified byte-for-byte, and the original is never deleted or modified before that
+  verification succeeds. See `NEBULAOS_PERSISTENT_NAMESPACE.md` for why this cannot be a plain
+  `mv`.
+- **Every later boot** (new path already exists — case A): the migration function returns
+  immediately having changed nothing. A saved network is never replaced by the skeleton.
 
 The daemon is started even with no saved network, deliberately: GuppyScreen's WiFi panel cannot
 scan or configure anything unless `wpa_supplicant` is already running, and a virgin device has no
@@ -137,9 +149,11 @@ Two things must hold for that to work, and both are part of the contract:
    `WpaEvent::init_wpa()` scans it and opens the first non-`p2p` socket it finds, so the interface
    name is discovered rather than hardcoded on either side.
 
-`SAVE_CONFIG` makes `wpa_supplicant` rewrite `/usr/data/nebulaos/wpa_supplicant.conf` in place,
-preserving the file's mode and owner. That is why the seed mode is `0600`: the mode chosen at
-creation is the mode the user's plaintext PSK is stored under permanently.
+`SAVE_CONFIG` makes `wpa_supplicant` rewrite `/usr/data/nebulaos/network/wpa_supplicant.conf` in
+place, preserving the file's mode and owner. That is why the seed mode is `0600`: the mode chosen
+at creation is the mode the user's plaintext PSK is stored under permanently. `wpa_supplicant`
+rewrites the real file at the canonical path; the old-path compatibility symlink (when present)
+keeps resolving to it automatically, since a symlink has no content of its own to go stale.
 
 ## Guarantee 5 — both survive reboot and whole-image update
 
@@ -172,4 +186,11 @@ persistent copy by design. Correcting a shipped default on an existing device is
   `sysinfo_panel.cpp` read the root-level key. The nested copy is inert; the root-level key is
   auto-created with the same value (600), so behavior is correct today. Also Phase B.
 - An already-provisioned device keeps its `wpa_supplicant.conf` at whatever mode it was created
-  with (0644 before this pass). Re-permissioning existing user state was deliberately not done.
+  with (0644 before the Phase 0 pass that set it to 0600 for new devices). Re-permissioning
+  existing user state was deliberately not done.
+- The Phase 1.5 old-to-new WiFi path migration (Guarantee 3) has been verified by code reading and
+  by sandbox simulation of `nebulaos_wifi_migrate()` (`tests/nebulaos-wifi-migrate-tests.sh`), not
+  by a real device carrying genuine prior credentials through an actual boot. Hardware
+  verification of exactly this — existing WiFi/SSH surviving a migration boot — is step 8 of
+  `_project/missions/2026-08-phase0-phase1-integration-closeout.md`'s morning hardware procedure,
+  extended by this mission's own hardware procedure in its mission report.
