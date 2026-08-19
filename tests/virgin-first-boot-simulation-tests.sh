@@ -145,8 +145,22 @@ EOF
 	# test_printer_cfg_config_validation.py does against the source file -
 	# proving the seeding pipeline didn't corrupt/truncate/mangle
 	# anything on the way from source to a provisioned device.
+	# Phase 1.5 persistent-namespace mission: [prtouch_v2]/[z_compensate]
+	# moved out of printer.cfg into the immutable, image-owned
+	# /etc/nebulaos/klipper/prtouch.cfg, included by absolute path. They
+	# no longer travel through the virgin-seed pipeline at all (only
+	# printer.cfg does) - which is itself the point of this mission (an
+	# A/B slot switch restores them from the rootfs, not from anything
+	# seeded) - so the meaningful thing left to prove here is that the
+	# PROVISIONED printer.cfg, combined with the tracked immutable
+	# includes, resolves to values real PRTouchV2/ZCompensate code
+	# accepts. Concatenated from the tracked overlay source rather than a
+	# real /etc/nebulaos/ (which needs root to stage - see
+	# tests/klipper-config-load-smoke-tests.py for that full, root-requiring
+	# proof); this offline test only needs the real section content, not a
+	# real absolute-include resolution.
 	provisioned_cfg="$NEBULAOS_ROOT/printer_data/config/printer.cfg"
-	if PYTHONPATH="$REPO_ROOT" python3 - "$provisioned_cfg" <<'PYEOF'
+	if PYTHONPATH="$REPO_ROOT" python3 - "$provisioned_cfg" "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/prtouch.cfg" <<'PYEOF'
 import configparser, sys
 sys.path.insert(0, ".")
 from klippy_extras import prtouch_test_support as fake
@@ -160,7 +174,10 @@ def real_section(text, section):
     parser.read_string(text[start:nxt if nxt != -1 else len(text)])
     return dict(parser[section])
 
-text = open(sys.argv[1]).read()
+provisioned_text = open(sys.argv[1]).read()
+if "[include /etc/nebulaos/klipper/prtouch.cfg]" not in provisioned_text:
+    raise SystemExit("provisioned printer.cfg does not include prtouch.cfg - virgin seed produced an unexpected shape")
+text = provisioned_text + "\n" + open(sys.argv[2]).read()
 prtouch_values = real_section(text, "prtouch_v2")
 printer, mcu, pins, _ = fake.build_environment(prtouch_v2_values=prtouch_values)
 prtouch_config = fake.make_prtouch_v2_config(printer, pins, prtouch_values)
