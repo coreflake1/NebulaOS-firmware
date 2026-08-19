@@ -116,6 +116,55 @@ sensor_type: nebulaos_temperature_mcu
 EOF
 }
 
+# Real device found live (Phase 1.5 hardware qualification, 2026-08-19): a
+# device provisioned before [nebulaos_compat] was introduced (Virgin-Baseline
+# Fix + Rebuild mission, 2026-08-08) but which already carries [tmcstatus]
+# and [nebulaos_version] as real, inline sections - this project's own
+# authorship markers from that earlier generation.
+write_pre_compat_monolithic_fixture() {
+	out="$1"
+	cat > "$out" <<'EOF'
+# NebulaOS Ender-3 V3 KE - old monolithic printer.cfg fixture, from BEFORE
+# [nebulaos_compat] existed (representative of a real device found live
+# still on this exact shape 11 days after that section was introduced).
+[tmcstatus]
+
+[nebulaos_version]
+
+[mcu]
+serial: /dev/ttyS1
+baud: 230400
+
+[printer]
+kinematics: cartesian
+max_velocity: 500
+
+[stepper_x]
+step_pin: PC2
+dir_pin: !PB9
+enable_pin: !PC3
+
+[extruder]
+heater_pin: PA1
+sensor_type: EPCOS 100K B57560G104F
+
+[temperature_sensor mcu_temp]
+sensor_type: temperature_mcu
+
+[include GuppyScreen/guppy_cmd.cfg]
+[include camera-quality.cfg]
+
+[include simpleaf/homing.cfg]
+[include simpleaf/useful_macros.cfg]
+[include simpleaf/fan_control.cfg]
+[include simpleaf/client.cfg]
+[include simpleaf/start_end.cfg]
+[include simpleaf/Line_Purge.cfg]
+[include simpleaf/Smart_Park.cfg]
+[include simpleaf/bltouch_macro.cfg]
+EOF
+}
+
 # =========================================================================
 # CASE A - clean known-old monolithic printer.cfg, no SAVE_CONFIG, no
 # extra user content. Must migrate, back up first, backup matches the
@@ -314,6 +363,64 @@ if require_stage "case F"; then
 fi
 
 # =========================================================================
+# CASE G - a device provisioned before [nebulaos_compat] existed at all
+# (real shape found live, Phase 1.5 hardware qualification, 2026-08-19):
+# [tmcstatus] and [nebulaos_version] are present as real sections, but
+# [nebulaos_compat] is not. Must still be recognized and migrated - this is
+# exactly the case the broadened known_shape check exists for.
+# =========================================================================
+
+if require_stage "case G"; then
+	tG="$WORK/caseG"; mkdir -p "$tG/config" "$tG/system"
+	write_pre_compat_monolithic_fixture "$tG/config/printer.cfg"
+	cp "$tG/config/printer.cfg" "$tG/original.cfg"
+	logG="$WORK/caseG.log"
+	run_fn "$tG/config" "$tG/system" migrate_printer_cfg "$logG"
+
+	backupG=$(find "$tG/system/migration-backups/printer-cfg-migration" -maxdepth 1 -type f -name 'printer.cfg.pre-migration.*' 2>/dev/null | head -1)
+	if [ -n "$backupG" ] && cmp -s "$backupG" "$tG/original.cfg"; then
+		pass "case G: a pre-nebulaos_compat device is backed up first, backup matches the original exactly"
+	else
+		fail "case G: backup missing or does not match the original ($(cat "$logG"))"
+	fi
+
+	if grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tG/config/printer.cfg" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/machine.cfg]' "$tG/config/printer.cfg" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/prtouch.cfg]' "$tG/config/printer.cfg"; then
+		pass "case G: pre-nebulaos_compat device migrates to the new split includes just like a post-nebulaos_compat one"
+	else
+		fail "case G: pre-nebulaos_compat device did not migrate to the new includes"
+	fi
+
+	if [ "$(rc_of "$logG")" = "0" ]; then
+		pass "case G: migrate_printer_cfg reports success for a pre-nebulaos_compat device"
+	else
+		fail "case G: migrate_printer_cfg reported failure for a pre-nebulaos_compat device ($(cat "$logG"))"
+	fi
+fi
+
+# =========================================================================
+# CASE H - only ONE of [tmcstatus]/[nebulaos_version] present (neither
+# [nebulaos_compat] nor the full pair). Must still be refused - the pair is
+# required together, not treated as independently sufficient.
+# =========================================================================
+
+tH="$WORK/caseH"; mkdir -p "$tH/config" "$tH/system"
+write_pre_compat_monolithic_fixture "$tH/config/printer.cfg"
+# Remove the [nebulaos_version] section header, leaving only [tmcstatus].
+sed '/^\[nebulaos_version\]$/d' "$tH/config/printer.cfg" > "$tH/config/printer.cfg.new"
+mv "$tH/config/printer.cfg.new" "$tH/config/printer.cfg"
+cp "$tH/config/printer.cfg" "$tH/original.cfg"
+logH="$WORK/caseH.log"
+run_fn "$tH/config" "$tH/system" migrate_printer_cfg "$logH"
+
+if cmp -s "$tH/config/printer.cfg" "$tH/original.cfg" && [ "$(rc_of "$logH")" != "0" ]; then
+	pass "case H: only one of [tmcstatus]/[nebulaos_version] present is still refused, not treated as a known shape"
+else
+	fail "case H: a config with only one of the two markers was incorrectly migrated ($(cat "$logH"))"
+fi
+
+# =========================================================================
 # migrate_moonraker_pin_include() - tested separately, does not depend on
 # the new_seed staging above at all.
 # =========================================================================
@@ -392,6 +499,133 @@ if cmp -s "$tM3/moonraker.conf" "$tM3/original.conf" && [ "$(rc_of "$logM3")" = 
 	pass "moonraker pin include: a custom moonraker.conf with neither line is a no-op, not an error"
 else
 	fail "moonraker pin include: a custom moonraker.conf with neither line was modified or reported failure ($(cat "$logM3"))"
+fi
+
+# --- sub-case 4 (CASE C): real historical shape found live - no include of --
+# --- any kind, just [update_manager klipper]/channel: dev directly --------
+
+tM4="$WORK/moon4"; mkdir -p "$tM4"
+cat > "$tM4/moonraker.conf" <<'EOF'
+[server]
+host: 0.0.0.0
+port: 7125
+
+[file_manager]
+enable_object_processing: True
+
+[machine]
+provider: systemd_cli
+
+[update_manager]
+channel: dev
+refresh_interval: 168
+
+[update_manager klipper]
+channel: dev
+
+[update_manager moonraker]
+channel: dev
+
+[update_manager mainsail]
+channel: stable
+repo: mainsail-crew/mainsail
+path: ~/mainsail
+
+[authorization]
+trusted_clients:
+ 127.0.0.1
+ 10.0.0.0/8
+EOF
+cp "$tM4/moonraker.conf" "$tM4/original.conf"
+logM4="$WORK/moon4.log"
+run_fn "$tM4" "$WORK/moon4-system" migrate_moonraker_pin_include "$logM4"
+
+if grep -qxF '[include /etc/nebulaos/moonraker/klipper-pin.conf]' "$tM4/moonraker.conf"; then
+	pass "case C: legacy no-include layout gets the qualified include inserted"
+else
+	fail "case C: qualified include was not inserted ($(cat "$logM4"))"
+fi
+if ! grep -qxF '[update_manager klipper]' "$tM4/moonraker.conf"; then
+	pass "case C: the legacy [update_manager klipper] section is removed"
+else
+	fail "case C: the legacy [update_manager klipper] section survived the migration"
+fi
+if grep -qxF '[update_manager moonraker]' "$tM4/moonraker.conf" \
+	&& grep -qxF '[update_manager mainsail]' "$tM4/moonraker.conf" \
+	&& grep -qxF '[update_manager]' "$tM4/moonraker.conf" \
+	&& grep -qxF '[authorization]' "$tM4/moonraker.conf" \
+	&& grep -qxF '[machine]' "$tM4/moonraker.conf" \
+	&& grep -qxF 'repo: mainsail-crew/mainsail' "$tM4/moonraker.conf"; then
+	pass "case C: unrelated sections ([update_manager moonraker], [update_manager mainsail], [update_manager], [machine], [authorization]) are preserved byte-for-byte, including their own options"
+else
+	fail "case C: an unrelated section or option was lost during migration"
+fi
+inc_count_m4=$(grep -cxF '[include /etc/nebulaos/moonraker/klipper-pin.conf]' "$tM4/moonraker.conf")
+if [ "$inc_count_m4" = "1" ]; then
+	pass "case C: the effective closure contains the qualified include exactly once"
+else
+	fail "case C: the qualified include appears $inc_count_m4 times, expected exactly 1"
+fi
+if [ "$(rc_of "$logM4")" = "0" ]; then
+	pass "case C: migrate_moonraker_pin_include reports success"
+else
+	fail "case C: migrate_moonraker_pin_include reported failure ($(cat "$logM4"))"
+fi
+backupM4=$(find "$WORK/moon4-system/migration-backups/moonraker-conf-migration" -maxdepth 1 -type f -name 'moonraker.conf.pre-migration.*' 2>/dev/null | head -1)
+if [ -n "$backupM4" ] && cmp -s "$backupM4" "$tM4/original.conf"; then
+	pass "case C: original moonraker.conf backed up first, backup matches exactly"
+else
+	fail "case C: backup missing or does not match the original"
+fi
+
+# --- sub-case 4b: second boot on the now-migrated file is a true no-op ----
+
+logM4b="$WORK/moon4b.log"
+snapshotM4="$tM4/after-first-migration.conf"
+cp "$tM4/moonraker.conf" "$snapshotM4"
+run_fn "$tM4" "$WORK/moon4-system" migrate_moonraker_pin_include "$logM4b"
+if cmp -s "$tM4/moonraker.conf" "$snapshotM4" && [ "$(rc_of "$logM4b")" = "0" ]; then
+	pass "case C: second boot (already migrated) is a true no-op"
+else
+	fail "case C: second boot was not idempotent ($(cat "$logM4b"))"
+fi
+
+# --- sub-case 5 (CASE D): a legacy section with unexpected content must ----
+# --- be refused, not guessed at --------------------------------------------
+
+tM5="$WORK/moon5"; mkdir -p "$tM5"
+cat > "$tM5/moonraker.conf" <<'EOF'
+[server]
+host: 0.0.0.0
+port: 7125
+
+[update_manager klipper]
+channel: dev
+pinned_commit: 0123456789abcdef0123456789abcdef01234567
+
+[authorization]
+trusted_clients:
+ 127.0.0.1
+EOF
+cp "$tM5/moonraker.conf" "$tM5/original.conf"
+logM5="$WORK/moon5.log"
+run_fn "$tM5" "$WORK/moon5-system" migrate_moonraker_pin_include "$logM5"
+
+if cmp -s "$tM5/moonraker.conf" "$tM5/original.conf"; then
+	pass "case D: a legacy section with unexpected content (a user's own pinned_commit) is left completely unchanged"
+else
+	fail "case D: a legacy section with unexpected content was modified despite not matching the known narrow shape"
+fi
+refusedM5=$(find "$WORK/moon5-system/migration-backups/moonraker-conf-migration-refused" -maxdepth 1 -type f 2>/dev/null | head -1)
+if [ -n "$refusedM5" ] && cmp -s "$refusedM5" "$tM5/original.conf"; then
+	pass "case D: a backup was written to the refused-migration directory, matching the original"
+else
+	fail "case D: no matching backup found in the refused-migration directory ($(cat "$logM5"))"
+fi
+if [ "$(rc_of "$logM5")" != "0" ]; then
+	pass "case D: migrate_moonraker_pin_include reports failure for unrecognized legacy content"
+else
+	fail "case D: migrate_moonraker_pin_include reported success for unrecognized legacy content"
 fi
 
 echo ""
