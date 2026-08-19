@@ -152,6 +152,14 @@ set -- "$ENGINE" run --rm \
 	-e HOME=/tmp \
 	-e NEBULAOS_REPO_ROOT="$NEBULAOS_REPO_ROOT" \
 	-v "$SCRIPT_DIR:$NEBULAOS_REPO_ROOT"
+# Phase 1.5 closure mission (2026-08-19): forwarded from the host
+# environment so `NEBULAOS_REQUIRE_CLEAN_TREE=1 ./build.sh` actually reaches
+# 05-final-build.sh's existing opt-in gate - previously unreachable through
+# this entrypoint at all, since nothing passed it into the container. Unset
+# by default, so ordinary iterative builds are unaffected.
+if [ -n "${NEBULAOS_REQUIRE_CLEAN_TREE:-}" ]; then
+	set -- "$@" -e "NEBULAOS_REQUIRE_CLEAN_TREE=$NEBULAOS_REQUIRE_CLEAN_TREE"
+fi
 if [ -n "$HOST_GIT_COMMON_DIR" ]; then
 	set -- "$@" -v "$HOST_GIT_COMMON_DIR:$HOST_GIT_COMMON_DIR:ro"
 fi
