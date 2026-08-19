@@ -55,21 +55,36 @@ running the old pair.
 
 ### Moving the qualified pin
 
-The pins live in `printer_data/config/nebulaos/klipper-pin.conf`, which is
-**IMAGE OWNED** and kept in sync by `S04nebulaos-migrate`.
+**Phase 1.5 persistent-namespace mission (2026-08-18):** the pins moved from
+`printer_data/config/nebulaos/klipper-pin.conf` (persistent, kept in sync by
+`S04nebulaos-migrate` on every boot) to `/etc/nebulaos/moonraker/
+klipper-pin.conf` — **SLOT/IMAGE OWNED**, on the read-only rootfs. This
+closes a real gap the old location had: `/usr/data` is shared, not
+duplicated, across the A/B boot slots, so a device rolled back to an older
+slot would still read the newer slot's persistent copy of the pin. Living
+on the rootfs means an A/B switch or rollback restores the matching pins
+automatically, simply because the rootfs changed — no sync step, no
+migration-direction dependency. See `NEBULAOS_PERSISTENT_NAMESPACE.md` for
+the full reasoning.
+
 `moonraker.conf` is USER OWNED and carries only a stable
-`[include nebulaos/*.conf]` line, so advancing a pin is an ordinary
-firmware update rather than a request that every user hand-edit a config
-file. The full procedure for moving a pin — compose, run the extension
-suite, re-verify `required_klipper_symbols`, rebuild `c_helper.so`,
-**re-qualify on real hardware**, then move both pins and the manifest
-together — is in
+`[include /etc/nebulaos/moonraker/klipper-pin.conf]` line (an ordinary
+absolute-path include — confirmed against Moonraker's real pinned
+`confighelper.py`, which treats a leading `/` as absolute by design), so
+advancing a pin is an ordinary firmware update rather than a request that
+every user hand-edit a config file. The full procedure for moving a pin —
+compose, run the extension suite, re-verify `required_klipper_symbols`,
+rebuild `c_helper.so`, **re-qualify on real hardware**, then move both pins
+and the manifest together — is in
 `NebulaOS-klipper-extensions/docs/COMPATIBILITY.md`.
 
-**Known limitation:** a device provisioned before that include line existed
-will not have it, because nothing may rewrite a user-owned file. Such a
-device keeps working but ignores the managed pins until the line is added
-by hand.
+**Known limitation:** a device provisioned before this exact include line
+existed will not have it, because nothing may rewrite a user-owned file
+except the one bounded, idempotent migration in
+`NEBULAOS_PRINTER_CFG_MIGRATION.md`, which does cover this exact line
+(recognizing the old relative-glob form and rewriting only that one line).
+A device whose `moonraker.conf` predates even that old form keeps working
+but ignores the managed pins until the line is added by hand.
 
 ### A firmware update overrides a separately-updated Klipper
 
