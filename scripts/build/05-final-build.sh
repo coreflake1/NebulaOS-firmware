@@ -82,8 +82,24 @@ fi
 # NEBULAOS_REQUIRE_CLEAN_TREE=1 (set only for the final Phase 13 production
 # build), default off so today's iterative builds are unaffected.
 if [ "${NEBULAOS_REQUIRE_CLEAN_TREE:-0}" = "1" ]; then
-	if [ -n "$(cd "$REPO_ROOT" && git status --porcelain)" ]; then
-		echo "FATAL: NEBULAOS_REQUIRE_CLEAN_TREE=1 but the main repository has uncommitted changes - a release build must come from a clean, committed tree" >&2
+	# Phase 1.5 closure mission (2026-08-19): the FIRST real exercise of
+	# this gate (previously unreachable through build.sh at all - see that
+	# script's own history) found it trips on artifacts/guppyscreen-mips/{
+	# guppyscreen,guppybeep} - tracked binaries that stage 04
+	# (cross-compile-app-stack.sh) deterministically rewrites on every
+	# build, BEFORE this gate ever runs, as this project's own already-
+	# established convention of committing build-proof artifacts (see the
+	# Phase 0+1 integration closeout's own note on
+	# artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config
+	# being "a regenerated tracked artifact... rewrites on every build").
+	# Not a source change and not evidence of an in-progress, uncommitted
+	# edit - excluding it here is the same narrow, named pathspec-exclusion
+	# pattern 06-verify.sh already uses for klippy/chelper/c_helper.so.
+	# Nothing else is excluded; any other uncommitted change still fails
+	# this gate.
+	if [ -n "$(cd "$REPO_ROOT" && git status --porcelain -- . ":!artifacts/guppyscreen-mips/")" ]; then
+		echo "FATAL: NEBULAOS_REQUIRE_CLEAN_TREE=1 but the main repository has uncommitted changes outside the known, deterministically-regenerated artifacts/guppyscreen-mips/ path - a release build must come from a clean, committed tree" >&2
+		echo "$(cd "$REPO_ROOT" && git status --porcelain -- . ":!artifacts/guppyscreen-mips/")" >&2
 		exit 1
 	fi
 fi
