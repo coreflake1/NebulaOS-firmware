@@ -33,7 +33,19 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_DIR = REPO_ROOT / "scripts/build/overlay/opt/printer_data/config"
 MOONRAKER_CONF = CONFIG_DIR / "moonraker.conf"
 PRINTER_CFG = CONFIG_DIR / "printer.cfg"
-MANAGED_DIR = CONFIG_DIR / "nebulaos"
+# Phase 1.5 persistent-namespace mission (2026-08): the managed-pin island
+# used to live at printer_data/config/nebulaos/ (a PERSISTENT, synced
+# directory) - that directory no longer exists in source. The pin now
+# ships as a single IMAGE OWNED file at /etc/nebulaos/moonraker/
+# klipper-pin.conf, which lands in the tracked overlay at this path.
+MANAGED_DIR = REPO_ROOT / "scripts/build/overlay/etc/nebulaos/moonraker"
+# Where an absolute /etc/nebulaos/... include resolves against when there
+# is no live rootfs to read from - mirrors exactly how
+# scripts/build/04-cross-compile-app-stack.sh's own overlay-copy step
+# places overlay/X at /X in the shipped image (1:1), and the same
+# convention scripts/build/lib/validate-frontend-controls.sh's own
+# overlay_root argument uses.
+OVERLAY_ROOT = REPO_ROOT / "scripts/build/overlay"
 
 KLIPPER_PIN = "fe4eb8650bd7de4c2100a14eaf09b0965c430e29"
 EXTENSIONS_PIN = "a3f9cbfb0e63b1e07e92958edaa4e05afff0d305"
@@ -78,12 +90,23 @@ def find_moonraker_source():
     return None
 
 
-def parse_like_moonraker(path, visited=None):
+def parse_like_moonraker(path, visited=None, overlay_root=None):
     """Mirror ConfigHelper._parse_file's include handling closely enough to be
     meaningful: includes are globbed RELATIVE TO THE INCLUDING FILE's parent,
     an empty glob is a hard error, included sections are not themselves added
     to the parser, and a section repeated within ONE file is an error while
-    the same section appearing in two different files is not."""
+    the same section appearing in two different files is not.
+
+    Phase 1.5 persistent-namespace mission (2026-08): also mirrors
+    confighelper.py's real absolute-include handling (verified directly
+    against the pinned source, moonraker/confighelper.py's _parse_file:
+    `if inc_path[0] == "/": new_path = pathlib.Path(inc_path).resolve();
+    paths = sorted(new_path.parent.glob(new_path.name))` - a real,
+    intentional feature, not a workaround). There is no live rootfs to
+    resolve against here, so an absolute include is resolved against
+    `overlay_root` instead (scripts/build/overlay/X -> /X in the shipped
+    image, 1:1 - the same convention scripts/build/lib/
+    validate-frontend-controls.sh's own overlay_root argument uses)."""
     visited = visited if visited is not None else []
     path = path.resolve()
     if path in visited:
@@ -104,14 +127,23 @@ def parse_like_moonraker(path, visited=None):
             inc = m.group(1)[8:].strip()
             if not inc:
                 raise ValueError(f"invalid include directive: [{m.group(1)}]")
-            paths = sorted(path.parent.glob(inc))
+            if inc[0] == "/":
+                if overlay_root is None:
+                    raise ValueError(
+                        f"absolute include directive [{m.group(1)}] but no "
+                        "overlay_root was given to resolve it against"
+                    )
+                new_path = (overlay_root / inc.lstrip("/")).resolve()
+                paths = sorted(new_path.parent.glob(new_path.name))
+            else:
+                paths = sorted(path.parent.glob(inc))
             if not paths:
                 raise ValueError(f"no files matching include directive [{m.group(1)}]")
             if buffer:
                 parser.read_string("\n".join(buffer), str(path))
                 buffer = []
             for p in paths:
-                sub = parse_like_moonraker(p, visited)
+                sub = parse_like_moonraker(p, visited, overlay_root)
                 for sect in sub.sections():
                     if not parser.has_section(sect):
                         parser.add_section(sect)
@@ -131,23 +163,28 @@ def parse_like_moonraker(path, visited=None):
 # --- 1. the config parses at all, the way Moonraker would parse it ---------
 
 try:
-    cfg = parse_like_moonraker(MOONRAKER_CONF)
+    cfg = parse_like_moonraker(MOONRAKER_CONF, overlay_root=OVERLAY_ROOT)
     ok("moonraker.conf parses cleanly under Moonraker's own include/comment rules")
 except Exception as exc:  # noqa: BLE001 - the failure text is the useful part
     bad(f"moonraker.conf does not parse: {exc}")
     cfg = configparser.ConfigParser()
 
+MANAGED_INCLUDE_LINE = "[include /etc/nebulaos/moonraker/klipper-pin.conf]"
 check(
-    MOONRAKER_CONF.read_text(encoding="utf-8").count("[include nebulaos/") == 1,
-    "moonraker.conf carries exactly one managed include directive",
-    "expected exactly one [include nebulaos/...] line in moonraker.conf",
+    MOONRAKER_CONF.read_text(encoding="utf-8").count(MANAGED_INCLUDE_LINE) == 1,
+    "moonraker.conf carries exactly one managed include directive, as an "
+    "absolute path (Phase 1.5 persistent-namespace mission: an A/B rollback "
+    "shares /usr/data across slots, so the old relative-glob form pointing "
+    "into persistent storage could read the wrong slot's copy - an absolute "
+    "include into the read-only, slot-owned rootfs cannot)",
+    f"expected exactly one '{MANAGED_INCLUDE_LINE}' line in moonraker.conf",
 )
 
 managed = sorted(MANAGED_DIR.glob("*.conf"))
 check(
     bool(managed),
-    f"the managed include glob resolves to real shipped files ({', '.join(p.name for p in managed)})",
-    "the [include nebulaos/*.conf] glob matches nothing - Moonraker raises "
+    f"the managed include's absolute target resolves to real shipped files ({', '.join(p.name for p in managed)})",
+    f"{MANAGED_INCLUDE_LINE} resolves to nothing under {MANAGED_DIR} - Moonraker raises "
     "'No files matching include directive' and refuses to start",
 )
 
@@ -231,39 +268,102 @@ check(
 )
 
 # --- 5. printer.cfg ordering and sensor type ------------------------------
+#
+# Phase 1.5 persistent-namespace mission (2026-08): [nebulaos_compat] and
+# [temperature_sensor mcu_temp] no longer live directly in printer.cfg -
+# they moved into the IMMUTABLE, slot-owned /etc/nebulaos/klipper/
+# platform.cfg and machine.cfg, included with ABSOLUTE paths. Checking
+# printer.cfg's raw text alone would silently stop testing anything real
+# once those sections moved out of it, so this builds the RESOLVED include
+# closure first (printer.cfg + its /etc/nebulaos/klipper/*.cfg includes,
+# resolved against OVERLAY_ROOT for the absolute ones - same resolution
+# rule as scripts/build/lib/validate-frontend-controls.sh's own
+# overlay_root argument and confighelper.py's absolute-include handling
+# mirrored above) and checks the closure, not the unresolved entrypoint.
 
-printer = PRINTER_CFG.read_text(encoding="utf-8")
-sections = [m.group(1) for m in re.finditer(r"(?m)^\[([^]]+)\]", printer)]
+
+def resolve_printer_cfg_closure(entry, overlay_root, visited=None):
+    """Concatenates entry's own content followed by each of its includes'
+    resolved content, in include order - deliberately the same simple
+    "closure is a concatenation, not a flattened single config" shape
+    scripts/build/lib/validate-frontend-controls.sh's
+    frontend_controls_resolve_closure produces, so section-order checks
+    below reflect the same real load order Klipper itself would see."""
+    visited = visited if visited is not None else set()
+    entry = entry.resolve()
+    if entry in visited:
+        raise ValueError(f"recursive include: {entry}")
+    visited.add(entry)
+    text = entry.read_text(encoding="utf-8")
+    chunks = [text]
+    for m in re.finditer(r"(?m)^\[include ([^\]]+)\]", text):
+        inc = m.group(1).strip()
+        if inc.startswith("/etc/nebulaos/"):
+            target = (overlay_root / inc.lstrip("/")).resolve()
+        elif inc.startswith("/"):
+            raise ValueError(
+                f"absolute include outside /etc/nebulaos/: {inc} - this project's "
+                "build never expects a config to reach outside its own overlay"
+            )
+        else:
+            target = entry.parent / inc
+        if not target.is_file():
+            raise ValueError(f"include target does not exist: {inc} -> {target}")
+        chunks.append(resolve_printer_cfg_closure(target, overlay_root, visited))
+    return "\n".join(chunks)
+
+
+try:
+    printer_closure = resolve_printer_cfg_closure(PRINTER_CFG, OVERLAY_ROOT)
+    ok("printer.cfg's /etc/nebulaos/klipper/*.cfg include closure resolves cleanly")
+except Exception as exc:  # noqa: BLE001 - the failure text is the useful part
+    bad(f"printer.cfg's include closure did not resolve: {exc}")
+    printer_closure = ""
+
+raw_printer = PRINTER_CFG.read_text(encoding="utf-8")
+top_includes = [m.group(1) for m in re.finditer(r"(?m)^\[include ([^\]]+)\]", raw_printer)]
 check(
-    "nebulaos_compat" in sections,
-    "printer.cfg declares the [nebulaos_compat] preflight section",
-    "printer.cfg is missing [nebulaos_compat]",
+    bool(top_includes) and top_includes[0] == "/etc/nebulaos/klipper/platform.cfg",
+    "printer.cfg's FIRST include is platform.cfg, so [nebulaos_compat] loads before "
+    "any other NebulaOS-provided module (machine.cfg's nebulaos_temperature_mcu "
+    "sensor, GuppyScreen/guppy_cmd.cfg's gcode_shell_command sections)",
+    f"printer.cfg's first include is {top_includes[0] if top_includes else 'MISSING'}, "
+    "expected /etc/nebulaos/klipper/platform.cfg first",
 )
-if "nebulaos_compat" in sections:
-    idx = sections.index("nebulaos_compat")
-    later = sections[idx + 1:]
-    check(
-        all(not s.startswith("include ") for s in sections[:idx]),
-        "[nebulaos_compat] comes before every [include], so the gate runs before any "
-        "included file can load a NebulaOS-managed module",
-        "an [include] precedes [nebulaos_compat] - guppy_cmd.cfg declares "
-        "[gcode_shell_command] sections, which are NebulaOS-managed modules",
-    )
+
+# Real (non-[include ...] pseudo-) sections only, in the closure's own load
+# order - this is what actually determines Klipper's load-time behavior.
+closure_sections = [
+    m.group(1)
+    for m in re.finditer(r"(?m)^\[([^]]+)\]", printer_closure)
+    if not m.group(1).startswith("include ")
+]
+check(
+    "nebulaos_compat" in closure_sections,
+    "the resolved closure declares the [nebulaos_compat] preflight section "
+    "(from /etc/nebulaos/klipper/platform.cfg)",
+    "the resolved closure is missing [nebulaos_compat]",
+)
+if "nebulaos_compat" in closure_sections:
+    idx = closure_sections.index("nebulaos_compat")
+    later = closure_sections[idx + 1:]
     check(
         any(s.startswith("temperature_sensor ") for s in later),
-        "[nebulaos_compat] precedes every [temperature_sensor] section",
-        "a [temperature_sensor] section precedes [nebulaos_compat]",
+        "[nebulaos_compat] precedes every [temperature_sensor] section in the "
+        "resolved closure",
+        "a [temperature_sensor] section precedes [nebulaos_compat] in the "
+        "resolved closure",
     )
 check(
-    "sensor_type: nebulaos_temperature_mcu" in printer,
-    "printer.cfg uses the NebulaOS GD32 sensor type",
-    "printer.cfg still uses sensor_type: temperature_mcu, which official Klipper "
-    "raises config_error on for GD32 - Klippy would refuse to start",
+    "sensor_type: nebulaos_temperature_mcu" in printer_closure,
+    "the resolved closure uses the NebulaOS GD32 sensor type",
+    "the resolved closure still uses sensor_type: temperature_mcu, which official "
+    "Klipper raises config_error on for GD32 - Klippy would refuse to start",
 )
 check(
-    not re.search(r"(?m)^sensor_type:\s*temperature_mcu\s*$", printer),
-    "no bare 'sensor_type: temperature_mcu' remains anywhere in printer.cfg",
-    "a bare sensor_type: temperature_mcu is still present",
+    not re.search(r"(?m)^sensor_type:\s*temperature_mcu\s*$", printer_closure),
+    "no bare 'sensor_type: temperature_mcu' remains anywhere in the resolved closure",
+    "a bare sensor_type: temperature_mcu is still present in the resolved closure",
 )
 
 # --- 6. every option is checked against Moonraker's REAL pinned source ----

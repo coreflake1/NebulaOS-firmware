@@ -71,6 +71,22 @@ MANIFEST = REPO_ROOT / "manifests/dependencies.conf"
 CONFIG_DIR = REPO_ROOT / "scripts/build/overlay/opt/printer_data/config"
 COMPOSE_SH = REPO_ROOT / "scripts/build/overlay/etc/nebulaos-klipper-compose.sh"
 CHELPER_SH = REPO_ROOT / "scripts/build/overlay/etc/nebulaos-chelper-preflight.sh"
+# Phase 1.5 persistent-namespace mission (2026-08): printer.cfg now includes
+# these three files with ABSOLUTE paths. Klipper's own configfile.py
+# resolves an absolute include_spec completely unchanged
+# (os.path.join(dirname, include_spec) returns include_spec itself when
+# it's absolute - confirmed directly against the pinned source) - so REAL
+# Klipper, loading this file as a real subprocess, opens the LITERAL path
+# /etc/nebulaos/klipper/... on THIS PROCESS's real filesystem root. There is
+# no override and nothing here builds a chroot, so the only honest way to
+# exercise the real parser is to stage the tracked overlay source at that
+# literal path for the duration of this test, exactly mirroring how the
+# real squashfs lays it out at /etc/nebulaos/klipper/ - see
+# stage_etc_nebulaos_klipper() below for the (narrow, reversible, refuses-
+# rather-than-guesses) staging logic.
+NEBULAOS_ETC_KLIPPER_SRC = REPO_ROOT / "scripts/build/overlay/etc/nebulaos/klipper"
+NEBULAOS_ETC_KLIPPER = pathlib.Path("/etc/nebulaos/klipper")
+NEBULAOS_ETC_KLIPPER_MARKER = NEBULAOS_ETC_KLIPPER / ".nebulaos-smoke-test-owned"
 
 PASS = FAIL = SKIP = 0
 
@@ -173,6 +189,63 @@ sys.stdout.write("@@JSON@@" + json.dumps(result))
 sys.stdout.flush()
 os._exit(0)
 '''
+
+
+def stage_etc_nebulaos_klipper():
+    """Stages the real, tracked scripts/build/overlay/etc/nebulaos/klipper/
+    *.cfg files at the literal /etc/nebulaos/klipper/ path so a real Klipper
+    subprocess loading the shipped printer.cfg can actually open its
+    absolute includes - see the module-level comment above
+    NEBULAOS_ETC_KLIPPER for why this is the only honest way to do that.
+
+    Returns a zero-argument cleanup callable on success. Returns None (with
+    a SKIP already recorded, naming exactly what could not be done and why)
+    when this cannot be done SAFELY:
+      - no permission to create /etc/nebulaos/klipper (the ordinary case on
+        an unprivileged dev host - run this inside the pinned nebulaos-build
+        container, or as root, to exercise the real load; see
+        docs/NEBULAOS_BUILD_ENVIRONMENT.md);
+      - /etc/nebulaos/klipper already exists and was NOT created by a prior
+        run of this same test (refuses to touch it rather than guess - it
+        may be real device/system content, same policy as
+        nebulaos-wifi-migrate.sh's own Case-E handling of an unexpected
+        filesystem object it did not create).
+    A leftover directory a previous run of THIS test left behind (identified
+    by its own marker file, e.g. after being killed mid-run) is safe to
+    reuse/overwrite - it is never anything but a copy of tracked source.
+    """
+    if NEBULAOS_ETC_KLIPPER.exists() and not NEBULAOS_ETC_KLIPPER_MARKER.is_file():
+        skip(f"{NEBULAOS_ETC_KLIPPER} already exists and was not created by this "
+             "test - refusing to touch it (it may be real device/system content); "
+             "the printer.cfg config-load assertions below did not run")
+        return None
+    try:
+        NEBULAOS_ETC_KLIPPER.mkdir(parents=True, exist_ok=True)
+        NEBULAOS_ETC_KLIPPER_MARKER.write_text(
+            "created by tests/klipper-config-load-smoke-tests.py - safe to delete\n"
+        )
+        for f in sorted(NEBULAOS_ETC_KLIPPER_SRC.glob("*.cfg")):
+            shutil.copy2(f, NEBULAOS_ETC_KLIPPER / f.name)
+    except PermissionError as exc:
+        skip(f"no permission to stage the real /etc/nebulaos/klipper/*.cfg files "
+             f"({exc}) - Klipper's own configfile.py resolves printer.cfg's "
+             "absolute includes directly against this process's real "
+             "filesystem root, so exercising the real config load needs root "
+             "(e.g. run inside the pinned nebulaos-build container - see "
+             "docs/NEBULAOS_BUILD_ENVIRONMENT.md); the printer.cfg config-load "
+             "assertions below did not run")
+        return None
+    ok(f"staged the real tracked {NEBULAOS_ETC_KLIPPER_SRC.name}/*.cfg files at "
+       f"{NEBULAOS_ETC_KLIPPER} for the real Klipper parser to open")
+
+    def cleanup():
+        shutil.rmtree(NEBULAOS_ETC_KLIPPER, ignore_errors=True)
+        try:
+            NEBULAOS_ETC_KLIPPER.parent.rmdir()  # only succeeds if now empty
+        except OSError:
+            pass
+
+    return cleanup
 
 
 def load_config(py, klipper_dir, config_file, child_path):
@@ -310,6 +383,24 @@ def run_suite(tmp, klipper_src, ext_src, klipper_pin, ext_pin, py):
 
     shutil.copytree(CONFIG_DIR, cfgdir)
     printer_cfg = cfgdir / "printer.cfg"
+
+    # Every load_config() call below needs the real /etc/nebulaos/klipper/
+    # *.cfg files staged on THIS process's real filesystem root - see
+    # stage_etc_nebulaos_klipper()'s own docstring for why. If that cannot
+    # be done safely (typically: no root on this host), the assertions that
+    # actually load the config are skipped rather than faked, but the
+    # already-verified compose/chelper work above still counts.
+    etc_cleanup = stage_etc_nebulaos_klipper()
+    if etc_cleanup is None:
+        return
+    try:
+        run_config_load_checks(py, kdir, edir, printer_cfg, child_path, klipper_pin)
+    finally:
+        etc_cleanup()
+
+
+def run_config_load_checks(py, kdir, edir, printer_cfg, child_path, klipper_pin):
+    verdict_path = kdir / ".nebulaos-chelper-verdict.json"
 
     # ---- the positive case ----------------------------------------------
     res = load_config(py, kdir, printer_cfg, child_path)
