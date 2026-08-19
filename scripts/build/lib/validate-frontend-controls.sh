@@ -19,13 +19,29 @@
 # GuppyScreen/ nesting), never glob patterns, so this is a deliberately
 # simple closure builder, not a general Klipper config parser.
 #
-# Usage: frontend_controls_resolve_closure <config_src_dir> <entry_file> <closure_out_file>
+# Phase 1.5 persistent-namespace mission (2026-08): printer.cfg now also
+# uses ABSOLUTE-path includes for the immutable, slot-owned config under
+# /etc/nebulaos/klipper/ - a real Klipper feature (configfile.py's
+# os.path.join(dirname, include_spec) returns include_spec unchanged when
+# it's absolute), not a workaround. At real device boot time that resolves
+# against the live rootfs. At BUILD time there is no live rootfs yet - only
+# the tracked overlay source tree this same build is assembling one from -
+# so an absolute include starting with /etc/nebulaos/ is resolved against
+# the 4th (optional) <overlay_root> argument instead of <config_src_dir>,
+# mirroring exactly how scripts/build/04-cross-compile-app-stack.sh's own
+# overlay-copy step will place it at runtime (scripts/build/overlay/X ->
+# /X in the image, 1:1). Any other absolute path is left unresolved and
+# reported FATAL - this project's build never expects a config to reach
+# outside its own overlay tree.
+#
+# Usage: frontend_controls_resolve_closure <config_src_dir> <entry_file> <closure_out_file> [overlay_root]
 frontend_controls_resolve_closure() {
 	fc_src="$1"
 	fc_entry="$2"
 	fc_out="$3"
+	fc_overlay_root="${4:-}"
 	: > "$fc_out"
-	_frontend_controls_resolve_one "$fc_src" "$fc_entry" "$fc_out"
+	_frontend_controls_resolve_one "$fc_src" "$fc_entry" "$fc_out" "$fc_overlay_root"
 }
 
 _frontend_controls_resolve_one() {
@@ -45,23 +61,66 @@ _frontend_controls_resolve_one() {
 	local rc_src="$1"
 	local rc_rel="$2"
 	local rc_out="$3"
-	local rc_f="$rc_src/$rc_rel"
+	local rc_overlay_root="$4"
+	local rc_f
+	case "$rc_rel" in
+		/etc/nebulaos/*)
+			if [ -z "$rc_overlay_root" ]; then
+				echo "FATAL: $rc_rel is an absolute include but no overlay_root was given to resolve it against" >&2
+				return 1
+			fi
+			rc_f="$rc_overlay_root$rc_rel"
+			;;
+		/*)
+			echo "FATAL: $rc_rel is an absolute include outside the recognized /etc/nebulaos/ image-owned tree - refusing to read outside the build's own overlay" >&2
+			return 1
+			;;
+		*)
+			rc_f="$rc_src/$rc_rel"
+			;;
+	esac
 	if [ ! -f "$rc_f" ]; then
-		echo "FATAL: $rc_rel is referenced (directly or via include) but does not exist under $rc_src" >&2
+		echo "FATAL: $rc_rel is referenced (directly or via include) but does not exist ($rc_f)" >&2
 		return 1
 	fi
 	cat "$rc_f" >> "$rc_out"
-	local rc_dirname=$(dirname "$rc_rel")
 	local rc_status=0
-	grep -o "^\[include [^]]*\]" "$rc_f" 2>/dev/null | sed -e "s/^\[include[[:space:]]*//" -e "s/[[:space:]]*\]\$//" | while read -r rc_inc; do
-		local rc_inc_rel
-		if [ "$rc_dirname" = "." ]; then
-			rc_inc_rel="$rc_inc"
-		else
-			rc_inc_rel="$rc_dirname/$rc_inc"
-		fi
-		_frontend_controls_resolve_one "$rc_src" "$rc_inc_rel" "$rc_out" || exit 1
-	done || rc_status=1
+	case "$rc_rel" in
+		/*)
+			# Absolute includes never carry a relative "nested dir" - any
+			# further include lines inside them must themselves be plain
+			# filenames relative to the SAME absolute directory, or another
+			# absolute /etc/nebulaos/ path. today's /etc/nebulaos/klipper/
+			# files include nothing themselves, so this path is exercised by
+			# the test suite's synthetic fixtures, not real content yet.
+			local rc_abs_dirname=$(dirname "$rc_rel")
+			grep -o "^\[include [^]]*\]" "$rc_f" 2>/dev/null | sed -e "s/^\[include[[:space:]]*//" -e "s/[[:space:]]*\]\$//" | while read -r rc_inc; do
+				local rc_inc_rel
+				case "$rc_inc" in
+					/*) rc_inc_rel="$rc_inc" ;;
+					*) rc_inc_rel="$rc_abs_dirname/$rc_inc" ;;
+				esac
+				_frontend_controls_resolve_one "$rc_src" "$rc_inc_rel" "$rc_out" "$rc_overlay_root" || exit 1
+			done || rc_status=1
+			;;
+		*)
+			local rc_dirname=$(dirname "$rc_rel")
+			grep -o "^\[include [^]]*\]" "$rc_f" 2>/dev/null | sed -e "s/^\[include[[:space:]]*//" -e "s/[[:space:]]*\]\$//" | while read -r rc_inc; do
+				local rc_inc_rel
+				case "$rc_inc" in
+					/*) rc_inc_rel="$rc_inc" ;;
+					*)
+						if [ "$rc_dirname" = "." ]; then
+							rc_inc_rel="$rc_inc"
+						else
+							rc_inc_rel="$rc_dirname/$rc_inc"
+						fi
+						;;
+				esac
+				_frontend_controls_resolve_one "$rc_src" "$rc_inc_rel" "$rc_out" "$rc_overlay_root" || exit 1
+			done || rc_status=1
+			;;
+	esac
 	return "$rc_status"
 }
 
