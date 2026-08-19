@@ -782,6 +782,59 @@ reconcile_klipper_stack_on_boot() {
 	rm -f "$LOCKDIR/$STACK_NAME.lock"
 }
 
+# Real device found live (Phase 1.5 hardware qualification, 2026-08-19): the
+# Scenario 6 crash reconcile_klipper_stack_on_boot() exists for was never
+# generalized past the klipper_stack pair. A device's supervisor died
+# mid-validate_component("klipper") on 2026-08-09 (back when klipper was
+# still in the generic per-component loop, before the no-fork migration
+# removed it), leaving updates/locks/klipper.lock + state=validating behind.
+# Nothing ever reconciled it - poll_once's per-component loop treats
+# state="validating" as "already in flight, skip" forever (there is no
+# boot-time check equivalent to this one) - so it stayed stuck for 10 days
+# and untold boots. Independently, S04nebulaos-migrate's own maintenance
+# gate refuses to run migration on an already-seeded device with any lock
+# present (by design - see that file's own header), and
+# S05nebulaos-activate's validate_app() stays on the immutable copy for the
+# same lock, on every boot. Nothing anywhere ever surfaced why.
+#
+# Generalizes the exact same fix: any component whose state file still says
+# "validating" when a NEW supervisor process starts up did not survive its
+# own transaction - nothing on disk it was validating has been proven - so
+# it is safe to treat as interrupted and let normal delta detection
+# re-validate from scratch, exactly like Scenario 6 already does for the
+# pair. Covers moonraker and mainsail today, and any legacy single-component
+# lock (like the klipper.lock above) a device may still be carrying from
+# before the no-fork migration. $STACK_NAME is excluded - reconcile_klipper_
+# stack_on_boot already owns it and runs separately (see loop() below).
+#
+# Phase 1.5 hardware closure (2026-08-19): iterates state.json files, NOT
+# lock files - nebulaos-maintenance-gate.sh's own
+# _maintenance_gate_reconcile_validating_locks() now runs earlier in boot
+# (from S04, before this supervisor daemon even starts) and may have already
+# removed the lock file for exactly this reason, to unblock S04/S05 on the
+# same boot. If this function only looked for a lock file, a device the gate
+# already cleared would have NO lock left for this loop to find, state.json
+# would stay "validating" forever, and poll_once()'s own delta-detection
+# would then treat that as "already in flight, skip" permanently - the exact
+# same silent-forever-stuck failure this function exists to close, just
+# moved to a different trigger. Keying off state.json instead makes this
+# correct regardless of which one (this function, or the gate) runs first,
+# or whether the lock file is present at all.
+reconcile_stale_component_locks_on_boot() {
+	[ -d "$NEBULAOS_ROOT/updates" ] || return 0
+	for state_file_path in "$NEBULAOS_ROOT"/updates/*/state.json; do
+		[ -e "$state_file_path" ] || continue
+		name=$(basename "$(dirname "$state_file_path")")
+		[ "$name" = "$STACK_NAME" ] && continue
+		state=$(read_state_field "$name" state)
+		[ "$state" = "validating" ] || continue
+		log "$name: found an interrupted transaction from a previous supervisor process (state=validating) - nothing on disk has been validated, so it will be re-validated from scratch"
+		known_good=$(read_state_field "$name" known_good_commit)
+		write_state "$name" "$known_good" "$known_good" "interrupted" "supervisor_restarted_mid_transaction"
+		rm -f "$LOCKDIR/$name.lock"
+	done
+}
+
 poll_klipper_stack_once() {
 	kdir="$NEBULAOS_ROOT/apps/$KLIPPER_APP"
 	edir="$NEBULAOS_ROOT/apps/$EXTENSIONS_APP"
@@ -1016,6 +1069,7 @@ poll_once() {
 loop() {
 	log "starting (poll interval ${POLL_INTERVAL}s)"
 	cleanup_stale_staging
+	reconcile_stale_component_locks_on_boot
 	reconcile_klipper_stack_on_boot
 	while true; do
 		poll_once
