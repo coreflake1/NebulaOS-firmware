@@ -15,8 +15,16 @@ import shutil
 import sys
 import tarfile
 
-PRINTER_DATA_DIR = "/usr/data/printer_data"
-BACKUP_DIR = "/usr/data/guppyify-backup"
+# Phase 1.5 persistent-namespace mission (2026-08): PRINTER_DATA_DIR routed
+# through the bind-mount path instead of the ambiguous top-level
+# /usr/data/printer_data (that path may not even exist, or may belong to
+# stock, depending on the device's own history - /opt/printer_data always
+# resolves to NebulaOS's own persistent copy). BACKUP_DIR moved off a bare,
+# unnamespaced /usr/data/guppyify-backup into NebulaOS's own namespace -
+# the exact directory NebulaOS-firmware's S02nebulaos-namespace already
+# creates for this purpose.
+PRINTER_DATA_DIR = "/opt/printer_data"
+BACKUP_DIR = "/usr/data/nebulaos/backups/printer_config"
 
 TARGETS = {
     "klipper": ("config", os.path.join(BACKUP_DIR, "backup_config.tar.gz")),
