@@ -102,9 +102,17 @@ MANIFEST="$ARTIFACT_DIR/build-manifest.txt"
 git_field() {
 	# name, vendor-relative-path (empty = repo root)
 	fname="$1"; fdir="$REPO_ROOT${2:+/$2}"
-	if [ -d "$fdir/.git" ]; then
-		echo "${fname}=$(cd "$fdir" && git rev-parse HEAD)"
-		echo "${fname}_dirty=$(cd "$fdir" && [ -z "$(git status --porcelain)" ] && echo no || echo yes)"
+	# Phase 1.5 persistent-namespace mission (2026-08): `-d "$fdir/.git"`
+	# alone is only true for a normal clone - a git WORKTREE's .git is a
+	# FILE (a "gitdir: <path>" pointer), so this used to silently report
+	# git_commit_main=absent for every worktree build, real commit or not.
+	# `git -C ... rev-parse HEAD` works for both shapes identically (and
+	# now resolves correctly inside the container for a worktree too, see
+	# build.sh's git-common-dir mount) - `-e "$fdir/.git"` (true for a file
+	# OR a directory) is the correct existence check here, not `-d`.
+	if [ -e "$fdir/.git" ] && git -C "$fdir" rev-parse HEAD >/dev/null 2>&1; then
+		echo "${fname}=$(git -C "$fdir" rev-parse HEAD)"
+		echo "${fname}_dirty=$([ -z "$(git -C "$fdir" status --porcelain)" ] && echo no || echo yes)"
 	else
 		echo "${fname}=absent"
 		echo "${fname}_dirty=unknown"

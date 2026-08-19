@@ -91,6 +91,47 @@ echo "== build.sh: pulling pinned build environment $IMAGE_REF (engine: $ENGINE)
 # mounted at, so anything the container writes under NEBULAOS_REPO_ROOT
 # still lands at $SCRIPT_DIR on the host.
 NEBULAOS_REPO_ROOT=/workspace/NebulaOS-firmware
+
+# Phase 1.5 persistent-namespace mission (2026-08): 06-verify.sh (and any
+# other in-container script that shells out to `git` against the checkout)
+# used to hard-fail with "fatal: not a git repository" whenever $SCRIPT_DIR
+# is a git WORKTREE rather than a normal clone. A worktree's own .git is a
+# FILE containing "gitdir: <host-absolute-path>/.git/worktrees/<name>" -
+# that path is real on the host but does not exist inside the container,
+# so any git command that walks up from $NEBULAOS_REPO_ROOT to resolve it
+# fails outright, aborting the whole build under `set -e`.
+#
+# Fix: if that's a worktree, bind-mount the real git-common-dir it points
+# at, AT THE SAME HOST-ABSOLUTE PATH, read-only, so the pointer resolves
+# inside the container exactly like it does on the host. This is the one
+# deliberate exception to the "container never sees a host path" rule
+# above (Final Closure mission, Phase C) - that rule exists because a host
+# path embedded in $NEBULAOS_REPO_ROOT can leak into compiled artifacts
+# (Kconfig strings, debug info); a read-only mount used only for `git`
+# metadata queries never touches compiled output, so it does not
+# reintroduce that problem. A normal clone (.git is a real directory) needs
+# no extra mount - it already resolves entirely inside $SCRIPT_DIR, which
+# is already bind-mounted above.
+HOST_GIT_COMMON_DIR=""
+if [ -f "$SCRIPT_DIR/.git" ]; then
+	# git rev-parse --git-common-dir is not guaranteed absolute across git
+	# versions/invocation contexts - cd into whatever it prints and take
+	# `pwd` to get a real, canonical absolute path regardless.
+	GIT_COMMON_DIR_RAW=$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null || true)
+	if [ -n "$GIT_COMMON_DIR_RAW" ]; then
+		# GIT_COMMON_DIR_RAW may be relative - if so it is relative to
+		# $SCRIPT_DIR (where the git command ran via -C), not to this
+		# script's own cwd, so resolve it from there explicitly.
+		HOST_GIT_COMMON_DIR=$(cd "$SCRIPT_DIR" && cd "$GIT_COMMON_DIR_RAW" 2>/dev/null && pwd)
+	fi
+	if [ -n "$HOST_GIT_COMMON_DIR" ] && [ -d "$HOST_GIT_COMMON_DIR" ]; then
+		echo "== build.sh: $SCRIPT_DIR is a git worktree - bind-mounting its common git dir ($HOST_GIT_COMMON_DIR) read-only so in-container git commands can resolve it =="
+	else
+		HOST_GIT_COMMON_DIR=""
+		echo "== build.sh: WARNING: $SCRIPT_DIR looks like a git worktree but its common git dir could not be resolved on the host - in-container git metadata (git_commit_main, 06-verify.sh's pin checks) will report 'absent'/fail rather than guess ==" >&2
+	fi
+fi
+
 # -e HOME=/tmp: an arbitrary host UID has no /etc/passwd entry inside the
 # container, so HOME defaults to "/" (not writable by this UID) - confirmed
 # live this would break any tool that wants to write a cache/config file
@@ -103,11 +144,16 @@ NEBULAOS_REPO_ROOT=/workspace/NebulaOS-firmware
 # without `-t` would still block waiting on stdin in a backgrounded/piped
 # invocation with none available - dropping both is correct for a batch
 # build, not just a workaround.
-exec "$ENGINE" run --rm \
+# POSIX sh has no arrays, so the optional extra mount is built as
+# positional parameters instead of a conditionally-included string (unsafe
+# with paths containing spaces).
+set -- "$ENGINE" run --rm \
 	--user "$(id -u):$(id -g)" \
 	-e HOME=/tmp \
 	-e NEBULAOS_REPO_ROOT="$NEBULAOS_REPO_ROOT" \
-	-v "$SCRIPT_DIR:$NEBULAOS_REPO_ROOT" \
-	-w "$NEBULAOS_REPO_ROOT" \
-	"$IMAGE_REF" \
-	"sh scripts/build/build-qualified-baseline.sh"
+	-v "$SCRIPT_DIR:$NEBULAOS_REPO_ROOT"
+if [ -n "$HOST_GIT_COMMON_DIR" ]; then
+	set -- "$@" -v "$HOST_GIT_COMMON_DIR:$HOST_GIT_COMMON_DIR:ro"
+fi
+set -- "$@" -w "$NEBULAOS_REPO_ROOT" "$IMAGE_REF" "sh scripts/build/build-qualified-baseline.sh"
+exec "$@"
