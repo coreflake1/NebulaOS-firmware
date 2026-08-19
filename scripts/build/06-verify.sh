@@ -701,8 +701,22 @@ check_seed_archive() {
 	fi
 	rm -rf /tmp/seed-check /tmp/seed-check.tar
 }
-check_seed_archive /opt/nebulaos-seeds/klipper.tar.gz master "https://github.com/coreflake1/NebulaOS-klipper.git" "klipper"
+# Phase 1.5 closure mission (2026-08-19): the klipper check below used to
+# hardcode the RETIRED forks origin, coreflake1/NebulaOS-klipper.git - a
+# stale leftover from before the Phase 1 no-fork migration, producing a
+# permanent false MISS against a genuinely correct image (the seeded
+# checkout is deliberately official, unmodified Klipper3d/klipper now).
+# Sourced from $KLIPPER_REPO (manifests/dependencies.conf, already loaded
+# above) instead of a second hardcoded copy, so this can never drift from
+# the pin actually used again - and so reintroducing the retired fork
+# origin in the manifest would make this check genuinely, correctly FAIL,
+# which a hardcoded string could never do.
+check_seed_archive /opt/nebulaos-seeds/klipper.tar.gz "$KLIPPER_BRANCH" "$KLIPPER_REPO" "klipper"
 check_seed_archive /opt/nebulaos-seeds/moonraker.tar.gz master "https://github.com/Arksine/moonraker.git" "moonraker"
+# Phase 1.5 closure mission (2026-08-19): the extensions seed archive origin
+# was never checked here at all - added to close the same class of gap,
+# using the same manifest-sourced pattern.
+check_seed_archive /opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz "$KLIPPER_EXTENSIONS_BRANCH" "$KLIPPER_EXTENSIONS_REPO" "nebulaos-klipper-extensions"
 
 # Real bug this catches if regressed: the c_helper.so committed inside
 # vendor/klippers own git history (an upstream binary) is incompatible
