@@ -97,6 +97,7 @@ LOCKDIR="${LOCKDIR:-$NEBULAOS_ROOT/updates/locks}"
 MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
 MOONRAKER_ENV="$NEBULAOS_ROOT/envs/moonraker"
 MOONRAKER_ENV_BACKUP="$NEBULAOS_ROOT/backups/moonraker/last-known-good-env"
+GENERATION_FILE="${GENERATION_FILE:-$NEBULAOS_ROOT/system/app-generation.json}"
 POLL_INTERVAL="${POLL_INTERVAL:-20}"
 STABILIZE_SAMPLES="${STABILIZE_SAMPLES:-6}"
 STABILIZE_INTERVAL="${STABILIZE_INTERVAL:-10}"
@@ -125,6 +126,23 @@ PAIR_SETTLE_SECONDS="${PAIR_SETTLE_SECONDS:-15}"
 
 log() {
 	echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) nebulaos-update-supervisor: $1"
+}
+
+# Phase 1.5 generation-scoped rollback: the update supervisor's own
+# known-good records must belong to the SAME image generation as the
+# currently running system. A new image flash changes the factory pins
+# (different migration_version), and the old persistent known-good commits
+# are from a different generation's factory stack — rolling back to them
+# would produce a pair the new image was never qualified against.
+#
+# This reads the same app-generation.json that S04nebulaos-migrate writes
+# after every successful migration. If the file does not exist (first boot
+# before S04 has run), returns empty — callers treat empty as "no
+# generation recorded yet", which is correct: the bootstrap path will
+# record the current generation once it runs.
+current_generation() {
+	[ -f "$GENERATION_FILE" ] || return 0
+	sed -n 's/.*"migration_version": *"\([^"]*\)".*/\1/p' "$GENERATION_FILE" | head -1
 }
 
 # $1=component name -> echoes: path|init_script|opt_path|pidfile
@@ -167,9 +185,11 @@ write_state() {
 	f=$(state_file "$1")
 	tmp="$f.tmp.$$"
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	gen=$(current_generation)
 	{
 		echo "{"
 		echo "  \"component\": \"$1\","
+		echo "  \"generation_id\": \"${gen:-unknown}\","
 		echo "  \"known_good_commit\": \"$2\","
 		echo "  \"last_seen_commit\": \"$3\","
 		echo "  \"state\": \"$4\","
@@ -535,6 +555,19 @@ poll_mainsail_once() {
 	[ -z "$current" ] && return 0
 
 	last_seen=$(read_state_field "$name" last_seen_commit)
+
+	# Phase 1.5 generation-scoped rollback (mainsail).
+	gen=$(current_generation)
+	if [ -n "$last_seen" ] && [ -n "$gen" ]; then
+		state_gen=$(read_state_field "$name" generation_id)
+		if [ -n "$state_gen" ] && [ "$state_gen" != "$gen" ]; then
+			log "$name: cross-generation state detected (state generation '$state_gen', current '$gen') - discarding old known-good and re-bootstrapping"
+			write_state "$name" "$current" "$current" "healthy" "cross_generation_rebootstrap:$state_gen"
+			mainsail_snapshot_to_backup
+			return 0
+		fi
+	fi
+
 	if [ -z "$last_seen" ]; then
 		# First observation this boot - bootstrap state and take the first
 		# backup snapshot, matching the moonraker/Klipper-stack bootstrap
@@ -603,9 +636,11 @@ write_stack_state() {
 	mkdir -p "$(dirname "$f")"
 	tmp="$f.tmp.$$"
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	gen=$(current_generation)
 	{
 		echo "{"
 		echo "  \"component\": \"$STACK_NAME\","
+		echo "  \"generation_id\": \"${gen:-unknown}\","
 		echo "  \"members\": [\"$KLIPPER_APP\", \"$EXTENSIONS_APP\"],"
 		echo "  \"known_good_klipper_commit\": \"$1\","
 		echo "  \"known_good_extensions_commit\": \"$2\","
@@ -847,6 +882,22 @@ poll_klipper_stack_once() {
 
 	seen_k=$(read_stack_field last_seen_klipper_commit)
 	seen_e=$(read_stack_field last_seen_extensions_commit)
+
+	# Phase 1.5 generation-scoped rollback: if state exists from a previous
+	# image generation, its known_good pair belongs to that generation's
+	# factory stack and must not override the new generation's own pair.
+	# Discard the old state and re-bootstrap — the current running pair (just
+	# proven at boot by S05/S99) becomes this generation's first known-good.
+	gen=$(current_generation)
+	if [ -n "$seen_k" ] && [ -n "$seen_e" ] && [ -n "$gen" ]; then
+		state_gen=$(read_stack_field generation_id)
+		if [ -n "$state_gen" ] && [ "$state_gen" != "$gen" ]; then
+			log "$STACK_NAME: cross-generation state detected (state generation '$state_gen', current '$gen') - discarding old known-good pair and re-bootstrapping for the new image generation"
+			write_stack_state "$cur_k" "$cur_e" "$cur_k" "$cur_e" "healthy" "cross_generation_rebootstrap:$state_gen"
+			return 0
+		fi
+	fi
+
 	if [ -z "$seen_k" ] || [ -z "$seen_e" ]; then
 		# First observation this boot. Whatever is running now was already
 		# proven at boot - S05nebulaos-activate composed and verified it and
@@ -1021,6 +1072,19 @@ poll_once() {
 		[ -z "$current" ] && continue
 
 		last_seen=$(read_state_field "$name" last_seen_commit)
+
+		# Phase 1.5 generation-scoped rollback (per-component).
+		gen=$(current_generation)
+		if [ -n "$last_seen" ] && [ -n "$gen" ]; then
+			state_gen=$(read_state_field "$name" generation_id)
+			if [ -n "$state_gen" ] && [ "$state_gen" != "$gen" ]; then
+				log "$name: cross-generation state detected (state generation '$state_gen', current '$gen') - discarding old known-good and re-bootstrapping"
+				write_state "$name" "$current" "$current" "healthy" "cross_generation_rebootstrap:$state_gen"
+				[ "$name" = "moonraker" ] && moonraker_snapshot_env
+				continue
+			fi
+		fi
+
 		if [ -z "$last_seen" ]; then
 			# First observation this boot - bootstrap state without
 			# triggering validation. Whatever is running now was already

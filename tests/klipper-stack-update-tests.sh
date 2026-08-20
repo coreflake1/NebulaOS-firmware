@@ -478,6 +478,80 @@ else
 	fail "terminal state: factory-fallback was re-attempted"; cat "$WORK/s7b.log"
 fi
 
+# --- cross-generation rollback (Phase 1.5) --------------------------------
+#
+# The exact hardware incident: a device carries state.json from a previous
+# image generation whose known_good_commit points to a DIFFERENT factory
+# stack. A new image is flashed, changing the migration_version. The
+# supervisor must discard the old generation's known_good and bootstrap
+# fresh from the current running pair, not roll back to the old
+# generation's commits.
+
+setup_stack
+old_k=$(khead); old_e=$(ehead)
+
+# Simulate state from a previous generation by writing a generation_id
+# that does not match the current one.
+mkdir -p "$ROOT/system" "$ROOT/updates/klipper-stack"
+echo '{"migration_version": "gen-old-image"}' > "$ROOT/system/app-generation.json"
+cat > "$ROOT/updates/klipper-stack/state.json" <<EOF
+{
+  "component": "klipper-stack",
+  "generation_id": "gen-previous-image",
+  "known_good_klipper_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "known_good_extensions_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "last_seen_klipper_commit": "$old_k",
+  "last_seen_extensions_commit": "$old_e",
+  "state": "healthy",
+  "last_failure_reason": ""
+}
+EOF
+
+reset_logs; set_health ok ok
+sup_gen() {
+	env NEBULAOS_UPDATE_SUPERVISOR_NO_AUTORUN=1 \
+		NEBULAOS_ROOT="$ROOT" LOCKDIR="$LOCKS" \
+		HEALTHCHECK="$WORK/healthcheck.sh" \
+		COMPOSE_LIB="$COMPOSE_LIB" CHELPER_LIB="$CHELPER_LIB" \
+		HEALTH_DIR="$HEALTH_DIR" \
+		GENERATION_FILE="$ROOT/system/app-generation.json" \
+		KLIPPER_FIXTURE="$KDIR" EXTENSIONS_FIXTURE="$EDIR" \
+		MOONRAKER_URL="http://127.0.0.1:9" \
+		RESTART_GRACE_PERIOD=0 STABILIZE_SAMPLES=1 STABILIZE_INTERVAL=0 \
+		READY_POLL_TRIES=1 READY_POLL_INTERVAL=0 PAIR_SETTLE_SECONDS=0 \
+		sh -c "PATH=\"$WORK:\$PATH\"; . '$SUPERVISOR'; \
+			component_info() { \
+				case \"\$1\" in \
+					klipper) echo '$KDIR|$WORK/init.d/S55klipper|$WORK/optklipper|' ;; \
+					nebulaos-klipper-extensions) echo '$EDIR|$WORK/init.d/S55klipper|$WORK/optklipper|' ;; \
+					moonraker) echo '$ROOT/apps/moonraker||$WORK/optmoonraker|' ;; \
+				esac; }; \
+			$*"
+}
+sup_gen poll_klipper_stack_once > "$WORK/gen.log" 2>&1
+
+if [ "$(stack_field known_good_klipper_commit)" = "$old_k" ] && \
+   [ "$(stack_field known_good_extensions_commit)" = "$old_e" ]; then
+	pass "cross-generation: old generation's known_good is DISCARDED - the current running pair becomes the new known-good"
+else
+	fail "cross-generation: old generation's known_good was NOT discarded (kg_k=$(stack_field known_good_klipper_commit) want=$old_k)"; cat "$WORK/gen.log"
+fi
+if [ "$(stack_field generation_id)" = "gen-old-image" ]; then
+	pass "cross-generation: the new state records the CURRENT generation_id"
+else
+	fail "cross-generation: generation_id not updated (got=$(stack_field generation_id) want=gen-old-image)"; cat "$WORK/gen.log"
+fi
+if [ "$(stack_field state)" = "healthy" ]; then
+	pass "cross-generation: state is healthy after re-bootstrap (not rolled-back or factory-fallback)"
+else
+	fail "cross-generation: state is not healthy (got=$(stack_field state))"
+fi
+if grep -q 'cross-generation state detected' "$WORK/gen.log"; then
+	pass "cross-generation: the log explicitly names the cross-generation detection"
+else
+	fail "cross-generation: no cross-generation log message"; cat "$WORK/gen.log"
+fi
+
 # --- summary --------------------------------------------------------------
 
 echo
