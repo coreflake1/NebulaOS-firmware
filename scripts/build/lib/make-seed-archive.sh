@@ -159,23 +159,29 @@ make_seed_archive() {
 	mkdir -p "$tmp/.git/refs/remotes/origin"
 	git -C "$tmp" rev-parse HEAD > "$tmp/.git/refs/remotes/origin/$active_branch"
 
-	# The build's clone_pinned leaves TWO entries in .git/shallow:
-	# the original clone HEAD and the pinned commit fetch. After
-	# Moonraker's first real `git fetch` updates origin/master to
-	# the upstream tip, the ancestor walk from origin/master stops
-	# at the STALE shallow boundary (the original clone point) and
-	# never reaches HEAD (which is behind that boundary). Result:
-	# diverged=true, is_valid=false. Fix: rewrite .git/shallow to
-	# contain ONLY HEAD, then prune the orphaned objects that were
-	# only reachable from the stale entry. With one shallow boundary
-	# at HEAD, the post-fetch ancestor walk goes from origin/master
-	# all the way back to HEAD without hitting a stale boundary.
+	# clone_pinned leaves TWO entries in .git/shallow: the original
+	# clone HEAD and the pinned commit fetch. The stale entry's
+	# commit object references a parent that was never fetched
+	# (beyond the original shallow boundary), so simply removing
+	# the entry from .git/shallow makes git try to traverse past it
+	# into a missing parent — breaking fsck, gc, and merge-base.
+	# Fix: (1) rewrite .git/shallow to HEAD only, (2) clear reflogs
+	# that reference the stale commit, (3) repack with only objects
+	# reachable from current refs to physically remove the orphan.
 	head_sha=$(git -C "$tmp" rev-parse HEAD)
 	if [ -f "$tmp/.git/shallow" ]; then
 		stale_count=$(grep -cv "^$head_sha$" "$tmp/.git/shallow" 2>/dev/null || echo 0)
 		if [ "$stale_count" -gt 0 ]; then
 			echo "$head_sha" > "$tmp/.git/shallow"
-			git -C "$tmp" gc --prune=now --quiet 2>/dev/null || true
+			rm -rf "$tmp/.git/logs"
+			_reachable=$(mktemp)
+			git -C "$tmp" rev-list --objects --all > "$_reachable"
+			_pack_hash=$(git -C "$tmp" pack-objects "$tmp/.git/objects/pack/pack" < "$_reachable")
+			rm -f "$_reachable"
+			for _p in "$tmp"/.git/objects/pack/pack-*.pack; do
+				_bn=$(basename "$_p" .pack)
+				[ "$_bn" != "pack-$_pack_hash" ] && rm -f "$_p" "${_p%.pack}.idx" "${_p%.pack}.rev"
+			done
 		fi
 	fi
 

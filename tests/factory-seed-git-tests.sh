@@ -74,6 +74,27 @@ build_bare_remote() {
 	git -C "$bare" symbolic-ref HEAD "refs/heads/$branch" 2>/dev/null || true
 }
 
+# Simulates clone_pinned's output: a shallow clone at depth 1 whose
+# .git/shallow has TWO entries — HEAD plus a stale orphan whose parent
+# was never fetched.  This is the exact shape that broke fsck and
+# merge-base in production (the stale entry's parent object does not
+# exist in the local store).
+build_dual_shallow_repo() {
+	dir="$1"; src="$2"; branch="$3"
+	rm -rf "$dir"
+	git clone -q --depth 1 --branch "$branch" --single-branch "file://$src" "$dir"
+	head_sha=$(git -C "$dir" rev-parse HEAD)
+	# Fetch one more commit at depth 1 to create a second shallow entry
+	other_sha=$(git -C "$src" rev-list --reverse "$branch" | head -1)
+	if [ "$other_sha" != "$head_sha" ]; then
+		git -C "$dir" fetch -q --depth 1 "file://$src" "$other_sha"
+		# Ensure both entries are in .git/shallow
+		if ! grep -q "$other_sha" "$dir/.git/shallow" 2>/dev/null; then
+			echo "$other_sha" >> "$dir/.git/shallow"
+		fi
+	fi
+}
+
 # A genuinely shallow clone (real .git/shallow boundary, real branch,
 # real commit) of $1 at depth 1 - matches vendor/klipper's actual shape.
 build_shallow_repo() {
@@ -219,6 +240,33 @@ elif [ "$(wc -l < "$M/tracking-check/.git/shallow" | tr -d ' ')" = "1" ] \
 	pass "packaged archive .git/shallow contains only HEAD (no stale clone_pinned entries)"
 else
 	fail ".git/shallow has stale entries beyond HEAD: $(cat "$M/tracking-check/.git/shallow")"
+fi
+
+# Test: dual-shallow repo (clone_pinned shape) is cleaned up properly —
+# the stale orphan commit is physically removed and fsck passes.
+build_real_repo "$M/dual-origin" master ""
+# Add a third commit so HEAD and the first commit are distinct
+echo "three" >> "$M/dual-origin/file.txt"
+git -C "$M/dual-origin" add -A
+git -C "$M/dual-origin" -c user.email=test@localhost -c user.name=Test commit -q -m "third commit"
+build_dual_shallow_repo "$M/dual-src" "$M/dual-origin" master
+dual_shallow_count=$(wc -l < "$M/dual-src/.git/shallow" | tr -d ' ')
+if [ "$dual_shallow_count" -ge 2 ]; then
+	rm -f "$M/dual.tar.gz"
+	if out=$(make_seed_archive "$M/dual-src" master "https://example.invalid/dual.git" "$M/dual.tar.gz" 2>&1) && [ -f "$M/dual.tar.gz" ]; then
+		pass "dual-shallow (clone_pinned shape) repo is packaged successfully"
+		rm -rf "$M/dual-check"; mkdir -p "$M/dual-check"
+		tar -xzf "$M/dual.tar.gz" -C "$M/dual-check"
+		if git -C "$M/dual-check" fsck --no-dangling >/dev/null 2>&1; then
+			pass "dual-shallow packaged archive passes git fsck"
+		else
+			fail "dual-shallow packaged archive fails git fsck: $(git -C "$M/dual-check" fsck --no-dangling 2>&1)"
+		fi
+	else
+		fail "dual-shallow repo was rejected (unexpected): $out"
+	fi
+else
+	fail "test setup: dual-src only has $dual_shallow_count shallow entries (expected >=2)"
 fi
 
 # Test: sparse_exclude keeps the excluded path's real history in
