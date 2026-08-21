@@ -188,6 +188,29 @@ else
 	fail "packaged archive's branch is missing tracking-remote config (branch.master.remote/merge)"
 fi
 
+# Test: the packaged archive contains a remote-tracking ref for
+# origin/$active_branch pointing at HEAD (Phase 1.5 pre-qualification fix,
+# 2026-08-21). Without this, Moonraker's check_diverged() runs
+# `merge-base --is-ancestor HEAD origin/master` on a shallow clone that
+# may have stale shallow boundaries between HEAD and origin/master, causing
+# diverged=true and is_valid=false. Seeding the tracking ref makes the
+# pre-fetch ancestry check trivially succeed.
+rm -rf "$M/tracking-check"; mkdir -p "$M/tracking-check"
+tar -xzf "$M/real.tar.gz" -C "$M/tracking-check"
+tracking_ref=$(cat "$M/tracking-check/.git/refs/remotes/origin/master" 2>/dev/null)
+head_sha=$(git -C "$M/tracking-check" rev-parse HEAD)
+if [ "$tracking_ref" = "$head_sha" ]; then
+	pass "packaged archive has origin/master tracking ref pointing at HEAD"
+else
+	fail "packaged archive's origin/master tracking ref is wrong or missing: got '$tracking_ref', expected '$head_sha'"
+fi
+# Verify this makes the merge-base check pass even without a fetch
+if git -C "$M/tracking-check" merge-base --is-ancestor HEAD origin/master 2>/dev/null; then
+	pass "merge-base --is-ancestor HEAD origin/master succeeds in the packaged archive (no fetch needed)"
+else
+	fail "merge-base --is-ancestor still fails in the packaged archive"
+fi
+
 # Test: sparse_exclude keeps the excluded path's real history in
 # .git/objects (fsck-clean, no synthetic anything) while omitting it from
 # the working tree, and git treats this as intentional sparsity rather
@@ -473,6 +496,97 @@ if git -C "$S/apps/ancestry" merge-base --is-ancestor HEAD origin/master; then
 	pass "end-to-end: seeded HEAD is a real ancestor of origin/master (diverged=false)"
 else
 	fail "end-to-end: seeded HEAD is NOT an ancestor of origin/master (would reproduce diverged=true)"
+fi
+
+# --- Part 3: try_venv_seed() (venv archive extraction) -------------------
+# Regression coverage for the BusyBox tar -z bug: try_venv_seed() must use
+# gzip -dc | tar -xo (the same portable pattern seed_git_app uses for app
+# archives), not tar -xzf which BusyBox rejects outright. These tests build
+# real .tar.gz venv seed fixtures with a working bin/python3 and exercise
+# try_venv_seed() through the production script's own code path.
+
+V="$WORK/venv-seed"
+mkdir -p "$V/seeds" "$V/envs"
+
+run_try_venv_seed() {
+	seed_file="$1"; envdir="$2"; smoke_test="$3"
+	SEEDS="$V/seeds" APPS="$S/apps" SYSTEM="$S/system" LOCKDIR="$S/locks" \
+		S04NEBULAOS_FACTORY_SEED_NO_AUTORUN=1 \
+		sh -c '. "$1"; try_venv_seed "$2" "$3" "$4"' -- "$S04_SCRIPT" "$seed_file" "$envdir" "$smoke_test" 2>&1
+}
+
+# Build a minimal venv-like fixture: bin/python3 is a symlink to the host
+# python3, plus a marker file to verify extraction landed correctly.
+build_venv_fixture() {
+	dir="$1"
+	rm -rf "$dir"
+	mkdir -p "$dir/bin" "$dir/lib"
+	ln -s "$(command -v python3)" "$dir/bin/python3"
+	echo "venv-fixture-marker" > "$dir/lib/marker.txt"
+}
+
+# Test: a valid venv seed .tar.gz is extracted and passes its smoke test.
+build_venv_fixture "$V/fixture-ok"
+tar -czf "$V/seeds/ok-venv-seed.tar.gz" -C "$V/fixture-ok" .
+envdir="$V/envs/ok-venv"
+rm -rf "$envdir"
+if out=$(run_try_venv_seed "ok-venv-seed.tar.gz" "$envdir" "import sys"); rc=$?
+	[ "$rc" -eq 0 ] && [ -x "$envdir/bin/python3" ] && [ -f "$envdir/lib/marker.txt" ]; then
+	pass "valid venv seed .tar.gz is extracted and passes smoke test"
+else
+	fail "valid venv seed .tar.gz extraction failed (rc=$rc): $out"
+fi
+
+# Test: a corrupt (non-gzip) venv seed is rejected, no partial state left.
+rm -rf "$V/envs/corrupt-venv"
+echo "not a real gzip file" > "$V/seeds/corrupt-venv-seed.tar.gz"
+envdir="$V/envs/corrupt-venv"
+if out=$(run_try_venv_seed "corrupt-venv-seed.tar.gz" "$envdir" "import sys"); rc=$?
+	[ "$rc" -ne 0 ] && [ ! -d "$envdir" ] && [ ! -d "$envdir.partial" ]; then
+	pass "corrupt venv seed is rejected, no partial state left behind"
+else
+	fail "corrupt venv seed was not correctly rejected (rc=$rc): $out"
+fi
+
+# Test: a missing venv seed returns failure (triggers fallback).
+rm -rf "$V/envs/missing-venv" "$V/seeds/missing-venv-seed.tar.gz"
+envdir="$V/envs/missing-venv"
+if out=$(run_try_venv_seed "missing-venv-seed.tar.gz" "$envdir" "import sys"); rc=$?
+	[ "$rc" -ne 0 ] && [ ! -d "$envdir" ]; then
+	pass "missing venv seed returns failure for fallback"
+else
+	fail "missing venv seed did not return failure (rc=$rc): $out"
+fi
+
+# Test: a valid archive whose smoke test fails is rejected, no partial state.
+build_venv_fixture "$V/fixture-badsmoke"
+tar -czf "$V/seeds/badsmoke-venv-seed.tar.gz" -C "$V/fixture-badsmoke" .
+envdir="$V/envs/badsmoke-venv"
+rm -rf "$envdir"
+if out=$(run_try_venv_seed "badsmoke-venv-seed.tar.gz" "$envdir" "import nonexistent_module_xyzzy"); rc=$?
+	[ "$rc" -ne 0 ] && [ ! -d "$envdir" ] && [ ! -d "$envdir.partial" ]; then
+	pass "venv seed that fails smoke test is rejected, no partial state"
+else
+	fail "venv seed with failing smoke test was not correctly rejected (rc=$rc): $out"
+fi
+
+# Test: extraction uses -o (no-same-owner) - verify the extracted files are
+# owned by the current user, not by the archive creator's UID. This is the
+# same ownership fix that seed_git_app's app archive extraction carries.
+build_venv_fixture "$V/fixture-owner"
+tar -czf "$V/seeds/owner-venv-seed.tar.gz" -C "$V/fixture-owner" .
+envdir="$V/envs/owner-venv"
+rm -rf "$envdir"
+run_try_venv_seed "owner-venv-seed.tar.gz" "$envdir" "import sys" >/dev/null 2>&1
+if [ -d "$envdir" ]; then
+	owner_uid=$(stat -c '%u' "$envdir/lib/marker.txt" 2>/dev/null || stat -f '%u' "$envdir/lib/marker.txt" 2>/dev/null)
+	if [ "$owner_uid" = "$(id -u)" ]; then
+		pass "extracted venv files are owned by the current user (no-same-owner works)"
+	else
+		fail "extracted venv files have uid=$owner_uid, expected $(id -u) - no-same-owner may not be working"
+	fi
+else
+	fail "extraction failed entirely, cannot check ownership"
 fi
 
 echo
