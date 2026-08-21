@@ -265,7 +265,7 @@ try_venv_seed() {
 	[ -f "$seed_path" ] || return 1
 	rm -rf "$envdir.partial"
 	mkdir -p "$envdir.partial"
-	if ! tar -xzf "$seed_path" -C "$envdir.partial" 2>/tmp/venv-seed-extract-error.log; then
+	if ! sh -c "gzip -dc '$seed_path' | tar -xo -C '$envdir.partial'" 2>/tmp/venv-seed-extract-error.log; then
 		log "WARNING: venv seed extraction failed ($seed_path) - see /tmp/venv-seed-extract-error.log - falling back to on-device venv creation"
 		rm -rf "$envdir.partial"
 		return 1

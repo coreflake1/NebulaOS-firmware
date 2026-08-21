@@ -153,6 +153,24 @@ make_seed_archive() {
 	git -C "$tmp" config "branch.$active_branch.remote" origin
 	git -C "$tmp" config "branch.$active_branch.merge" "refs/heads/$active_branch"
 
+	# Phase 1.5 pre-qualification (2026-08-21): seed a remote-tracking
+	# ref so Moonraker's check_diverged() succeeds on first boot. The
+	# build's clone_pinned leaves multiple entries in .git/shallow
+	# (original clone HEAD + pinned commit fetch). On device, Moonraker's
+	# git_deploy does `git merge-base --is-ancestor HEAD origin/master`
+	# AFTER a `git fetch`, but a shallow clone's stale boundary between
+	# HEAD and origin/master can break the ancestor walk, producing
+	# diverged=true and is_valid=false. Creating origin/$active_branch
+	# pointing at HEAD makes the pre-fetch check trivially succeed (HEAD
+	# is its own ancestor), and the first real `git fetch` updates it to
+	# the real remote tip — at which point the ancestry chain from
+	# origin/master back to HEAD is fully fetched and the check works
+	# for real. This is a one-line fix that avoids touching .git/shallow
+	# (removing entries there breaks `git fsck` since the orphaned
+	# objects' parents are still missing).
+	mkdir -p "$tmp/.git/refs/remotes/origin"
+	git -C "$tmp" rev-parse HEAD > "$tmp/.git/refs/remotes/origin/$active_branch"
+
 	# Discard a wrong-architecture klippy/chelper/c_helper.so before
 	# packaging (e.g. a host-recompiled x86 .so left over from a
 	# developer running `make` locally, outside this project's own
