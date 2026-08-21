@@ -153,23 +153,31 @@ make_seed_archive() {
 	git -C "$tmp" config "branch.$active_branch.remote" origin
 	git -C "$tmp" config "branch.$active_branch.merge" "refs/heads/$active_branch"
 
-	# Phase 1.5 pre-qualification (2026-08-21): seed a remote-tracking
-	# ref so Moonraker's check_diverged() succeeds on first boot. The
-	# build's clone_pinned leaves multiple entries in .git/shallow
-	# (original clone HEAD + pinned commit fetch). On device, Moonraker's
-	# git_deploy does `git merge-base --is-ancestor HEAD origin/master`
-	# AFTER a `git fetch`, but a shallow clone's stale boundary between
-	# HEAD and origin/master can break the ancestor walk, producing
-	# diverged=true and is_valid=false. Creating origin/$active_branch
-	# pointing at HEAD makes the pre-fetch check trivially succeed (HEAD
-	# is its own ancestor), and the first real `git fetch` updates it to
-	# the real remote tip — at which point the ancestry chain from
-	# origin/master back to HEAD is fully fetched and the check works
-	# for real. This is a one-line fix that avoids touching .git/shallow
-	# (removing entries there breaks `git fsck` since the orphaned
-	# objects' parents are still missing).
+	# Seed a remote-tracking ref so Moonraker's check_diverged()
+	# succeeds. Without this, no refs/remotes/origin/$branch exists,
+	# and `merge-base --is-ancestor HEAD origin/master` fails.
 	mkdir -p "$tmp/.git/refs/remotes/origin"
 	git -C "$tmp" rev-parse HEAD > "$tmp/.git/refs/remotes/origin/$active_branch"
+
+	# The build's clone_pinned leaves TWO entries in .git/shallow:
+	# the original clone HEAD and the pinned commit fetch. After
+	# Moonraker's first real `git fetch` updates origin/master to
+	# the upstream tip, the ancestor walk from origin/master stops
+	# at the STALE shallow boundary (the original clone point) and
+	# never reaches HEAD (which is behind that boundary). Result:
+	# diverged=true, is_valid=false. Fix: rewrite .git/shallow to
+	# contain ONLY HEAD, then prune the orphaned objects that were
+	# only reachable from the stale entry. With one shallow boundary
+	# at HEAD, the post-fetch ancestor walk goes from origin/master
+	# all the way back to HEAD without hitting a stale boundary.
+	head_sha=$(git -C "$tmp" rev-parse HEAD)
+	if [ -f "$tmp/.git/shallow" ]; then
+		stale_count=$(grep -cv "^$head_sha$" "$tmp/.git/shallow" 2>/dev/null || echo 0)
+		if [ "$stale_count" -gt 0 ]; then
+			echo "$head_sha" > "$tmp/.git/shallow"
+			git -C "$tmp" gc --prune=now --quiet 2>/dev/null || true
+		fi
+	fi
 
 	# Discard a wrong-architecture klippy/chelper/c_helper.so before
 	# packaging (e.g. a host-recompiled x86 .so left over from a

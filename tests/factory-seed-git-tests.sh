@@ -210,6 +210,16 @@ if git -C "$M/tracking-check" merge-base --is-ancestor HEAD origin/master 2>/dev
 else
 	fail "merge-base --is-ancestor still fails in the packaged archive"
 fi
+# Verify .git/shallow contains at most HEAD (no stale clone_pinned entries).
+# Full-history repos have no .git/shallow at all, which is ideal.
+if [ ! -f "$M/tracking-check/.git/shallow" ]; then
+	pass "packaged archive has no .git/shallow (full history, no stale boundaries possible)"
+elif [ "$(wc -l < "$M/tracking-check/.git/shallow" | tr -d ' ')" = "1" ] \
+     && [ "$(cat "$M/tracking-check/.git/shallow")" = "$head_sha" ]; then
+	pass "packaged archive .git/shallow contains only HEAD (no stale clone_pinned entries)"
+else
+	fail ".git/shallow has stale entries beyond HEAD: $(cat "$M/tracking-check/.git/shallow")"
+fi
 
 # Test: sparse_exclude keeps the excluded path's real history in
 # .git/objects (fsck-clean, no synthetic anything) while omitting it from
