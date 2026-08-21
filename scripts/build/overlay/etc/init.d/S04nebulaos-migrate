@@ -20,15 +20,54 @@
 #
 # File-classification model this script relies on (see
 # docs/NEBULAOS_PERSISTENT_LIFECYCLE.md for the full writeup):
-#   IMAGE OWNED  - $APPS/klipper, $APPS/moonraker (git checkouts; entirely
-#                  replaced by this script when the image expects a newer
-#                  version - there is nothing user-authored inside them)
+#   IMAGE OWNED  - $APPS/klipper, $APPS/nebulaos-klipper-extensions,
+#                  $APPS/moonraker (git checkouts; entirely replaced by this
+#                  script when the image expects a newer version - there is
+#                  nothing user-authored inside them)
+#
+# Phase 1 no-fork migration (2026-08-17): apps/nebulaos-klipper-extensions
+# joins that class as an ordinary third component. Two consequences worth
+# stating explicitly rather than leaving to be rediscovered:
+#
+#   1. Klipper and its extensions migrate as ONE PAIR. If either fails, the
+#      generation is not recorded, so the whole migration retries next boot
+#      - the existing per-component-success rule, extended rather than
+#      replaced. A device must never run new Klipper against old extensions
+#      (that is where the c_helper.so staleness and the
+#      register_response -> register_serial_response API rename both land)
+#      or the reverse.
+#
+#   2. Replacing $APPS/klipper wholesale DESTROYS the composed symlinks that
+#      activate the extension modules - they live inside the tree this
+#      script renames away. That is fine and by design, but it makes the
+#      S04 -> S05 ordering load-bearing in a new way: S05nebulaos-activate
+#      rebuilds the composition in the same boot, before Klipper starts.
+#      Covered explicitly by tests/app-migration-tests.sh.
+#
+# A firmware update therefore DOES override a user's separately-updated
+# Klipper or extensions - deliberately, with a full backup under
+# $SYSTEM/migration-backups/, and only when the image's migration_version
+# differs. That is the correct behaviour for an appliance and matches how
+# Klipper and Moonraker have always been treated here. It is documented in
+# docs/NEBULAOS_UPDATE_OWNERSHIP.md rather than hidden, because "I updated
+# Klipper in Mainsail and the firmware update reverted it" reads as a bug
+# to anyone who has not been told.
 #   USER OWNED   - $NEBULAOS_ROOT/printer_data/config (printer.cfg,
 #                  macros, moonraker.conf) - a SEPARATE directory tree
-#                  from $APPS, never touched by this script at all. Safety
-#                  here comes from directory separation, not per-file
-#                  logic: this script never reads or writes
-#                  printer_data/config, full stop.
+#                  from $APPS. Safety here comes from directory separation,
+#                  not per-file logic.
+#                  Phase 1 no-fork migration added a NebulaOS-managed
+#                  island inside this tree (printer_data/config/nebulaos/)
+#                  to hold movable Klipper-stack update pins. Phase 1.5
+#                  RETIRES that island: the pins now live at the
+#                  image-owned, read-only /etc/nebulaos/moonraker/
+#                  klipper-pin.conf instead, which is automatically
+#                  correct for whichever A/B slot is active - see
+#                  migrate_moonraker_pin_include() and
+#                  migrate_printer_cfg() below for the two small,
+#                  idempotent, one-time rewrites this script still performs
+#                  on an existing user-owned moonraker.conf/printer.cfg to
+#                  point them at that new location.
 #   GENERATED    - $NEBULAOS_ROOT/{envs,database,printer_data/{gcodes,
 #                  logs,database}} - regenerated/repopulated naturally by
 #                  the application itself; also untouched here. Venv
@@ -44,6 +83,10 @@ APPS="${APPS:-/usr/data/nebulaos/apps}"
 SYSTEM="${SYSTEM:-/usr/data/nebulaos/system}"
 LOCKDIR="${LOCKDIR:-/usr/data/nebulaos/updates/locks}"
 GENERATION_FILE="$SYSTEM/app-generation.json"
+# The user-owned config tree this script performs its two narrow,
+# idempotent config migrations against. Overridable for tests like every
+# other path here.
+PRINTER_DATA_CONFIG="${PRINTER_DATA_CONFIG:-/usr/data/nebulaos/printer_data/config}"
 BACKUP_ROOT="$SYSTEM/migration-backups"
 # Overridable for tests (points fixtures at the same real, tracked shared
 # gate this script actually ships - see that file's own header).
@@ -143,7 +186,346 @@ reseed_git_app() {
 	return 0
 }
 
+# First-time provisioning of a component this device has never had, used
+# only for the pre-Phase-1 -> Phase-1 upgrade path. Deliberately NOT
+# reseed_git_app: that function's cutover does `mv "$dest" "$BACKUP_DIR/..."`
+# and there is no existing tree to move aside here, so it would fail on a
+# device that is in a perfectly legitimate state. Same verification rules
+# either way - branch, origin, clean tree, no synthetic wrapper commit - so
+# this path is no more trusting than the normal one.
+seed_missing_extensions() {
+	name="nebulaos-klipper-extensions"
+	archive="$SEEDS/$name.tar.gz"
+	dest="$APPS/$name"
+	branch="main"
+	origin="https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
+
+	if [ ! -f "$archive" ]; then
+		log "ERROR: seed archive missing ($archive) - cannot provision $name"
+		return 1
+	fi
+	rm -rf "$dest.migrate-partial"
+	mkdir -p "$dest.migrate-partial"
+	if ! sh -c "gzip -dc '$archive' | tar -xo -C '$dest.migrate-partial'"; then
+		log "ERROR: tar extraction failed for $name"
+		rm -rf "$dest.migrate-partial"
+		return 1
+	fi
+	sync
+	actual_branch=$(git -C "$dest.migrate-partial" symbolic-ref --short HEAD 2>/dev/null)
+	if [ "$actual_branch" != "$branch" ]; then
+		log "ERROR: $name checkout is on branch '$actual_branch', expected '$branch' - rejecting"
+		rm -rf "$dest.migrate-partial"
+		return 1
+	fi
+	actual_origin=$(git -C "$dest.migrate-partial" remote get-url origin 2>/dev/null)
+	if [ "$actual_origin" != "$origin" ]; then
+		log "ERROR: $name checkout has origin '$actual_origin', expected '$origin' - rejecting"
+		rm -rf "$dest.migrate-partial"
+		return 1
+	fi
+	if [ -n "$(git -C "$dest.migrate-partial" status --porcelain 2>/dev/null)" ]; then
+		log "ERROR: $name checkout has an unexpectedly dirty working tree - rejecting"
+		rm -rf "$dest.migrate-partial"
+		return 1
+	fi
+	# $dest may exist as the empty directory S02nebulaos-namespace creates;
+	# `mv src dst` would then nest rather than replace (a real bug this
+	# project has already been bitten by - see S04nebulaos-factory-seed's
+	# own note on it).
+	rm -rf "$dest"
+	mv "$dest.migrate-partial" "$dest"
+	log "$name provisioned successfully (branch $branch, $(git -C "$dest" rev-parse HEAD))"
+	return 0
+}
+
+# Phase 1.5 persistent-namespace mission (2026-08): the Klipper-stack
+# update-pin island this section used to describe
+# (printer_data/config/nebulaos/, synced here from
+# /opt/nebulaos-seeds/printer_data-config/nebulaos/) is RETIRED. The pins
+# now live at the image-owned, read-only /etc/nebulaos/moonraker/
+# klipper-pin.conf, which is correct automatically for whichever slot is
+# active - no persistent-tree sync needed, no "kept in sync by this
+# script" step to run on every boot, and (the actual bug this closes) no
+# more risk of a device rolled back to an older A/B slot still reading a
+# newer slot's persistent copy of the pin. See git history for the
+# retired sync_managed_config_includes() this replaced, and
+# docs/NEBULAOS_PERSISTENT_NAMESPACE.md for the full ownership model.
+#
+# Two things a pre-Phase-1.5 device's persistent tree can still have that
+# this mission must not silently ignore, both handled below, both
+# idempotent, both run unconditionally on every boot (cheap text-file
+# checks, not gated behind a generation bump):
+#
+#   1. moonraker.conf may still carry the OLD relative-glob include line,
+#      `[include nebulaos/*.conf]`, which now resolves to nothing (the
+#      seed directory it pointed at no longer exists) and would make
+#      Moonraker refuse to start ("No files matching include directive").
+#      migrate_moonraker_pin_include() rewrites ONLY that one recognized
+#      line, in place, to the new absolute-path include - the file
+#      remains USER OWNED and every other line is untouched.
+#
+#   2. printer.cfg may still be the old monolithic form (the entire
+#      machine/PRTouch/platform definition inline) rather than the new
+#      small entrypoint that includes /etc/nebulaos/klipper/*.cfg.
+#      migrate_printer_cfg() performs the one-time, bounded migration
+#      documented in docs/NEBULAOS_PRINTER_CFG_MIGRATION.md: back up
+#      first, recognize the known old shape precisely, preserve any
+#      SAVE_CONFIG block and any trailing user content verbatim, and
+#      REFUSE (leaving the original untouched, backed up, and logged)
+#      rather than guess if the file does not match a recognized shape.
+migrate_moonraker_pin_include() {
+	f="$PRINTER_DATA_CONFIG/moonraker.conf"
+	[ -f "$f" ] || return 0
+	grep -qxF '[include /etc/nebulaos/moonraker/klipper-pin.conf]' "$f" && return 0
+
+	# CASE B: the OLD relative-glob include line - rewrite that one line only.
+	if grep -qxF '[include nebulaos/*.conf]' "$f"; then
+		tmp="$f.migrate-tmp.$$"
+		if ! sed 's#^\[include nebulaos/\*\.conf\]$#[include /etc/nebulaos/moonraker/klipper-pin.conf]#' "$f" > "$tmp"; then
+			log "ERROR: could not rewrite moonraker.conf's managed-pin include line"
+			rm -f "$tmp"
+			return 1
+		fi
+		if ! grep -qxF '[include /etc/nebulaos/moonraker/klipper-pin.conf]' "$tmp"; then
+			log "ERROR: moonraker.conf include-line migration did not produce the expected result - leaving the original untouched"
+			rm -f "$tmp"
+			return 1
+		fi
+		mv "$tmp" "$f"
+		log "moonraker.conf: migrated the managed Klipper-stack pin include to /etc/nebulaos/moonraker/klipper-pin.conf"
+		return 0
+	fi
+
+	migrate_moonraker_legacy_sections "$f"
+	return $?
+}
+
+# CASE C/D (Phase 1.5 hardware closure, 2026-08-19): a device that predates
+# even the OLD glob-include mechanism - real device found live carries
+# [update_manager klipper]\nchannel: dev directly in moonraker.conf, with no
+# include of any kind. Left as-is, this means Moonraker compares official
+# Klipper against real upstream master (no pinned_commit at all), reports it
+# as behind, and Mainsail can offer an unrestricted update that silently
+# moves the device off its qualified pin - a real safety issue, not merely
+# cosmetic (see this mission's own "Moonraker qualified update invariant").
+#
+# The ONLY sections this migration is allowed to touch are the two
+# /etc/nebulaos/moonraker/klipper-pin.conf itself defines (see that file's
+# own [update_manager klipper]/[update_manager nebulaos_klipper_extensions]
+# headers) - nothing else. [update_manager moonraker], [update_manager
+# mainsail], and the top-level default [update_manager] section are none of
+# this migration's business and are always left completely untouched
+# (confirmed against real device evidence: the actual golden printer's own
+# legacy moonraker.conf carried [update_manager moonraker] right alongside
+# [update_manager klipper] - only the latter two are managed by the pin
+# file, so only those two are ever candidates for removal here).
+_MIGRATE_MRC_LEGACY_SECTIONS='update_manager klipper
+update_manager nebulaos_klipper_extensions'
+
+# 0 if every occurrence of a legacy-target section in $1 is narrow enough to
+# be recognized as this project's own known shape (only blank lines,
+# comments, and a bare `channel: <value>` option - the shape found live);
+# 1 if a target section exists but contains ANYTHING else this migration
+# does not know is safe to discard (an explicit pinned_commit already set
+# to something else, an unrelated option, etc.) - the caller treats that as
+# CASE D: refuse rather than guess.
+_moonraker_legacy_sections_are_narrow() {
+	awk -v targets="$_MIGRATE_MRC_LEGACY_SECTIONS" '
+		BEGIN {
+			n = split(targets, arr, "\n")
+			for (i = 1; i <= n; i++) is_target["[" arr[i] "]"] = 1
+			bad = 0
+		}
+		/^\[.*\]$/ { in_target = ($0 in is_target); next }
+		in_target && $0 !~ /^[ \t]*(#.*)?$/ && $0 !~ /^[ \t]*channel[ \t]*:/ { bad = 1 }
+		END { exit bad ? 1 : 0 }
+	' "$1"
+}
+
+# True (0) if $1 contains at least one of the legacy-target section headers
+# as a real (non-comment) section - i.e. there is something for CASE C/D to
+# act on at all. A file with none of them is simply not this migration's
+# concern (no include needed, nothing to refuse either).
+_moonraker_has_legacy_target_section() {
+	awk -v targets="$_MIGRATE_MRC_LEGACY_SECTIONS" '
+		BEGIN {
+			n = split(targets, arr, "\n")
+			for (i = 1; i <= n; i++) is_target["[" arr[i] "]"] = 1
+		}
+		($0 in is_target) { found = 1 }
+		END { exit found ? 0 : 1 }
+	' "$1"
+}
+
+migrate_moonraker_legacy_sections() {
+	f="$1"
+
+	_moonraker_has_legacy_target_section "$f" || return 0
+
+	if ! _moonraker_legacy_sections_are_narrow "$f"; then
+		ts=$(date -u +%Y%m%dT%H%M%SZ)
+		mkdir -p "$BACKUP_ROOT/moonraker-conf-migration-refused"
+		cp -a "$f" "$BACKUP_ROOT/moonraker-conf-migration-refused/moonraker.conf.$ts" 2>/dev/null
+		log "ERROR: moonraker.conf has an [update_manager klipper] or [update_manager nebulaos_klipper_extensions] section that does not match the known legacy shape (channel-only) - refusing to guess which parts are NebulaOS-managed and which are the user's own. Backed up to $BACKUP_ROOT/moonraker-conf-migration-refused/moonraker.conf.$ts, LEFT UNTOUCHED. Manual migration required."
+		return 1
+	fi
+
+	ts=$(date -u +%Y%m%dT%H%M%SZ)
+	mkdir -p "$BACKUP_ROOT/moonraker-conf-migration"
+	backup="$BACKUP_ROOT/moonraker-conf-migration/moonraker.conf.pre-migration.$ts"
+	if ! cp -a "$f" "$backup"; then
+		log "ERROR: could not create pre-migration backup of moonraker.conf - refusing to migrate without one"
+		return 1
+	fi
+	if ! cmp -s "$f" "$backup"; then
+		log "ERROR: pre-migration backup of moonraker.conf does not match the original - refusing to proceed"
+		return 1
+	fi
+
+	tmp="$f.migrate-tmp.$$"
+	if ! awk -v targets="$_MIGRATE_MRC_LEGACY_SECTIONS" \
+		-v inc='[include /etc/nebulaos/moonraker/klipper-pin.conf]' '
+		BEGIN {
+			n = split(targets, arr, "\n")
+			for (i = 1; i <= n; i++) is_target["[" arr[i] "]"] = 1
+			inserted = 0
+		}
+		/^\[.*\]$/ {
+			in_target = ($0 in is_target)
+			if (in_target) {
+				if (!inserted) { print inc; print ""; inserted = 1 }
+				next
+			}
+		}
+		in_target { next }
+		{ print }
+		END { if (!inserted) print inc }
+	' "$f" > "$tmp"; then
+		log "ERROR: could not rewrite moonraker.conf's legacy update_manager sections"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	# Validate the resolved config: the new include is present exactly once, and
+	# neither legacy target header survives as a real section any more - the same
+	# basic sanity discipline migrate_printer_cfg() applies to its own rewrite.
+	inc_count=$(grep -cxF '[include /etc/nebulaos/moonraker/klipper-pin.conf]' "$tmp")
+	if [ "$inc_count" -ne 1 ] || grep -qxF '[update_manager klipper]' "$tmp" \
+		|| grep -qxF '[update_manager nebulaos_klipper_extensions]' "$tmp"; then
+		log "ERROR: migrated moonraker.conf failed a basic sanity check - leaving the original untouched (backup at $backup)"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	mv "$tmp" "$f"
+	log "moonraker.conf: replaced legacy [update_manager klipper]/[update_manager nebulaos_klipper_extensions] sections with the qualified /etc/nebulaos/moonraker/klipper-pin.conf include (original backed up at $backup)"
+	return 0
+}
+
+# The one anchor line this mission's own printer.cfg (both the old
+# monolithic shape and the new split entrypoint) has always carried
+# unchanged, in the same relative position - the last of the SimpleAF
+# includes, immediately before any user content and any SAVE_CONFIG
+# block. Used to locate the boundary between "known NebulaOS-authored
+# content" and "everything after it is the user's" without needing a real
+# Klipper config parser.
+_MIGRATE_PCFG_ANCHOR='[include simpleaf/bltouch_macro.cfg]'
+
+migrate_printer_cfg() {
+	f="$PRINTER_DATA_CONFIG/printer.cfg"
+	[ -f "$f" ] || return 0
+
+	# Case D: already migrated - detectable, idempotent, no-op.
+	grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$f" && return 0
+
+	# Only a file that looks like this mission's own known old monolithic
+	# shape is migrated automatically. Recognized by: it does NOT yet have
+	# the new include (checked above), the anchor line appears exactly
+	# once, and it carries this project's own authorship markers - EITHER
+	# [nebulaos_compat] as a real (non-included) section (every generation
+	# from the no-fork migration onward), OR, for a device that predates
+	# that section entirely, [tmcstatus] AND [nebulaos_version] both
+	# present as real sections. Both of those are this project's own
+	# extension modules, defined inline in every generation of this
+	# project's printer.cfg since the Virgin-Baseline Fix + Rebuild mission
+	# (2026-08-08) - well before [nebulaos_compat] was introduced. Real
+	# device found live (Phase 1.5 hardware qualification, 2026-08-19): a
+	# device provisioned in that earlier window has neither [nebulaos_compat]
+	# nor the new include, so the original (narrower) check refused it -
+	# correctly safe, but it meant the device could never migrate off the
+	# un-migrated shape at all, silently, forever. Anything with NONE of
+	# these markers is still refused rather than guessed at.
+	anchor_count=$(grep -cxF "$_MIGRATE_PCFG_ANCHOR" "$f")
+	known_shape=0
+	if grep -qE '^\[nebulaos_compat\]' "$f"; then
+		known_shape=1
+	elif grep -qE '^\[tmcstatus\]' "$f" && grep -qE '^\[nebulaos_version\]' "$f"; then
+		known_shape=1
+	fi
+	if [ "$known_shape" -ne 1 ] || [ "$anchor_count" -ne 1 ]; then
+		ts=$(date -u +%Y%m%dT%H%M%SZ)
+		mkdir -p "$BACKUP_ROOT/printer-cfg-migration-refused"
+		cp -a "$f" "$BACKUP_ROOT/printer-cfg-migration-refused/printer.cfg.$ts" 2>/dev/null
+		log "ERROR: printer.cfg does not match a recognized shape for automatic migration to the split /etc/nebulaos/klipper/ layout (known shape: $([ "$known_shape" -eq 1 ] && echo yes || echo no), anchor line count: $anchor_count) - backed up to $BACKUP_ROOT/printer-cfg-migration-refused/printer.cfg.$ts, LEFT UNTOUCHED. Manual migration required - see docs/NEBULAOS_PRINTER_CFG_MIGRATION.md"
+		return 1
+	fi
+
+	ts=$(date -u +%Y%m%dT%H%M%SZ)
+	mkdir -p "$BACKUP_ROOT/printer-cfg-migration"
+	backup="$BACKUP_ROOT/printer-cfg-migration/printer.cfg.pre-migration.$ts"
+	if ! cp -a "$f" "$backup"; then
+		log "ERROR: could not create pre-migration backup of printer.cfg - refusing to migrate without one"
+		return 1
+	fi
+	if ! cmp -s "$f" "$backup"; then
+		log "ERROR: pre-migration backup of printer.cfg does not match the original - refusing to proceed"
+		return 1
+	fi
+
+	# Everything from the line AFTER the anchor to EOF is "trailing
+	# content": the user's own additional includes/macros, and/or
+	# Klipper's own SAVE_CONFIG block, preserved byte-for-byte in the same
+	# relative position the new template already reserves for exactly
+	# this ("Your own additional includes/macros go below this line").
+	trailing="$f.migrate-trailing.$$"
+	awk -v anchor="$_MIGRATE_PCFG_ANCHOR" '
+		found { print; next }
+		$0 == anchor { found = 1 }
+	' "$f" > "$trailing"
+
+	new_seed="$SEEDS/printer_data-config/printer.cfg"
+	if [ ! -f "$new_seed" ]; then
+		log "ERROR: immutable seed $new_seed missing - cannot migrate printer.cfg, leaving the original untouched"
+		rm -f "$trailing"
+		return 1
+	fi
+
+	tmp="$f.migrate-tmp.$$"
+	cp -a "$new_seed" "$tmp"
+	cat "$trailing" >> "$tmp"
+	rm -f "$trailing"
+
+	if ! grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tmp"; then
+		log "ERROR: migrated printer.cfg failed a basic sanity check - leaving the original untouched (backup at $backup)"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	mv "$tmp" "$f"
+	log "printer.cfg: migrated from the monolithic machine-definition form to the new /etc/nebulaos/klipper/*.cfg split entrypoint (original backed up at $backup)"
+	return 0
+}
+
 start() {
+	# Deliberately before the generation comparison and before the
+	# maintenance gate: these are small, idempotent text-file rewrites, not
+	# the memory-heavy tar/git work the gate exists to hold back, and a
+	# device on an old config shape must recover on the very next boot
+	# rather than only when a generation happens to change.
+	migrate_moonraker_pin_include
+	migrate_printer_cfg
+
 	[ -f "$SEEDS/seed-manifest.json" ] || { log "no seed manifest ($SEEDS/seed-manifest.json missing) - nothing to compare against, skipping"; return 0; }
 
 	expected_version=$(json_get "$SEEDS/seed-manifest.json" migration_version)
@@ -176,16 +558,41 @@ start() {
 	log "backing up current application tree to $BACKUP_DIR before touching anything"
 
 	klipper_ok=1
+	extensions_ok=1
 	moonraker_ok=1
+	# Phase 1 no-fork migration: official Klipper, and the
+	# klippy/chelper/c_helper.so dirty-tree exception is gone - upstream's
+	# own .gitignore contains "*.so", so the prebuilt artifact never made
+	# the tree dirty in the first place. See S04nebulaos-factory-seed's
+	# matching note.
 	if [ -e "$APPS/klipper/.git" ]; then
-		reseed_git_app klipper master "https://github.com/coreflake1/NebulaOS-klipper.git" \
-			klippy/chelper/c_helper.so || klipper_ok=0
+		reseed_git_app klipper master "https://github.com/Klipper3d/klipper.git" || klipper_ok=0
+	fi
+	# A device seeded by a pre-Phase-1 image has no extensions checkout at
+	# all, so there is nothing to reseed and nothing to back up - but the
+	# component still has to arrive, or the pair is incomplete. Seed it
+	# directly from the archive in that case rather than skipping it and
+	# recording a generation that claims a component this device does not
+	# have.
+	if [ -e "$APPS/nebulaos-klipper-extensions/.git" ]; then
+		reseed_git_app nebulaos-klipper-extensions main \
+			"https://github.com/coreflake1/NebulaOS-klipper-extensions.git" || extensions_ok=0
+	else
+		log "no existing extensions checkout (device predates the no-fork architecture) - provisioning it from this image's archive as part of this migration"
+		seed_missing_extensions || extensions_ok=0
 	fi
 	if [ -e "$APPS/moonraker/.git" ]; then
 		reseed_git_app moonraker master "https://github.com/Arksine/moonraker.git" || moonraker_ok=0
 	fi
 
-	if [ "$klipper_ok" = "1" ] && [ "$moonraker_ok" = "1" ]; then
+	# The Klipper stack is validated as a pair. Report it as one, so a
+	# reader of the boot log sees "the pair failed", not two independent
+	# component lines they have to correlate themselves.
+	if [ "$klipper_ok" != "1" ] || [ "$extensions_ok" != "1" ]; then
+		log "ERROR: the Klipper stack did not migrate as a complete pair (klipper ok=$klipper_ok, extensions ok=$extensions_ok). Running new Klipper against old extensions, or the reverse, is exactly the mismatch this pairing exists to prevent - so NEITHER half is promoted and the generation is not advanced."
+	fi
+
+	if [ "$klipper_ok" = "1" ] && [ "$extensions_ok" = "1" ] && [ "$moonraker_ok" = "1" ]; then
 		record_generation "$expected_version"
 		log "migration complete - generation now $expected_version. Previous application tree preserved at $BACKUP_DIR (not deleted automatically - safe to remove by hand once the new generation is confirmed working)."
 	else
@@ -197,6 +604,7 @@ record_generation() {
 	version="$1"
 	mkdir -p "$SYSTEM"
 	klipper_commit=$( [ -d "$APPS/klipper/.git" ] && git -C "$APPS/klipper" rev-parse HEAD 2>/dev/null || echo "unseeded")
+	extensions_commit=$( [ -d "$APPS/nebulaos-klipper-extensions/.git" ] && git -C "$APPS/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	moonraker_commit=$( [ -d "$APPS/moonraker/.git" ] && git -C "$APPS/moonraker" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	cat > "$GENERATION_FILE" <<EOF
@@ -204,6 +612,7 @@ record_generation() {
   "migration_version": "$version",
   "recorded_at": "$now",
   "klipper_commit": "$klipper_commit",
+  "extensions_commit": "$extensions_commit",
   "moonraker_commit": "$moonraker_commit"
 }
 EOF

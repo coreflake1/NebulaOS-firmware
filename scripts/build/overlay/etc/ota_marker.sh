@@ -14,14 +14,26 @@
 
 write_ota_marker() {
 	# $1: "ota:kernel" or "ota:kernel2"
-	# Plain bs=1 seek/count writes only - avoids relying on dd conv=sync,
-	# whose support in this BusyBox build isn't confirmed. Length computed via
-	# ${#1} (shell parameter expansion), not command substitution - $(...)
-	# strips trailing newlines, which would silently defeat the padding math.
-	printf '%s\n\n' "$1" > /dev/mmcblk0p1
+	# This write is what the entire A/B automatic-rollback safety net
+	# depends on, so it must hit physical storage - not just the page
+	# cache - before this function returns. `dd conv=fsync` is a
+	# durability mechanism already confirmed working in this exact
+	# BusyBox build by ndq_atomic_write() in
+	# nebulaos-display-qualified.sh, which uses it for a lower-stakes
+	# config write. That's a different dd feature from the block-padding
+	# `conv=sync` flag this function historically avoided (support for
+	# THAT one was never confirmed) - fsync-on-write and pad-to-blocksize
+	# are unrelated dd behaviors despite the similar flag names. Length
+	# computed via ${#1} (shell parameter expansion), not command
+	# substitution - $(...) strips trailing newlines, which would
+	# silently defeat the padding math.
+	printf '%s\n\n' "$1" | dd of=/dev/mmcblk0p1 conv=fsync 2>/dev/null
 	marker_len=$((${#1} + 2))
 	remaining=$((512 - marker_len))
 	if [ "$remaining" -gt 0 ]; then
-		dd if=/dev/zero of=/dev/mmcblk0p1 bs=1 seek="$marker_len" count="$remaining" 2>/dev/null
+		dd if=/dev/zero of=/dev/mmcblk0p1 bs=1 seek="$marker_len" count="$remaining" conv=fsync 2>/dev/null
 	fi
+	# Trailing global sync as belt-and-suspenders, matching the same
+	# pattern ndq_atomic_write() uses after its own durable write.
+	sync
 }

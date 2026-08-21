@@ -30,6 +30,7 @@ require_pin() {
 
 for required in KERNEL_REPO KERNEL_BRANCH KERNEL_PIN BUILDROOT_REPO BUILDROOT_PIN \
 	PELLCORP_CREALITY_REPO PELLCORP_CREALITY_PIN KLIPPER_REPO KLIPPER_BRANCH KLIPPER_PIN \
+	KLIPPER_EXTENSIONS_REPO KLIPPER_EXTENSIONS_BRANCH KLIPPER_EXTENSIONS_PIN \
 	MOONRAKER_REPO MOONRAKER_PIN K1_USTREAMER_REPO K1_USTREAMER_PIN \
 	V4L_UTILS_REPO V4L_UTILS_PIN V4L_UTILS_ARCHIVE_URL V4L_UTILS_ARCHIVE_SHA256 \
 	MAINSAIL_TAG MAINSAIL_SHA256 \
@@ -121,9 +122,34 @@ mkdir -p "$VENDOR"
 cd "$VENDOR"
 
 clone_pinned() {
-	name="$1"; url="$2"; ref="$3"; extra="$4"
+	name="$1"; url="$2"; ref="$3"; extra="$4"; shallow_branch="${5:-}"
 	if [ -d "$name/.git" ]; then
 		echo "== $name already present, verifying pin (not re-cloning) =="
+	elif [ -n "$shallow_branch" ]; then
+		# Shallow, by exact commit. See the klipper call site for why this
+		# exists; in short, this component's FULL history is 242MB and it
+		# gets archived verbatim into a factory-seed tarball that a 208MB
+		# device has to extract on first boot.
+		#
+		# Fetching the pinned SHA directly rather than `clone --depth 1`
+		# on a branch, because a qualified pin is normally BEHIND the
+		# branch tip - a depth-1 branch clone would simply not contain it.
+		# GitHub serves an exact-SHA fetch (uploadpack.allowReachableSHA1
+		# InWant), and this is the same operation Moonraker's own GitDeploy
+		# performs against a pinned_commit.
+		#
+		# The local branch and the wildcard fetch refspec are set up to
+		# match what a real `git clone` would have produced, because
+		# make_seed_archive() archives this .git verbatim and Moonraker
+		# reads branch.<name>.remote/merge out of it.
+		echo "== cloning $name @ $ref (shallow, branch $shallow_branch) =="
+		git init -q "$name"
+		git -C "$name" remote add origin "$url"
+		git -C "$name" config "remote.origin.fetch" "+refs/heads/*:refs/remotes/origin/*"
+		git -C "$name" fetch -q --depth 1 origin "$ref"
+		git -C "$name" checkout -q -B "$shallow_branch" FETCH_HEAD
+		git -C "$name" config "branch.$shallow_branch.remote" origin
+		git -C "$name" config "branch.$shallow_branch.merge" "refs/heads/$shallow_branch"
 	else
 		echo "== cloning $name @ $ref =="
 		git clone $extra "$url" "$name"
@@ -226,15 +252,44 @@ clone_pinned buildroot-x2000 "$BUILDROOT_REPO" "$BUILDROOT_PIN"
 # or a different camera architecture than NebulaOS's own database-seeded one.
 clone_pinned pellcorp-creality "$PELLCORP_CREALITY_REPO" "$PELLCORP_CREALITY_PIN"
 
-# NebulaOS's own fork of SimpleAF's Klipper (coreflake1/NebulaOS-klipper,
-# `nebulaos` branch) - Track 1's "SimpleAF + the probe" decision applies here
-# too: pellcorp/klipper @ 386fde4 is still the base this whole app stack
-# targets, but every klippy_extras/ file this project needs (tmcstatus,
-# guppy_config_helper, guppy_module_loader, calibrate_shaper_config,
-# prtouch_v2 + companions, z_compensate) is committed into this fork's own
-# tracked history on top of that commit, instead of being copied in as
-# untracked files by 04-cross-compile-app-stack.sh after every fetch.
-clone_pinned klipper "$KLIPPER_REPO" "$KLIPPER_PIN"
+# OFFICIAL Klipper (Klipper3d/klipper), unmodified. Until the Phase 1
+# no-fork migration this was coreflake1/NebulaOS-klipper, a fork whose only
+# real content was klippy/extras/ files this project wrote - everything
+# else different from upstream was inherited base-fork lineage nobody here
+# had ever needed. Those files now live in vendor/nebulaos-klipper-
+# extensions below and are composed into this checkout at boot by symlink
+# activation, so this tree is genuinely upstream's, byte for byte, and
+# stays that way at runtime (git status --porcelain empty, on the device,
+# always). Zero core Klipper patches are applied here or anywhere else.
+# SHALLOW, deliberately, and this is a size decision with a hard number
+# behind it. make_seed_archive() archives this checkout's real .git verbatim
+# into /opt/nebulaos-seeds/klipper.tar.gz, which the squashfs carries and a
+# 208MB-RAM device extracts on first boot. The retired fork's full history
+# was 33MB and produced a 36.9MB seed (measured with debugfs against the last
+# qualified image, nightly-2026-08-15). Official Klipper3d/klipper's full
+# history is 242MB and produced a 256MB seed - 6.6x larger, +217MB in the
+# rootfs, on a 500MB partition, for history nothing on the printer reads.
+#
+# Found by the first real full build of this branch, which overflowed
+# BR2_TARGET_ROOTFS_EXT2_SIZE. Raising that size would have "fixed" the
+# symptom and shipped the 217MB.
+#
+# Depth 1 is sufficient for everything the device actually does with this
+# repository. Moonraker's GitDeploy needs a clean tree, branch.<name>.remote
+# /merge config, and HEAD reachable from origin/master after a fetch - git
+# deepens a shallow clone automatically to satisfy that walk. Verified
+# end to end against the real remote, not assumed; see the mission report.
+clone_pinned klipper "$KLIPPER_REPO" "$KLIPPER_PIN" "" "$KLIPPER_BRANCH"
+
+# The NebulaOS Klipper extension set - the third image-owned source
+# component. Everything this project actually owns for the Klipper host:
+# PRTouch and its companions, z_compensate, tmcstatus, nebulaos_version,
+# the compatibility preflight, the GD32 die-temperature module, and five
+# vendored community modules carrying their original authors' GPLv3
+# headers (see that repo's VENDORED.md). Small - it ships about thirty
+# files and none of Klipper's history, which matters on a device that has
+# to extract its seed archive from tar on a 208MB-RAM board.
+clone_pinned nebulaos-klipper-extensions "$KLIPPER_EXTENSIONS_REPO" "$KLIPPER_EXTENSIONS_PIN"
 
 # Official Moonraker - not a fork, no reason to deviate.
 clone_pinned moonraker "$MOONRAKER_REPO" "$MOONRAKER_PIN"

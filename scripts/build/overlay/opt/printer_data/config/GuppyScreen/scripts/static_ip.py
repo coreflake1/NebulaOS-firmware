@@ -28,8 +28,10 @@ import subprocess
 import sys
 import time
 
-CONFIG_PATH = "/usr/data/printer_data/config/static_ip.json"
-DHCP_SNAPSHOT_PATH = "/usr/data/printer_data/config/static_ip_dhcp_snapshot.json"
+# Phase 1.5 persistent-namespace mission (2026-08): routed through the
+# bind-mount path instead of the ambiguous top-level /usr/data/printer_data.
+CONFIG_PATH = "/opt/printer_data/config/static_ip.json"
+DHCP_SNAPSHOT_PATH = "/opt/printer_data/config/static_ip_dhcp_snapshot.json"
 RESOLV_CONF = "/etc/resolv.conf"
 RESOLV_CONF_BACKUP = "/etc/resolv.conf.dhcp-backup"
 IFACE = "wlan0"

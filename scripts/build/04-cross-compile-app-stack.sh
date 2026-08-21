@@ -62,16 +62,78 @@ fi
 
 mkdir -p "$WORK"
 
-### 1. Klipper: klippy/ source + a freshly cross-compiled chelper.so
-###    (this fork's own checked-in c_helper.so is a prebuilt MIPS binary of
-###    unknown toolchain/ABI provenance - don't trust it, rebuild it here).
+# The c_helper.so mtime invariant, defined once in the same file the device
+# sources at boot rather than reimplemented here - see that file's header for
+# why an mtime comparison decides whether this printer boots at all.
+. "$SCRIPT_DIR/overlay/etc/nebulaos-chelper-preflight.sh"
+
+### 1. Klipper: klippy/ source + a freshly cross-compiled chelper.so.
+###    Phase 1 no-fork migration: vendor/klipper is now official, unmodified
+###    Klipper3d/klipper, which ships no c_helper.so at all (*.so is in its
+###    own .gitignore) - so this is the only place the artifact comes from,
+###    and the mtime enforcement below is what keeps Klippy from trying to
+###    rebuild it with a gcc this device does not have.
+# Phase 1 no-fork migration, Phase L (2026-08-17): this used to be
+# `make clean && make CC=...`. Official Klipper ships NO Makefile in
+# klippy/chelper/ - the retired fork had one, inherited from pellcorp/klipper,
+# which the analysis mission classified MOVE_TO_FIRMWARE (section 4.3) and
+# which nothing actually moved. The first real full build against official
+# upstream therefore died here with "make: *** No rule to make target
+# 'clean'", after the entire kernel and rootfs had already been built.
+#
+# Upstream builds this library from klippy/chelper/__init__.py's own
+# check_build_c_library(), with a hardcoded gcc invocation. So do exactly
+# that, with the cross compiler substituted for `gcc` - and read SOURCE_FILES
+# and COMPILE_ARGS OUT OF THAT FILE rather than restating them here. That is
+# the whole point: a hardcoded list in the firmware would silently miss the
+# next file upstream adds, and upstream has already added one (steppersync.c,
+# flagged as unknown 5 in the analysis mission's section 27). If the list ever
+# stops parsing, the build fails loudly instead of linking a library with a
+# missing translation unit.
+#
+# SSE_FLAGS is deliberately not passed: upstream only adds it when
+# check_gcc_option() says the compiler accepts it, and a mipsel cross compiler
+# does not. Everything else - the -flto -fwhole-program link, -fPIC, -O2 - is
+# byte-for-byte upstream's own recipe.
 echo "== cross-compiling Klipper's chelper C extension =="
 (
 	cd "$VENDOR/klipper/klippy/chelper"
 	export PATH="$BUILDROOT_DIR/output/host/bin:$PATH"
-	make clean
-	make CC=mipsel-buildroot-linux-gnu-gcc
-)
+	rm -f c_helper.so _temp_c_helper.so
+
+	gcc_args=$(python3 - <<'PYEOF'
+import ast, sys
+tree = ast.parse(open('__init__.py').read())
+found = {}
+for node in tree.body:
+    if (isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in ('SOURCE_FILES', 'COMPILE_ARGS', 'DEST_LIB')):
+        found[node.targets[0].id] = ast.literal_eval(node.value)
+missing = {'SOURCE_FILES', 'COMPILE_ARGS', 'DEST_LIB'} - set(found)
+if missing:
+    sys.stderr.write("chelper/__init__.py no longer defines: %s\n"
+                     % (', '.join(sorted(missing)),))
+    raise SystemExit(1)
+sys.stderr.write("   recipe from upstream: %s <- %d source files\n"
+                 % (found['DEST_LIB'], len(found['SOURCE_FILES'])))
+print(found['COMPILE_ARGS'] % (found['DEST_LIB'], ' '.join(found['SOURCE_FILES'])))
+PYEOF
+	) || {
+		echo "FATAL: could not read the chelper build recipe out of official Klipper's own klippy/chelper/__init__.py - upstream changed its shape and this step must be re-derived, not guessed" >&2
+		exit 1
+	}
+
+	# shellcheck disable=SC2086  # gcc_args is upstream's own recipe, deliberately word-split
+	mipsel-buildroot-linux-gnu-gcc $gcc_args || {
+		echo "FATAL: cross-compiling c_helper.so failed" >&2
+		exit 1
+	}
+	[ -f c_helper.so ] || {
+		echo "FATAL: c_helper.so was not produced" >&2
+		exit 1
+	}
+) || exit 1
 
 # Production optimization mission, Phase 6 (2026-07-30): c_helper.so shipped
 # with full debug symbols in every rootfs.squashfs built so far - Buildroot's
@@ -123,6 +185,65 @@ if [ -n "$HOST_PYTHON3" ]; then
 		|| echo "WARNING: bytecode precompilation failed for the klipper squashfs copy - shipping source-only" >&2
 fi
 rm -f "$OVERLAY/opt/klipper/klippy/chelper"/*.o "$OVERLAY/opt/klipper/klippy/chelper"/*.a
+
+# Phase 1 no-fork migration: the immutable squashfs copy of Klipper carries
+# the extension modules as REAL FILES, not symlinks.
+#
+# This copy is not a git checkout and never will be - it is the emergency
+# fallback nebulaos-update-supervisor.sh's factory_fallback() exposes by
+# unmounting the bind mount when both a new version and the previous
+# known-good one have failed validation. The pristine-git requirement that
+# drives the symlink architecture applies to the two PERSISTENT checkouts,
+# where Moonraker looks and where updates happen. It does not apply here,
+# and pretending it did would mean shipping an emergency copy that is
+# missing every module the shipped printer.cfg references.
+#
+# Known, deliberate limitation, stated here rather than discovered later:
+# extras/nebulaos_compat.py identifies the running Klipper with
+# `git -C <checkout> rev-parse HEAD`, which cannot answer for a tree with no
+# .git. So in factory-fallback Klippy will refuse to start with that
+# module's own precise message rather than run unverified. That is the
+# behaviour the compatibility contract asks for ("did not start, and said
+# exactly why" over "started, but the probe is subtly wrong"), and
+# factory-fallback is already a terminal state that holds an update lock
+# until a human clears it - but it IS a change from the pre-Phase-1 fork
+# build, where the fallback copy would have started. Flagged for an explicit
+# owner decision; see docs/NEBULAOS_KLIPPER_COMPOSITION.md.
+EXT_SRC="$VENDOR/nebulaos-klipper-extensions"
+if [ -d "$EXT_SRC/extras" ]; then
+	echo "== staging NebulaOS Klipper extension modules into the immutable /opt/klipper copy =="
+	cp "$EXT_SRC"/extras/*.py "$OVERLAY/opt/klipper/klippy/extras/"
+	# nebulaos_compat.py derives its repository root as
+	# dirname(dirname(realpath(__file__))). Through a composed symlink that
+	# resolves to the extensions repo root; for these flattened real files it
+	# resolves to klippy/, so the manifest has to sit there for the immutable
+	# copy to be self-describing at all.
+	cp "$EXT_SRC/nebulaos-extensions.json" "$OVERLAY/opt/klipper/klippy/"
+else
+	echo "FATAL: $EXT_SRC/extras not found - 00-fetch-vendor-sources.sh must fetch the extension repository before this stage" >&2
+	exit 1
+fi
+
+# LAST, after every step that writes into klippy/ above (the cp -r, the
+# compileall pass, the .o/.a removal, the extension staging). Ordering is the
+# whole point: enforcing this earlier would be enforcing it against a tree
+# that later steps go on to modify.
+chelper_enforce_mtime "$OVERLAY/opt/klipper" || {
+	echo "FATAL: could not establish the c_helper.so mtime invariant for the immutable /opt/klipper copy" >&2
+	exit 1
+}
+
+# The immutable copy lives on a read-only squashfs, so nothing can write its
+# chelper verdict at boot the way S05nebulaos-activate does for the
+# persistent checkout. Bake it in here instead: without it,
+# extras/nebulaos_compat.py would refuse to start on the fallback path
+# purely because the platform had published no verdict, which is a
+# different (and much less useful) failure than the one it is meant to
+# report.
+chelper_write_verdict "$OVERLAY/opt/klipper" || {
+	echo "FATAL: the immutable /opt/klipper copy failed its own chelper verdict immediately after enforcement" >&2
+	exit 1
+}
 
 # Stock-parity fix (FIRMWARE.md sec 13): only klippy/ was ever staged here,
 # so Moonraker's file_manager always registered "config_examples" ->
@@ -533,7 +654,7 @@ chmod 755 "$OVERLAY/opt/guppyscreen/guppyscreen" "$OVERLAY/opt/guppyscreen/guppy
 # this exact function rather than a parallel reimplementation of its rules.
 . "$SCRIPT_DIR/lib/make-seed-archive.sh"
 
-echo "== creating offline factory-seed archives (Klipper, Moonraker) =="
+echo "== creating offline factory-seed archives (Klipper, extensions, Moonraker) =="
 # Real bug found live: $OVERLAY/opt/nebulaos-seeds/ is created directly by
 # this script, not by 02-configure-buildroot.sh's tracked-template resync
 # (which only mirrors scripts/build/overlay/) - so it is never cleaned
@@ -560,14 +681,51 @@ mkdir -p "$OVERLAY/opt/nebulaos-seeds"
 # be revisited again if this seed's filenames ever change in the future.
 for stale_dir in "$BUILDROOT_DIR/output/target/opt/nebulaos-seeds" \
                  "$BUILDROOT_DIR/output/build/buildroot-fs/ext2/target/opt/nebulaos-seeds"; do
+	# The .bundle/.tar names are retired formats. The .tar.gz names are the
+	# CURRENT ones, and leaving those out was a real defect, found by this
+	# branch's own build history (Phase 1 no-fork migration, Phase L).
+	#
+	# Buildroot's target trees persist across runs, and stage 03 builds a
+	# rootfs image BEFORE stage 04 regenerates these archives. So a seed left
+	# by a previous run is baked into that intermediate image at its OLD
+	# size. That is not hypothetical: a 256MB klipper.tar.gz from a run made
+	# before Klipper was cloned shallow survived here and overflowed
+	# BR2_TARGET_ROOTFS_EXT2_SIZE on the NEXT build, whose own freshly
+	# generated seed was only 15MB. The failure pointed at the filesystem
+	# size, which was not the problem, and the shrink that should have fixed
+	# it appeared not to work.
+	#
+	# Remove the current names too, so a seed that gets smaller - or is
+	# dropped entirely - cannot leave its previous self behind.
 	rm -f "$stale_dir/klipper.bundle" "$stale_dir/moonraker.bundle" \
-	      "$stale_dir/klipper.tar" "$stale_dir/moonraker.tar" 2>/dev/null || true
+	      "$stale_dir/klipper.tar" "$stale_dir/moonraker.tar" \
+	      "$stale_dir/nebulaos-klipper-extensions.tar" \
+	      "$stale_dir/klipper.tar.gz" "$stale_dir/moonraker.tar.gz" \
+	      "$stale_dir/nebulaos-klipper-extensions.tar.gz" 2>/dev/null || true
 done
-klipper_origin="https://github.com/coreflake1/NebulaOS-klipper.git"
+klipper_origin="https://github.com/Klipper3d/klipper.git"
 klipper_seed_commit=$(make_seed_archive "$VENDOR/klipper" master \
 	"$klipper_origin" "$OVERLAY/opt/nebulaos-seeds/klipper.tar.gz" "/lib/" \
 	"$HOST_PYTHON3" "/opt/klipper")
 klipper_is_shallow=$(git -C "$VENDOR/klipper" rev-parse --is-shallow-repository)
+
+# Phase 1 no-fork migration: the third image-owned source component. Seeded
+# PRISTINE - the archive is the extension repository exactly as published,
+# with no symlinks and nothing from Klipper in it. Composition is a boot-time
+# act performed by S05nebulaos-activate against the two independently-seeded
+# checkouts, not something baked into either archive: baking it in would put
+# NebulaOS-owned pointers inside a tree that has to stay byte-identical to
+# what Moonraker fetches from GitHub, and would make the archive's own
+# clean-tree check meaningless.
+#
+# No sparse_exclude and no bytecode precompilation mount_path juggling: this
+# repository is about thirty small Python files, so neither the extraction
+# time nor the footprint that motivated Klipper's "/lib/" exclusion applies.
+extensions_origin="https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
+extensions_seed_commit=$(make_seed_archive "$VENDOR/nebulaos-klipper-extensions" main \
+	"$extensions_origin" "$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" "" \
+	"$HOST_PYTHON3" "/usr/data/nebulaos/apps/nebulaos-klipper-extensions")
+extensions_is_shallow=$(git -C "$VENDOR/nebulaos-klipper-extensions" rev-parse --is-shallow-repository)
 
 moonraker_origin="https://github.com/Arksine/moonraker.git"
 moonraker_seed_commit=$(make_seed_archive "$VENDOR/moonraker" master \
@@ -587,7 +745,13 @@ build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # compares with plain string equality on-device with no history lookup
 # needed. Not a security hash - just a stable, cheap "does the installed
 # generation match what THIS image expects" fingerprint.
-migration_version=$(printf '%s' "${klipper_seed_commit}:${moonraker_seed_commit}:${GUPPYSCREEN_PIN:-unknown}" | sha256sum | cut -c1-16)
+#
+# Phase 1 no-fork migration: the extensions seed commit joins the hash. This
+# is exactly why the design is a content-derived hash rather than a
+# hand-incremented counter - adding a third component to the identity is a
+# one-line change that cannot be forgotten to bump, and a device whose
+# extensions pin moved but whose Klipper pin did not still migrates.
+migration_version=$(printf '%s' "${klipper_seed_commit}:${extensions_seed_commit}:${moonraker_seed_commit}:${GUPPYSCREEN_PIN:-unknown}" | sha256sum | cut -c1-16)
 firmware_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
 
 cat > "$OVERLAY/opt/nebulaos-seeds/seed-manifest.json" <<EOF
@@ -606,9 +770,20 @@ cat > "$OVERLAY/opt/nebulaos-seeds/seed-manifest.json" <<EOF
       "seed_commit": "$klipper_seed_commit",
       "is_shallow": $klipper_is_shallow,
       "sha256": "$(sha256sum "$OVERLAY/opt/nebulaos-seeds/klipper.tar.gz" | cut -d' ' -f1)",
-      "compatibility_level": 2,
-      "upstream_base": "pellcorp/klipper @ 386fde4fd38e8eda6999e58bf260eceb00051188",
-      "note": "real, genuinely-rooted shallow history - no synthetic wrapper commit; HEAD is confirmed present on the real coreflake1/NebulaOS-klipper remote as both 'master' and 'nebulaos'"
+      "compatibility_level": 3,
+      "note": "OFFICIAL, unmodified Klipper3d/klipper - NebulaOS hosts no Klipper fork. Zero core file patches. Everything this project owns lives in nebulaos-klipper-extensions and is composed in at boot by symlink activation, leaving this checkout content-pristine at runtime."
+    },
+    "nebulaos-klipper-extensions": {
+      "format": "git_repo_archive_real_history",
+      "file": "nebulaos-klipper-extensions.tar.gz",
+      "repository": "$extensions_origin",
+      "branch": "main",
+      "seed_commit": "$extensions_seed_commit",
+      "is_shallow": $extensions_is_shallow,
+      "sha256": "$(sha256sum "$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" | cut -d' ' -f1)",
+      "compatibility_level": 3,
+      "paired_with": "klipper",
+      "note": "seeded pristine; composed into the Klipper checkout at boot by S05nebulaos-activate. Validated, updated and rolled back as one pair with klipper - never independently."
     },
     "moonraker": {
       "format": "git_repo_archive_real_history",
@@ -835,7 +1010,7 @@ done
 # this exact function rather than a parallel reimplementation.
 . "$SCRIPT_DIR/lib/validate-frontend-controls.sh"
 PRINTER_DATA_CONFIG_CLOSURE="$WORK/printer-data-config-closure.txt"
-if ! frontend_controls_resolve_closure "$PRINTER_DATA_CONFIG_SRC" printer.cfg "$PRINTER_DATA_CONFIG_CLOSURE"; then
+if ! frontend_controls_resolve_closure "$PRINTER_DATA_CONFIG_SRC" printer.cfg "$PRINTER_DATA_CONFIG_CLOSURE" "$SCRIPT_DIR/overlay"; then
 	echo "FATAL: could not resolve the printer_data config include closure" >&2
 	exit 1
 fi

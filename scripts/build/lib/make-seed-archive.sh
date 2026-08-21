@@ -36,6 +36,24 @@
 # also strictly cheaper on this 208MB device than the clone-from-bundle
 # step it replaces (plain tar extraction does no object repacking).
 
+# chelper_enforce_mtime() lives in the same overlay file the device itself
+# uses at boot (/etc/nebulaos-chelper-preflight.sh), sourced here rather than
+# reimplemented, so the build-time and boot-time definitions of the invariant
+# cannot drift apart - the same reasoning that put make_seed_archive() itself
+# in a shared file rather than duplicating it between the build and its tests.
+# Only sourced if not already defined, so a caller that has already sourced it
+# (04-cross-compile-app-stack.sh does) is unaffected.
+if ! command -v chelper_enforce_mtime >/dev/null 2>&1; then
+	_mksa_dir=$(cd "$(dirname "$0")" && pwd)
+	for _cand in \
+		"$_mksa_dir/overlay/etc/nebulaos-chelper-preflight.sh" \
+		"$_mksa_dir/../scripts/build/overlay/etc/nebulaos-chelper-preflight.sh" \
+		"$_mksa_dir/../build/overlay/etc/nebulaos-chelper-preflight.sh"; do
+		if [ -f "$_cand" ]; then . "$_cand"; break; fi
+	done
+	unset _mksa_dir _cand
+fi
+
 make_seed_archive() {
 	src="$1"; active_branch="$2"; origin_url="$3"; out="$4"; sparse_exclude="${5:-}"
 	# Production optimization mission, Phase 4 (2026-07-30): both optional,
@@ -135,6 +153,38 @@ make_seed_archive() {
 	git -C "$tmp" config "branch.$active_branch.remote" origin
 	git -C "$tmp" config "branch.$active_branch.merge" "refs/heads/$active_branch"
 
+	# Seed a remote-tracking ref so Moonraker's check_diverged()
+	# succeeds. Without this, no refs/remotes/origin/$branch exists,
+	# and `merge-base --is-ancestor HEAD origin/master` fails.
+	mkdir -p "$tmp/.git/refs/remotes/origin"
+	git -C "$tmp" rev-parse HEAD > "$tmp/.git/refs/remotes/origin/$active_branch"
+
+	# clone_pinned leaves TWO entries in .git/shallow: the original
+	# clone HEAD and the pinned commit fetch. The stale entry's
+	# commit object references a parent that was never fetched
+	# (beyond the original shallow boundary), so simply removing
+	# the entry from .git/shallow makes git try to traverse past it
+	# into a missing parent — breaking fsck, gc, and merge-base.
+	# Fix: (1) rewrite .git/shallow to HEAD only, (2) clear reflogs
+	# that reference the stale commit, (3) repack with only objects
+	# reachable from current refs to physically remove the orphan.
+	head_sha=$(git -C "$tmp" rev-parse HEAD)
+	if [ -f "$tmp/.git/shallow" ]; then
+		stale_count=$(grep -cv "^$head_sha$" "$tmp/.git/shallow" 2>/dev/null || echo 0)
+		if [ "$stale_count" -gt 0 ]; then
+			echo "$head_sha" > "$tmp/.git/shallow"
+			rm -rf "$tmp/.git/logs"
+			_reachable=$(mktemp)
+			git -C "$tmp" rev-list --objects --all > "$_reachable"
+			_pack_hash=$(git -C "$tmp" pack-objects "$tmp/.git/objects/pack/pack" < "$_reachable")
+			rm -f "$_reachable"
+			for _p in "$tmp"/.git/objects/pack/pack-*.pack; do
+				_bn=$(basename "$_p" .pack)
+				[ "$_bn" != "pack-$_pack_hash" ] && rm -f "$_p" "${_p%.pack}.idx" "${_p%.pack}.rev"
+			done
+		fi
+	fi
+
 	# Discard a wrong-architecture klippy/chelper/c_helper.so before
 	# packaging (e.g. a host-recompiled x86 .so left over from a
 	# developer running `make` locally, outside this project's own
@@ -218,6 +268,33 @@ make_seed_archive() {
 			PYTHONPATH="" "$python3_bin" -m compileall -q \
 				-x '(^|/)(\.git|scripts)($|/)' "$tmp" \
 				|| echo "WARNING: bytecode precompilation failed for $src - shipping source-only, as before" >&2
+		fi
+	fi
+
+	# Phase 1 no-fork migration: re-establish the c_helper.so mtime
+	# invariant as the LAST thing before packaging, and fail the build if
+	# it cannot be established.
+	#
+	# This is not belt-and-braces, it is load-bearing. Klipper decides
+	# whether to shell out to gcc by comparing mtimes, and this function
+	# has already done three separate things that rewrite them in
+	# nondeterministic order: `cp -r "$src/." "$tmp/"` does NOT preserve
+	# mtimes (no -p, no -a), `git checkout` can rewrite working-tree files,
+	# and the sparse-checkout `read-tree -mu HEAD` rewrites them again.
+	# After all that, whether the prebuilt library ends up newer than
+	# klippy/chelper/*.c is decided by directory-walk order - which is to
+	# say, by luck. On a bad roll the device gets an image whose Klippy
+	# tries to invoke a compiler that does not exist and never starts.
+	#
+	# Deliberately guarded on the directory existing so this stays a shared
+	# function: only the Klipper tree has a chelper, and moonraker (and the
+	# offline fixture repos in tests/factory-seed-git-tests.sh) must pass
+	# straight through.
+	if [ -d "$tmp/klippy/chelper" ]; then
+		if ! chelper_enforce_mtime "$tmp"; then
+			echo "ERROR: refusing to package $src - could not establish the c_helper.so mtime invariant" >&2
+			rm -rf "$tmp"
+			return 1
 		fi
 	fi
 

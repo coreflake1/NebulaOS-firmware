@@ -535,6 +535,34 @@ check /etc/init.d/S57nebulaos-camera-seed
 # always safe here.
 MOONRAKER_CONF_CONTENT=$(debugfs -R "cat /opt/printer_data/config/moonraker.conf" ${IMAGES}/rootfs.ext2 2>/dev/null)
 
+# Phase 1.5 persistent-namespace mission (2026-08): the reserved
+# [update_manager klipper]/[update_manager nebulaos_klipper_extensions]
+# sections moved out of the persistent moonraker.conf entirely, into the
+# image-owned /etc/nebulaos/moonraker/klipper-pin.conf, included from
+# moonraker.conf with a single absolute-path line. Checking
+# MOONRAKER_CONF_CONTENT alone for those sections is therefore no longer
+# meaningful on its own - this used to produce a false MISS on a genuinely
+# correct image (recorded in the Phase 0+1 closeout report as a known,
+# deferred defect: "not include-aware"). RESOLVED_MOONRAKER_CONTENT below
+# is what an include-aware reader would actually see: the content of
+# moonraker.conf plus the image-owned pin file it includes, concatenated in
+# include order - not a general Moonraker include-glob implementation, just
+# enough to check the one real include this config actually uses.
+KLIPPER_PIN_CONF_CONTENT=$(debugfs -R "cat /etc/nebulaos/moonraker/klipper-pin.conf" ${IMAGES}/rootfs.ext2 2>/dev/null)
+RESOLVED_MOONRAKER_CONTENT="$MOONRAKER_CONF_CONTENT
+$KLIPPER_PIN_CONF_CONTENT"
+
+if echo "$MOONRAKER_CONF_CONTENT" | grep -qxF "[include /etc/nebulaos/moonraker/klipper-pin.conf]"; then
+	echo "OK   moonraker.conf includes the image-owned /etc/nebulaos/moonraker/klipper-pin.conf"
+else
+	echo "MISS moonraker.conf does not include /etc/nebulaos/moonraker/klipper-pin.conf"
+fi
+if [ -n "$KLIPPER_PIN_CONF_CONTENT" ]; then
+	echo "OK   /etc/nebulaos/moonraker/klipper-pin.conf is present in the built image"
+else
+	echo "MISS /etc/nebulaos/moonraker/klipper-pin.conf is missing or empty in the built image"
+fi
+
 check_conf_absent() {
 	pattern="$1"; desc="$2"
 	if echo "$MOONRAKER_CONF_CONTENT" | grep -qE "$pattern"; then
@@ -578,7 +606,10 @@ fi
 # deliberately, since path/type ARE legitimate, needed options under the
 # DIFFERENT (generic, type: web) [update_manager mainsail] section; a
 # whole-file check would wrongly flag those as a regression.
-RESERVED_SECTIONS_BODY=$(echo "$MOONRAKER_CONF_CONTENT" | awk "
+# Phase 1.5: read from RESOLVED_MOONRAKER_CONTENT (moonraker.conf +
+# klipper-pin.conf, concatenated) rather than MOONRAKER_CONF_CONTENT alone
+# - [update_manager klipper] now lives entirely in the included file.
+RESERVED_SECTIONS_BODY=$(echo "$RESOLVED_MOONRAKER_CONTENT" | awk "
 	/^\[update_manager klipper\]\$/ || /^\[update_manager moonraker\]\$/ { grab=1; next }
 	/^\[/ { grab=0 }
 	grab { print }
@@ -590,7 +621,11 @@ if echo "$RESERVED_SECTIONS_BODY" | grep -qE "^(type|path|origin|primary_branch|
 else
 	echo "OK   [update_manager klipper]/[update_manager moonraker] contain no unsupported options"
 fi
-check_conf_present "^\[update_manager klipper\]\$" "the reserved [update_manager klipper] section"
+if echo "$RESOLVED_MOONRAKER_CONTENT" | grep -qE "^\[update_manager klipper\]\$"; then
+	echo "OK   resolved moonraker config contains: the reserved [update_manager klipper] section"
+else
+	echo "MISS resolved moonraker config missing: the reserved [update_manager klipper] section"
+fi
 check_conf_present "^\[update_manager moonraker\]\$" "the reserved [update_manager moonraker] section"
 check_conf_present "^\[update_manager mainsail\]\$" "the Mainsail web updater section"
 if echo "$RESERVED_SECTIONS_BODY" | grep -qE "^channel: dev\$"; then
@@ -666,8 +701,22 @@ check_seed_archive() {
 	fi
 	rm -rf /tmp/seed-check /tmp/seed-check.tar
 }
-check_seed_archive /opt/nebulaos-seeds/klipper.tar.gz master "https://github.com/coreflake1/NebulaOS-klipper.git" "klipper"
+# Phase 1.5 closure mission (2026-08-19): the klipper check below used to
+# hardcode the RETIRED forks origin, coreflake1/NebulaOS-klipper.git - a
+# stale leftover from before the Phase 1 no-fork migration, producing a
+# permanent false MISS against a genuinely correct image (the seeded
+# checkout is deliberately official, unmodified Klipper3d/klipper now).
+# Sourced from $KLIPPER_REPO (manifests/dependencies.conf, already loaded
+# above) instead of a second hardcoded copy, so this can never drift from
+# the pin actually used again - and so reintroducing the retired fork
+# origin in the manifest would make this check genuinely, correctly FAIL,
+# which a hardcoded string could never do.
+check_seed_archive /opt/nebulaos-seeds/klipper.tar.gz "$KLIPPER_BRANCH" "$KLIPPER_REPO" "klipper"
 check_seed_archive /opt/nebulaos-seeds/moonraker.tar.gz master "https://github.com/Arksine/moonraker.git" "moonraker"
+# Phase 1.5 closure mission (2026-08-19): the extensions seed archive origin
+# was never checked here at all - added to close the same class of gap,
+# using the same manifest-sourced pattern.
+check_seed_archive /opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz "$KLIPPER_EXTENSIONS_BRANCH" "$KLIPPER_EXTENSIONS_REPO" "nebulaos-klipper-extensions"
 
 # Real bug this catches if regressed: the c_helper.so committed inside
 # vendor/klippers own git history (an upstream binary) is incompatible

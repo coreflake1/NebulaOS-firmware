@@ -29,7 +29,13 @@
 # numbering for that future dependency).
 
 NEBULAOS_ROOT="${NEBULAOS_ROOT:-/usr/data/nebulaos}"
-SCHEMA_VERSION=1
+# Bumped to 2 by the Phase 1 no-fork migration, which adds a third
+# image-owned source component (apps/nebulaos-klipper-extensions). The
+# manifest is informational - nothing gates on its contents - but a device
+# upgraded into this generation would otherwise keep advertising a layout
+# that no longer describes what is on disk, and that is exactly the kind of
+# quiet drift this file exists to prevent.
+SCHEMA_VERSION=2
 PRINTER_DATA_CONFIG_SEED="${PRINTER_DATA_CONFIG_SEED:-/opt/nebulaos-seeds/printer_data-config}"
 PRINTER_DATA_CONFIG_MARKER="$NEBULAOS_ROOT/system/printer-data-config-seeded.json"
 
@@ -40,6 +46,7 @@ log() {
 create_layout() {
 	mkdir -p \
 		"$NEBULAOS_ROOT/apps/klipper" \
+		"$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions" \
 		"$NEBULAOS_ROOT/apps/moonraker" \
 		"$NEBULAOS_ROOT/apps/mainsail" \
 		"$NEBULAOS_ROOT/apps/guppyscreen" \
@@ -56,9 +63,12 @@ create_layout() {
 		"$NEBULAOS_ROOT/updates/staging" \
 		"$NEBULAOS_ROOT/updates/locks" \
 		"$NEBULAOS_ROOT/updates/klipper" \
+		"$NEBULAOS_ROOT/updates/nebulaos-klipper-extensions" \
+		"$NEBULAOS_ROOT/updates/klipper-stack" \
 		"$NEBULAOS_ROOT/updates/moonraker" \
 		"$NEBULAOS_ROOT/updates/mainsail" \
 		"$NEBULAOS_ROOT/backups/klipper" \
+		"$NEBULAOS_ROOT/backups/nebulaos-klipper-extensions" \
 		"$NEBULAOS_ROOT/backups/moonraker" \
 		"$NEBULAOS_ROOT/backups/mainsail" \
 		"$NEBULAOS_ROOT/backups/printer_config" \
@@ -139,7 +149,20 @@ EOF
 
 write_manifest() {
 	manifest="$NEBULAOS_ROOT/system/layout-manifest.json"
-	[ -e "$manifest" ] && return 0
+	# Phase 1 no-fork migration: previously an unconditional
+	# "already exists, never touch it again". That was right while the
+	# layout was frozen, but a device upgraded into a generation that adds
+	# a whole new app would keep advertising the old layout forever, and
+	# the manifest's entire job is to describe what is actually on disk.
+	# Rewrite when it predates the current schema, leave it alone
+	# otherwise - still no reconciliation loop, still one write per real
+	# layout change.
+	if [ -e "$manifest" ]; then
+		recorded=$(grep -o '"schema_version"[[:space:]]*:[[:space:]]*[0-9]*' "$manifest" 2>/dev/null | \
+			sed -E 's/.*:[[:space:]]*([0-9]*)$/\1/' | head -1)
+		[ "$recorded" = "$SCHEMA_VERSION" ] && return 0
+		log "layout manifest records schema $recorded, this image expects $SCHEMA_VERSION - refreshing it"
+	fi
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	cat > "$manifest" <<EOF
 {
@@ -148,7 +171,9 @@ write_manifest() {
   "created_at": "$now",
   "created_at_caveat": "may read as an early-epoch date if this boot occurred before NTP sync - see docs/NEBULAOS_RETENTION_POLICY.md sec 2.6",
   "layout": {
-    "apps": ["klipper", "moonraker", "mainsail", "guppyscreen"],
+    "apps": ["klipper", "nebulaos-klipper-extensions", "moonraker", "mainsail", "guppyscreen"],
+    "klipper_stack": ["klipper", "nebulaos-klipper-extensions"],
+    "klipper_stack_note": "validated, updated and rolled back as one pair - see /etc/nebulaos-update-supervisor.sh",
     "guppyscreen_status": "reserved_not_implemented",
     "envs": ["moonraker", "klipper"],
     "printer_data": "private",

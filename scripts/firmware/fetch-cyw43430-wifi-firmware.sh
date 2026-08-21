@@ -86,6 +86,41 @@ fetch() {
 	fi
 }
 
+sha_of() {
+	[ -f "$1" ] || return 1
+	sha256sum "$1" | awk '{print $1}'
+}
+
+# Already staged and hash-verified? Then this is a no-op, and re-downloading
+# proves nothing the hashes have not already proven.
+#
+# Added 2026-08-17 (Phase 1 no-fork migration, Phase L). Two consecutive full
+# builds failed here on `curl: (22) ... error: 429` - raw.githubusercontent.com
+# rate-limiting the host, with the correct, already-verified blobs sitting on
+# disk from an earlier run. A pinned-by-hash artifact that is already present
+# and matches its pin does not need a CDN to be reachable, and making the
+# whole firmware build depend on one is a reproducibility defect, not a
+# safety property.
+#
+# This is strictly no weaker than always downloading. A file that is present
+# but does NOT match its pinned hash is still fatal - and now fatal WITHOUT a
+# network round trip, with a message that says what to do. It is the same
+# "already present, verify rather than re-fetch" contract 00-fetch-vendor-
+# sources.sh's clone_pinned() applies to every git component, and that the
+# board-NVRAM fetch beside this call already applies to its own file.
+staged_bin=$(sha_of "$DEST/brcmfmac43430-sdio.bin" || true)
+staged_clm=$(sha_of "$DEST/brcmfmac43430-sdio.clm_blob" || true)
+staged_lic=$(sha_of "$DEST/brcmfmac43430-sdio.clm_blob.LICENCE" || true)
+if [ -n "$staged_bin" ] && [ -n "$staged_clm" ] && [ -n "$staged_lic" ]; then
+	if [ "$staged_bin" = "$BIN_SHA256" ] && [ "$staged_clm" = "$CLM_SHA256" ] \
+		&& [ "$staged_lic" = "$LICENCE_SHA256" ]; then
+		echo "CYW43430 firmware + CLM already staged and hash-verified against Infineon/ifx-linux-firmware @ $IFX_COMMIT - not re-downloading."
+		sha256sum "$DEST/brcmfmac43430-sdio.bin" "$DEST/brcmfmac43430-sdio.clm_blob"
+		exit 0
+	fi
+	echo "WARNING: staged CYW43430 firmware does not match its pinned hashes - discarding it and re-fetching." >&2
+fi
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

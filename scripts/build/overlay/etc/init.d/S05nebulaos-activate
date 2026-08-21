@@ -1,11 +1,32 @@
 #!/bin/sh
 #
 # NebulaOS mutable-runtime mission, Phase 5: the one authoritative
-# activation manager. Decides, for each mutable app (Klipper, Moonraker,
-# Mainsail) and for printer_data/shared-gcode, whether the persistent
-# /usr/data/nebulaos copy is valid enough to bind-mount over the immutable
-# /opt/*|/usr/share/mainsail path - or whether to leave the immutable
-# squashfs content in place untouched.
+# activation manager. Decides, for each mutable app (Klipper, the Klipper
+# extension set, Moonraker, Mainsail) and for printer_data/shared-gcode,
+# whether the persistent /usr/data/nebulaos copy is valid enough to
+# bind-mount over the immutable /opt/*|/usr/share/mainsail path - or whether
+# to leave the immutable squashfs content in place untouched.
+#
+# Phase 1 no-fork migration (2026-08-17): this script also composes the
+# Klipper stack. NebulaOS runs official, unmodified Klipper, and the modules
+# this project owns are activated by symlinking them from
+# apps/nebulaos-klipper-extensions into apps/klipper/klippy/extras and
+# listing them in that clone's .git/info/exclude - see
+# /etc/nebulaos-klipper-compose.sh for the mechanism and why it is the only
+# one that works.
+#
+# This is the correct slot for it and no new ordering is needed: S04nebulaos-
+# migrate replaces the whole apps/klipper tree on a generation bump, which
+# destroys the composed symlinks, and S55klipper must not start before they
+# are back. S04 -> S05 -> S55 already gives exactly that, which makes the
+# ordering load-bearing in a way it was not before. tests/app-migration-
+# tests.sh covers it explicitly rather than leaving it to be assumed.
+#
+# Composition runs BEFORE the bind mount, deliberately. If it fails - a
+# collision with an upstream file, a dangling link, a stale c_helper.so -
+# the persistent Klipper is simply not activated and the immutable copy
+# stays in place, which is this script's existing and well-proven "doing
+# nothing at all is always safe" default rather than a new failure mode.
 #
 # SAFETY DEFAULT: doing nothing at all is always safe. Every service in
 # this image was built to run directly against its immutable /opt/*
@@ -26,9 +47,29 @@
 # storage mount, so it now correctly runs before this script rather than
 # after it.
 
-NEBULAOS_ROOT=/usr/data/nebulaos
+NEBULAOS_ROOT="${NEBULAOS_ROOT:-/usr/data/nebulaos}"
 STATE_FILE="$NEBULAOS_ROOT/system/activation-state.json"
-LOCKDIR="$NEBULAOS_ROOT/updates/locks"
+LOCKDIR="${LOCKDIR:-$NEBULAOS_ROOT/updates/locks}"
+
+# Shared libraries, overridable for tests exactly like S04's GATE_LIB.
+COMPOSE_LIB="${COMPOSE_LIB:-/etc/nebulaos-klipper-compose.sh}"
+CHELPER_LIB="${CHELPER_LIB:-/etc/nebulaos-chelper-preflight.sh}"
+
+# Every app directory on a real device is root-owned; anything else means
+# something outside this project's control has been writing there. Overridable
+# ONLY so the offline tests can exercise the checks that come after it - real
+# boot never sets it, so ":-" always resolves to 0:0, exactly like SEEDS/APPS/
+# LOCKDIR in the S04 scripts.
+EXPECTED_APP_OWNER="${EXPECTED_APP_OWNER:-0:0}"
+
+# One lock covers BOTH halves of the Klipper stack. The pair is the unit
+# that gets validated and rolled back, so a mid-flight update of either half
+# must hold activation off both - a lock per component would let this script
+# activate a Klipper whose extensions are being rewritten underneath it.
+KLIPPER_STACK_LOCK="klipper-stack"
+
+[ -f "$COMPOSE_LIB" ] && . "$COMPOSE_LIB"
+[ -f "$CHELPER_LIB" ] && . "$CHELPER_LIB"
 
 log() {
 	echo "S05nebulaos-activate: $1"
@@ -100,8 +141,8 @@ validate_app() {
 	# "stat: not found") - `ls -ldn` (numeric UID/GID, a BusyBox ls
 	# extension) is the portable alternative.
 	owner=$(ls -ldn "$src" 2>/dev/null | awk '{print $3":"$4}')
-	if [ "$owner" != "0:0" ]; then
-		log "$name: unexpected ownership ($owner, expected 0:0) - staying on immutable"
+	if [ "$owner" != "$EXPECTED_APP_OWNER" ]; then
+		log "$name: unexpected ownership ($owner, expected $EXPECTED_APP_OWNER) - staying on immutable"
 		record "$name" "immutable:unexpected_ownership"
 		return 1
 	fi
@@ -109,6 +150,16 @@ validate_app() {
 	if [ -e "$LOCKDIR/$name.lock" ]; then
 		log "$name: an update transaction lock is present - an update is mid-flight, staying on immutable until it resolves"
 		record "$name" "immutable:update_in_progress"
+		return 1
+	fi
+
+	# $4, when given, names a shared transaction lock this component takes
+	# part in as well as its own. Used for the Klipper stack, where klipper
+	# and nebulaos-klipper-extensions are updated and rolled back together
+	# and neither may be activated while that transaction is unresolved.
+	if [ -n "${4:-}" ] && [ -e "$LOCKDIR/$4.lock" ]; then
+		log "$name: the shared '$4' update transaction lock is present - staying on immutable until the whole stack resolves"
+		record "$name" "immutable:stack_update_in_progress"
 		return 1
 	fi
 
@@ -130,6 +181,51 @@ bind_if_not_already() {
 	fi
 	mount --bind "$src" "$dst"
 	log "bind-mounted $src -> $dst"
+}
+
+# Compose the Klipper stack and prove it, or refuse.
+#
+# compose_ensure() rebuilds only when the recorded generation no longer
+# matches reality, but verifies on EVERY call - which is what catches the
+# silent case: upstream Klipper shipping a regular file at a path this
+# project manages replaces the symlink with no error anywhere, and the
+# extension is shadowed while the printer believes it is running ours.
+#
+# chelper_write_verdict() then re-checks the c_helper.so mtime invariant
+# against the tree that is actually about to run and publishes the result
+# where extras/nebulaos_compat.py reads it, so a stale prebuilt library
+# surfaces as a named preflight refusal instead of a gcc crash part-way
+# through boot on a device with no toolchain.
+activate_klipper_stack() {
+	kdir="$NEBULAOS_ROOT/apps/klipper"
+	edir="$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions"
+
+	if ! command -v compose_ensure >/dev/null 2>&1; then
+		log "klipper-stack: $COMPOSE_LIB is missing - cannot compose the extension set, refusing to activate an incomplete Klipper"
+		record "klipper_stack" "immutable:compose_lib_missing"
+		return 1
+	fi
+
+	if ! compose_ensure "$kdir" "$edir"; then
+		log "klipper-stack: composition FAILED - see the errors above. The persistent Klipper is not activated."
+		record "klipper_stack" "immutable:composition_failed"
+		return 1
+	fi
+
+	if ! command -v chelper_write_verdict >/dev/null 2>&1; then
+		log "klipper-stack: $CHELPER_LIB is missing - cannot verify the c_helper.so mtime invariant, refusing rather than letting Klippy attempt an on-device gcc build"
+		record "klipper_stack" "immutable:chelper_lib_missing"
+		return 1
+	fi
+
+	if ! chelper_write_verdict "$kdir"; then
+		log "klipper-stack: the c_helper.so mtime invariant does NOT hold - Klipper would try to rebuild its C library with gcc, which this device does not have. The persistent Klipper is not activated."
+		record "klipper_stack" "immutable:chelper_stale"
+		return 1
+	fi
+
+	record "klipper_stack" "composed"
+	return 0
 }
 
 start() {
@@ -156,8 +252,28 @@ start() {
 	rm -f "$NEBULAOS_ROOT/system/.activation-decisions"
 	mkdir -p "$LOCKDIR"
 
-	if validate_app klipper "$NEBULAOS_ROOT/apps/klipper" "klippy/klippy.py"; then
-		bind_if_not_already "$NEBULAOS_ROOT/apps/klipper" /opt/klipper
+	# --- Klipper stack: official Klipper + the NebulaOS extension set -----
+	#
+	# Both halves must validate, the composition must build and verify, and
+	# the c_helper.so mtime invariant must hold, before either is activated.
+	# Any failure leaves /opt/klipper on the immutable squashfs copy, which
+	# ships the extension modules as real files precisely so this fallback
+	# remains a complete Klipper install.
+	#
+	# The extensions marker is nebulaos-extensions.json - a real, required
+	# FILE, not a directory. That is a direct lesson from the printer_data
+	# marker bug documented at validate_app() above, where a marker that
+	# happened to be a directory S02 recreates every boot made the check
+	# pass against an empty tree.
+	if validate_app klipper "$NEBULAOS_ROOT/apps/klipper" "klippy/klippy.py" "$KLIPPER_STACK_LOCK" && \
+	   validate_app nebulaos-klipper-extensions \
+		"$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions" \
+		"nebulaos-extensions.json extras" "$KLIPPER_STACK_LOCK"; then
+		if activate_klipper_stack; then
+			bind_if_not_already "$NEBULAOS_ROOT/apps/klipper" /opt/klipper
+		else
+			log "klipper: composition or chelper preflight failed - NOT activating the persistent copy, leaving the immutable /opt/klipper in place"
+		fi
 	fi
 
 	if validate_app moonraker "$NEBULAOS_ROOT/apps/moonraker" "moonraker/server.py"; then
@@ -192,9 +308,27 @@ start() {
 		bind_if_not_already "$NEBULAOS_ROOT/printer_data" /opt/printer_data
 
 		# The shared stock gcode tree is outside the NebulaOS namespace by
-		# design (docs/NEBULAOS_MUTABLE_RUNTIME_ARCHITECTURE.md sec 3.1) -
-		# validated separately, not through validate_app's namespace check.
+		# design (docs/NEBULAOS_PERSISTENT_NAMESPACE.md) - validated
+		# separately, not through validate_app's namespace check.
 		shared_gcodes=/usr/data/printer_data/gcodes
+		# Phase 1.5 persistent-namespace mission (2026-08): previously this
+		# branch silently left /opt/printer_data/gcodes as whatever
+		# printer_data's own private bind already provided whenever
+		# $shared_gcodes didn't exist yet - which used to be masked by
+		# S01persistent-datastore's own top-level /usr/data/printer_data
+		# symlink into that same private tree (removed this mission, see
+		# that script's own history). With the symlink gone, a genuinely
+		# virgin device (no prior stock content at /usr/data/printer_data at
+		# all) would otherwise never get a real shared gcode directory.
+		# Creating it here is within NebulaOS's documented, narrow
+		# exception to touch this one path
+		# (docs/NEBULAOS_PERSISTENT_NAMESPACE.md sec "shared exceptions") -
+		# it creates ONLY the gcodes subdirectory (and whatever parent
+		# directories mkdir -p needs to reach it), never touches any other
+		# content that may already exist under /usr/data/printer_data, and
+		# is a no-op if the directory - stock's own or NebulaOS's earlier
+		# creation - already exists.
+		mkdir -p "$shared_gcodes"
 		if [ -d "$shared_gcodes" ]; then
 			# Phase 3.4 finding: NebulaOS's own USB mount target must exist
 			# INSIDE the shared tree once it's what's actually visible at
@@ -203,7 +337,7 @@ start() {
 			bind_if_not_already "$shared_gcodes" /opt/printer_data/gcodes
 			record "shared_gcode" "persistent"
 		else
-			log "shared gcode path $shared_gcodes missing - leaving /opt/printer_data/gcodes as whatever printer_data's own mount already provided"
+			log "shared gcode path $shared_gcodes could not be created - leaving /opt/printer_data/gcodes as whatever printer_data's own mount already provided"
 			record "shared_gcode" "immutable:not_present"
 		fi
 	fi
@@ -230,11 +364,17 @@ start() {
 	log "activation complete - state recorded at $STATE_FILE"
 }
 
-case "$1" in
-	start)
-		start
-		;;
-	*)
-		;;
-esac
-exit 0
+# S05NEBULAOS_ACTIVATE_NO_AUTORUN=1 lets tests source this script to call
+# validate_app()/activate_klipper_stack() directly against fixture
+# directories - the same seam convention as S02's
+# S02NEBULAOS_NAMESPACE_NO_AUTORUN and S04's own NO_AUTORUN variables.
+if [ -z "${S05NEBULAOS_ACTIVATE_NO_AUTORUN:-}" ]; then
+	case "$1" in
+		start)
+			start
+			;;
+		*)
+			;;
+	esac
+	exit 0
+fi

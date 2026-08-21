@@ -1,7 +1,8 @@
 #!/bin/sh
 #
 # NebulaOS mutable-runtime mission, Phase 4: idempotent, offline-only
-# first-boot seeding of the mutable Klipper/Moonraker/Mainsail checkouts
+# first-boot seeding of the mutable Klipper/extensions/Moonraker/Mainsail
+# checkouts
 # under /usr/data/nebulaos/apps/*, from the immutable real-history git
 # archives and static-release copy baked into the read-only squashfs at
 # /opt/nebulaos-seeds. Never touches GitHub/PyPI/DNS - this must work with
@@ -28,6 +29,16 @@
 # real `/machine/update/status?refresh=true` fetch resolves cleanly with
 # no special-case reset required - ordinary `git fetch`/pull semantics
 # apply from the very first boot.
+#
+# Phase 1 no-fork migration (2026-08-17): a THIRD git component is seeded
+# here, apps/nebulaos-klipper-extensions, through the same seed_git_app()
+# with no new machinery - it is deliberately an ordinary image-owned
+# component, not a special case. Klipper's own origin also changes here,
+# from the retired coreflake1/NebulaOS-klipper fork to official
+# Klipper3d/klipper, and that origin is genuinely verified against the
+# seeded checkout below rather than assumed. Klipper and the extensions are
+# treated as one pair for generation-recording purposes: a half-seeded pair
+# records no generation at all, so the next boot retries.
 
 # Overridable via env for tests/factory-seed-git-tests.sh (same
 # fixture-path convention as scripts/flash-spare-slot.sh's DEV_PREFIX) -
@@ -254,7 +265,7 @@ try_venv_seed() {
 	[ -f "$seed_path" ] || return 1
 	rm -rf "$envdir.partial"
 	mkdir -p "$envdir.partial"
-	if ! tar -xzf "$seed_path" -C "$envdir.partial" 2>/tmp/venv-seed-extract-error.log; then
+	if ! sh -c "gzip -dc '$seed_path' | tar -xo -C '$envdir.partial'" 2>/tmp/venv-seed-extract-error.log; then
 		log "WARNING: venv seed extraction failed ($seed_path) - see /tmp/venv-seed-extract-error.log - falling back to on-device venv creation"
 		rm -rf "$envdir.partial"
 		return 1
@@ -358,6 +369,7 @@ record_known_good() {
 		return 0
 	fi
 	klipper_commit=$( [ -d "$APPS/klipper/.git" ] && git -C "$APPS/klipper" rev-parse HEAD 2>/dev/null || echo "unseeded")
+	extensions_commit=$( [ -d "$APPS/nebulaos-klipper-extensions/.git" ] && git -C "$APPS/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	moonraker_commit=$( [ -d "$APPS/moonraker/.git" ] && git -C "$APPS/moonraker" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	cat > "$kg" <<EOF
@@ -365,6 +377,13 @@ record_known_good() {
   "recorded_at": "$now",
   "recorded_at_caveat": "may read as an early-epoch date if this boot occurred before NTP sync",
   "klipper": {"commit": "$klipper_commit", "source": "factory_seed"},
+  "nebulaos-klipper-extensions": {"commit": "$extensions_commit", "source": "factory_seed"},
+  "klipper_stack": {
+    "klipper_commit": "$klipper_commit",
+    "extensions_commit": "$extensions_commit",
+    "source": "factory_seed",
+    "note": "validated and rolled back as one pair - see /etc/nebulaos-update-supervisor.sh"
+  },
   "moonraker": {"commit": "$moonraker_commit", "source": "factory_seed"},
   "mainsail": {"source": "factory_seed"}
 }
@@ -378,7 +397,15 @@ start() {
 	# Nothing to do - already fully seeded from a prior boot. Skip the
 	# gate/pause/resume dance entirely rather than pausing services for
 	# no reason on every normal boot after the first.
-	if [ -e "$APPS/klipper/.git" ] && [ -e "$APPS/moonraker/.git" ] && [ -e "$APPS/mainsail/index.html" ] \
+	#
+	# Phase 1 no-fork migration: the extension checkout is part of this
+	# condition, not an afterthought. A device seeded by an older image has
+	# klipper but no extensions, and must NOT short-circuit here - it needs
+	# a real seeding pass to gain the third component, and the whole point
+	# of checking each component individually is that a partially-seeded
+	# namespace is a state this device can genuinely be in.
+	if [ -e "$APPS/klipper/.git" ] && [ -e "$APPS/nebulaos-klipper-extensions/.git" ] \
+		&& [ -e "$APPS/moonraker/.git" ] && [ -e "$APPS/mainsail/index.html" ] \
 		&& [ -x /usr/data/nebulaos/envs/moonraker/bin/python3 ] \
 		&& [ -x /usr/data/nebulaos/envs/klipper/bin/python3 ]; then
 		log "all components already seeded - nothing to do"
@@ -397,9 +424,21 @@ start() {
 	# memory is fully released (process exit) before the next begins;
 	# `sync` after each step flushes rather than leaving dirty pages to
 	# compete with the next step's own memory needs.
-	seed_git_app klipper master "https://github.com/coreflake1/NebulaOS-klipper.git" \
-		klippy/chelper/c_helper.so
+	# Phase 1 no-fork migration: official Klipper, and no dirty_exclude.
+	# The old fork tracked klippy/chelper/c_helper.so, so the real
+	# cross-compiled MIPS binary the build bakes in always differed from
+	# what git had for that path and every seed archive was rejected here
+	# as dirty - hence the exclusion. Official Klipper's own .gitignore
+	# contains "*.so", so the prebuilt artifact is simply ignored and the
+	# tree is genuinely clean. The exclusion is not merely unnecessary now,
+	# it would be a hole: it exempted a real path from the clean-tree check
+	# for no remaining reason.
+	seed_git_app klipper master "https://github.com/Klipper3d/klipper.git"
+	klipper_seeded=$?
 	setup_klipper_env
+	seed_git_app nebulaos-klipper-extensions main \
+		"https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
+	extensions_seeded=$?
 	seed_git_app moonraker master "https://github.com/Arksine/moonraker.git"
 	setup_moonraker_env
 	seed_mainsail
@@ -407,7 +446,19 @@ start() {
 
 	resume_expendable_services
 	record_known_good
-	record_initial_generation
+
+	# Klipper and its extensions are ONE unit. If either half failed to
+	# seed, do not record a generation: recording one would tell
+	# S04nebulaos-migrate that this image's content is already installed,
+	# and the missing half would never be provisioned on any later boot.
+	# Leaving the generation unrecorded makes the next boot retry - the
+	# same "generation is not advanced on partial success" rule the
+	# migration path already relies on.
+	if [ "$klipper_seeded" = "0" ] && [ "$extensions_seeded" = "0" ]; then
+		record_initial_generation
+	else
+		log "ERROR: the Klipper stack did not seed completely (klipper rc=$klipper_seeded, extensions rc=$extensions_seeded) - NOT recording an app generation, so the next boot retries rather than treating this partial state as provisioned"
+	fi
 }
 
 # Clean-Update + Virgin Baseline mission, Phase 4 (2026-08-08): record the
@@ -432,6 +483,7 @@ record_initial_generation() {
 	[ -e "$SYSTEM/app-generation.json" ] && return 0
 	mkdir -p "$SYSTEM"
 	klipper_commit=$( [ -d "$APPS/klipper/.git" ] && git -C "$APPS/klipper" rev-parse HEAD 2>/dev/null || echo "unseeded")
+	extensions_commit=$( [ -d "$APPS/nebulaos-klipper-extensions/.git" ] && git -C "$APPS/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	moonraker_commit=$( [ -d "$APPS/moonraker/.git" ] && git -C "$APPS/moonraker" rev-parse HEAD 2>/dev/null || echo "unseeded")
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 	cat > "$SYSTEM/app-generation.json" <<EOF
@@ -439,6 +491,7 @@ record_initial_generation() {
   "migration_version": "$version",
   "recorded_at": "$now",
   "klipper_commit": "$klipper_commit",
+  "extensions_commit": "$extensions_commit",
   "moonraker_commit": "$moonraker_commit"
 }
 EOF

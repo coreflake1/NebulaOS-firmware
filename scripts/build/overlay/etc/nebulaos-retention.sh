@@ -27,6 +27,16 @@ SHARED_GCODES=/usr/data/printer_data/gcodes
 CAUTION_FLOOR_MB=800
 CRITICAL_FLOOR_MB=300
 
+# Phase 0 safety/logging cleanup: klippy.log/moonraker.log/guppyscreen.log
+# and (as of this same pass) the persistent nginx-access.log/nginx-error.log
+# grow unbounded - clean_rotated_logs() below only ever age-sweeps files
+# that are ALREADY rotated, and nothing anywhere ever produced a rotated
+# copy of these five live logs in the first place. 5MB keeps each log's
+# worst case (live + 2 rotated generations = 15MB/log, 75MB across all
+# five) comfortably inside the ~150-250MB budget this script's own
+# CAUTION/CRITICAL floors above were sized against.
+LOG_ROTATE_MAX_BYTES=$((5 * 1024 * 1024))
+
 dryrun=false
 [ "$1" = "--dry-run" ] && dryrun=true
 
@@ -109,10 +119,63 @@ clean_rotated_logs() {
 		-maxdepth 1 -type f -name "*.log*" -mtime +7 2>/dev/null | while read -r f; do
 		base=$(basename "$f")
 		case "$base" in
-			klippy.log|moonraker.log|retention.log) continue ;;
+			klippy.log|moonraker.log|guppyscreen.log|nginx-access.log|nginx-error.log|retention.log) continue ;;
 		esac
 		path_is_namespace_safe "$f" && delete "$f" "rotated-log"
 	done
+}
+
+# rotate_if_oversized FILE MAX_BYTES
+#
+# Copy-truncate, not rename-and-recreate: klippy/moonraker/guppyscreen/nginx
+# all hold their log file open for the life of the process and never reopen
+# it on SIGHUP - renaming $f out from under them would leave their fd
+# writing into an ever-growing, now-unreachable-by-name copy forever, with
+# a freshly-created $f staying empty until the next restart, which defeats
+# the point of rotating at all. Truncating the SAME inode in place keeps
+# the running process's fd valid; its next write lands right after the
+# truncation point. The standard copy-truncate tradeoff applies (a few
+# lines written between the cp and the truncate below can be lost) - that
+# is accepted here in exchange for never needing to signal or restart a
+# live service just to rotate its log.
+#
+# Safe if $f doesn't exist yet (first boot, e.g. before a service has ever
+# started) and safe under low disk space - if the copy fails, rotation is
+# skipped entirely for this run and the live file is left untouched, never
+# truncated without a backup existing first.
+rotate_if_oversized() {
+	f="$1"
+	max_bytes="$2"
+
+	[ -e "$f" ] || return 0
+	path_is_namespace_safe "$f" || return 0
+
+	size=$(wc -c < "$f" 2>/dev/null)
+	[ -z "$size" ] && return 0
+	[ "$size" -le "$max_bytes" ] && return 0
+
+	# Keep exactly 2 rotated generations - same bound this script already
+	# uses for failed-* backup retention (clean_obsolete_versions).
+	[ -e "$f.2" ] && rm -f "$f.2" 2>/dev/null
+	[ -e "$f.1" ] && mv -f "$f.1" "$f.2" 2>/dev/null
+
+	if cp -a "$f" "$f.1" 2>/dev/null; then
+		if : > "$f" 2>/dev/null; then
+			log "rotated (oversized, ${size}B): $f -> $f.1"
+		else
+			log "WARNING: rotate of $f: truncate failed after copy (possible low disk space) - $f.1 is a safe copy, live file left untouched"
+		fi
+	else
+		log "WARNING: rotate of $f: copy to $f.1 failed (possible low disk space) - skipping rotation this run, live file untouched"
+	fi
+}
+
+rotate_platform_logs() {
+	rotate_if_oversized "$NEBULAOS_ROOT/printer_data/logs/klippy.log" "$LOG_ROTATE_MAX_BYTES"
+	rotate_if_oversized "$NEBULAOS_ROOT/printer_data/logs/moonraker.log" "$LOG_ROTATE_MAX_BYTES"
+	rotate_if_oversized "$NEBULAOS_ROOT/printer_data/logs/guppyscreen.log" "$LOG_ROTATE_MAX_BYTES"
+	rotate_if_oversized "$NEBULAOS_ROOT/printer_data/logs/nginx-access.log" "$LOG_ROTATE_MAX_BYTES"
+	rotate_if_oversized "$NEBULAOS_ROOT/printer_data/logs/nginx-error.log" "$LOG_ROTATE_MAX_BYTES"
 }
 
 clean_old_config_backups() {
@@ -222,10 +285,12 @@ start() {
 
 	if update_in_progress; then
 		log "update transaction in progress - restricting to backup/log-only rotation this run"
+		rotate_platform_logs
 		clean_rotated_logs
 		return 0
 	fi
 
+	rotate_platform_logs
 	clean_rotated_logs
 	clean_old_config_backups
 	clean_abandoned_staging

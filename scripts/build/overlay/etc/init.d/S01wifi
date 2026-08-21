@@ -46,6 +46,19 @@
 # lived under /usr/data/openke/, a separate legacy path now fully retired -
 # relocated into the single authoritative NebulaOS namespace instead.
 #
+# Phase 1.5 persistent-namespace mission (2026-08): the canonical path
+# moved one level deeper, into /usr/data/nebulaos/network/, for the same
+# reason printer_data/database/certs/etc already have their own
+# subdirectories rather than sitting loose at the namespace root. Because
+# Wi-Fi is also this device's primary SSH access path, this is not a
+# simple rename - see /etc/nebulaos-wifi-migrate.sh for the full safe
+# migration algorithm (never destroys a working credential file before a
+# verified replacement exists) and tests/nebulaos-wifi-migrate-tests.sh
+# for its test matrix. The OLD path
+# (/usr/data/nebulaos/wpa_supplicant.conf) is kept as a symlink into the
+# new location - both paths are inside /usr/data/nebulaos, so this is a
+# compatibility convenience, not a namespace-ownership exception.
+#
 # Pre-qualification mission Phase A3 (2026-07-31): also stabilizes wlan0's
 # MAC address before wpa_supplicant/DHCP ever run - see
 # /etc/nebulaos-stable-mac.sh's own header for the real bug this fixes
@@ -68,22 +81,29 @@
 # here - a fresh device ships with zero saved networks, exactly like stock
 # does out of the box).
 
-CONF=/usr/data/nebulaos/wpa_supplicant.conf
+# Phase 1.5 persistent-namespace mission (2026-08): CONF is no longer a
+# fixed literal - it is whatever /etc/nebulaos-wifi-migrate.sh's
+# nebulaos_wifi_migrate() decides is the right, safe, already-verified
+# config path for this boot (normally the new canonical
+# /usr/data/nebulaos/network/wpa_supplicant.conf; the old
+# /usr/data/nebulaos/wpa_supplicant.conf only on a migration failure, so
+# this boot still has working Wi-Fi/SSH rather than none). 0600 mode and
+# the credential-free virgin skeleton are still exactly what they were
+# before - that logic now lives in the migration script so the same code
+# path is exercised by both a real boot and the offline test suite.
 PIDFILE=/var/run/wpa_supplicant-wlan0.pid
 
-seed_default_conf() {
-	[ -e "$CONF" ] && return 0
-	mkdir -p "$(dirname "$CONF")"
-	cat > "$CONF" <<-EOF
-	ctrl_interface=/var/run/wpa_supplicant
-	update_config=1
-	EOF
-}
-
 start() {
-	seed_default_conf
-	if [ ! -f "$CONF" ]; then
-		echo "S01wifi: $CONF not present, skipping"
+	CONF=""
+	if [ -f /etc/nebulaos-wifi-migrate.sh ]; then
+		. /etc/nebulaos-wifi-migrate.sh
+		nebulaos_wifi_migrate
+		CONF="$NEBULAOS_WIFI_CONF"
+	else
+		echo "S01wifi: /etc/nebulaos-wifi-migrate.sh missing - cannot safely determine the Wi-Fi config path, not starting wpa_supplicant"
+	fi
+	if [ -z "$CONF" ] || [ ! -f "$CONF" ]; then
+		echo "S01wifi: no usable Wi-Fi config path, skipping"
 		return 0
 	fi
 	if [ -f /etc/nebulaos-stable-mac.sh ]; then

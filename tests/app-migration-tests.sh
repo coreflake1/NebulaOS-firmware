@@ -59,22 +59,40 @@ build_bare_remote() {
 # against this exact string, independent of where its objects actually
 # came from (make_seed_archive sets remote.origin.url directly; it is
 # never fetched from during a real device seed).
-KLIPPER_PROD_ORIGIN="https://github.com/coreflake1/NebulaOS-klipper.git"
+#
+# Phase 1 no-fork migration (2026-08-17): official Klipper3d/klipper. Not a
+# cosmetic string change - reseed_git_app() genuinely verifies the seeded
+# checkout's baked-in origin against this exact value and rejects a
+# mismatch, so this constant is what makes "the device really did end up
+# pointed at official Klipper" a tested property rather than a claim.
+KLIPPER_PROD_ORIGIN="https://github.com/Klipper3d/klipper.git"
+EXTENSIONS_PROD_ORIGIN="https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
 
 setup_seeds() {
 	seeds_dir="$1"
 	src_repo="$WORK/src-repo"
+	ext_repo="$WORK/src-ext-repo"
 	bare="$WORK/bare-origin.git"
 	mkdir -p "$seeds_dir"
 	build_real_repo "$src_repo" master "" "v2-content"
 	build_bare_remote "$bare" "$src_repo"
 	make_seed_archive "$src_repo" master "$KLIPPER_PROD_ORIGIN" "$seeds_dir/klipper.tar.gz" > "$WORK/seed-commit.txt"
 	seed_commit=$(cat "$WORK/seed-commit.txt")
+
+	# The extension set is an ordinary third image-owned component, so every
+	# migration fixture needs one - a device with Klipper but no extensions
+	# is exactly the incomplete pair the migration path refuses to promote.
+	build_real_repo "$ext_repo" main "" "extensions-v2"
+	make_seed_archive "$ext_repo" main "$EXTENSIONS_PROD_ORIGIN" \
+		"$seeds_dir/nebulaos-klipper-extensions.tar.gz" > "$WORK/ext-seed-commit.txt"
+	ext_seed_commit=$(cat "$WORK/ext-seed-commit.txt")
+
 	cat > "$seeds_dir/seed-manifest.json" <<EOF
 {
   "migration_version": "gen-v2",
   "seeds": {
-    "klipper": {"seed_commit": "$seed_commit"}
+    "klipper": {"seed_commit": "$seed_commit"},
+    "nebulaos-klipper-extensions": {"seed_commit": "$ext_seed_commit"}
   }
 }
 EOF
@@ -217,7 +235,7 @@ test_no_redundant_reseed_after_fresh_factory_seed() {
 	# into a fresh namespace - sourced directly (NO_AUTORUN), same
 	# convention tests/factory-seed-git-tests.sh already uses.
 	env S04NEBULAOS_FACTORY_SEED_NO_AUTORUN=1 SEEDS="$SEEDS_DIR" APPS="$APPS_DIR" SYSTEM="$SYSTEM_DIR" \
-		sh -c ". '$FACTORY_SEED_SCRIPT'; seed_git_app klipper master '$KLIPPER_PROD_ORIGIN' klippy/chelper/c_helper.so; record_initial_generation" \
+		sh -c ". '$FACTORY_SEED_SCRIPT'; seed_git_app klipper master '$KLIPPER_PROD_ORIGIN'; seed_git_app nebulaos-klipper-extensions main '$EXTENSIONS_PROD_ORIGIN'; record_initial_generation" \
 		> "$WORK/t6-seed.log" 2>&1
 	seeded_hash=$(git -C "$APPS_DIR/klipper" rev-parse HEAD 2>/dev/null)
 
@@ -267,7 +285,8 @@ test_stale_lock_does_not_block_virgin_first_boot() {
 		sh -c ". '$FACTORY_SEED_SCRIPT'; \
 			if maintenance_gate_ok; then \
 				echo GATE_PASSED; \
-				seed_git_app klipper master '$KLIPPER_PROD_ORIGIN' klippy/chelper/c_helper.so; \
+				seed_git_app klipper master '$KLIPPER_PROD_ORIGIN'; \
+				seed_git_app nebulaos-klipper-extensions main '$EXTENSIONS_PROD_ORIGIN'; \
 				record_initial_generation; \
 			else \
 				echo GATE_BLOCKED; \

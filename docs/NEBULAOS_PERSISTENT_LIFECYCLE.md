@@ -21,7 +21,7 @@ never reads or writes into another's.
 
 | Class | Paths | Meaning | Owner |
 |---|---|---|---|
-| IMAGE OWNED | `apps/klipper`, `apps/moonraker` | Git checkouts of NebulaOS-pinned source. Nothing user-authored inside them. Safe to fully replace when the image's pin moves forward. | `S04nebulaos-factory-seed` (first boot) + `S04nebulaos-migrate` (later boots, generation mismatch) |
+| IMAGE OWNED | `apps/klipper`, `apps/nebulaos-klipper-extensions`, `apps/moonraker` | Git checkouts of NebulaOS-pinned source. Nothing user-authored inside them. Safe to fully replace when the image's pin moves forward. | `S04nebulaos-factory-seed` (first boot) + `S04nebulaos-migrate` (later boots, generation mismatch) |
 | USER OWNED | `printer_data/config` (printer.cfg, macros, moonraker.conf) | Hand-edited by the printer owner. Never touched by seeding or migration - a completely separate directory tree, full stop. | The user, via Moonraker/Mainsail/direct edit |
 | GENERATED | `envs/*`, `database`, `printer_data/{gcodes,logs,database}` | Regenerated or repopulated naturally by the running application. Out of scope for this mission's migration system (see below). | The application itself |
 
@@ -47,12 +47,20 @@ currently installed:
   "migration_version": "<16-hex-char sha256 prefix>",
   "recorded_at": "<UTC ISO8601>",
   "klipper_commit": "<sha or 'unseeded'>",
+  "extensions_commit": "<sha or 'unseeded'>",
   "moonraker_commit": "<sha or 'unseeded'>"
 }
 ```
 
+`extensions_commit` was added by the Phase 1 no-fork migration (2026-08-17),
+when `apps/nebulaos-klipper-extensions` became a third IMAGE OWNED component
+— see `NEBULAOS_KLIPPER_COMPOSITION.md`. Klipper and its extensions are
+recorded, migrated and rolled back as **one pair**; a half-seeded stack
+records no generation at all, so the next boot retries rather than treating a
+partial install as provisioned.
+
 `migration_version` is a content-derived hash
-(`sha256(klipper_seed_commit:moonraker_seed_commit:GUPPYSCREEN_PIN)`,
+(`sha256(klipper_seed_commit:extensions_seed_commit:moonraker_seed_commit:GUPPYSCREEN_PIN)`,
 truncated to 16 hex chars), computed at build time by
 `04-cross-compile-app-stack.sh` and written into the squashfs's own
 `/opt/nebulaos-seeds/seed-manifest.json`. Deliberately NOT a manually
@@ -159,9 +167,7 @@ baseline generation, exactly as a real new device would.
 
 ## Runtime version truth
 
-Phase 6 (2026-08-08) adds `[nebulaos_version]` (`klippy_extras/nebulaos_version.py`,
-synced into `coreflake1/NebulaOS-klipper`'s `klippy/extras/` the same way as
-every other accepted extra) - a printer object queryable via the ordinary
+Phase 6 (2026-08-08) adds `[nebulaos_version]` - a printer object queryable via the ordinary
 `/printer/objects/query?nebulaos_version` endpoint, reporting `firmware_tag`/
 `firmware_sha`/`kernel_sha`/`guppyscreen_sha`/`build_date` (from the new,
 build-time, squashfs-resident `/opt/nebulaos-version.json`), `klipper_sha`/
@@ -172,6 +178,22 @@ project), and `app_generation`/`generation_recorded_at` (from
 describes above). All reads are best-effort - a missing/malformed file
 reports `"unknown"` rather than preventing Klipper from starting.
 
+**Where this module lives, updated 2026-08-17 (Phase 1 no-fork migration).**
+It used to be maintained in this repository's `klippy_extras/` mirror and
+synced by hand into `coreflake1/NebulaOS-klipper`'s `klippy/extras/`. There is
+no NebulaOS Klipper fork any more: the module — like every other accepted
+extra — now lives in
+[`coreflake1/NebulaOS-klipper-extensions`](https://github.com/coreflake1/NebulaOS-klipper-extensions),
+which is its single source of truth, and is composed into an official Klipper
+checkout at boot. **This repository's `klippy_extras/` is a fork-era mirror
+retained for review and for a few local test fixtures; it has already
+diverged from the extensions repository and must not be edited as if it were
+authoritative.** No build step copies it into an image — asserted by
+`tests/recovery-safety-tests.sh` — so a stale mirror cannot reach a printer.
+The `c_helper.so` dirty-state exception it describes is also gone from the
+seed and migrate paths: official Klipper's own `.gitignore` already contains
+`*.so`, so the exclusion became a hole rather than a necessity.
+
 This does not itself enforce "a healthy system must not depend on dirty git
 state for accepted functionality" - it has no authority to refuse to start
 Klipper. It exists so a violation of that rule is visible in one obvious
@@ -179,12 +201,10 @@ place (`klipper_dirty: true`) rather than hidden. See Phase 8's own build
 verification for where cleanliness is actually enforced before something
 ships.
 
-**Known related gap, not yet closed**: see
-`docs/NEBULAOS_PRINTER_CFG_LOADCELL_GAP.md` - the canonical `printer.cfg`
-does not yet wire in `[z_compensate]`/`[prtouch_v2]`, even though that
-config was live-tested successfully on the real device. Fixing it needs
-real device access to pull the true parameter values, which this mission's
-printer-offline phases cannot do.
+**Formerly a related gap, now closed**: the canonical `printer.cfg` did not
+wire in `[z_compensate]`/`[prtouch_v2]` when this section was written. It
+does now — see `docs/NEBULAOS_PRINTER_CFG_LOADCELL_GAP.md`, which was
+resolved on 2026-08-08 and kept as the record of what the gap was.
 
 ## Testing
 

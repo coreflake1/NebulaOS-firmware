@@ -93,33 +93,50 @@ start() {
 	# which is why GuppyScreen was stuck showing the recalibration wizard.
 	mount --bind "$GUPPY_STATE/guppyconfig.json" /opt/guppyscreen/guppyconfig.json
 
-	# GuppyScreen's static_ip_panel.cpp separately hardcodes
-	# /usr/data/printer_data/config/GuppyScreen/scripts/static_ip.py (a
-	# stock-Creality-style absolute path, not configurable) - point it at the
-	# same real printer_data tree as everything else instead of a second,
-	# disconnected copy.
+	# Phase 1.5 persistent-namespace mission (2026-08): the two top-level
+	# compatibility symlinks that used to live here
+	# (/usr/data/printer_data -> /opt/printer_data,
+	# /usr/data/guppyscreen -> /opt/guppyscreen) are REMOVED, not just
+	# guarded more carefully. Full history and why they were never safe:
 	#
-	# CRITICAL: only create these two top-level links if nothing already
-	# exists there - real incident, found live testing on this project's
-	# actual test device: /usr/data (mmcblk0p10) is the SAME physical
-	# partition stock uses, and this device already had a real, previously-
-	# installed GuppyScreen there from real prior use (themes, calibration,
-	# backups, and a real ~6MB guppyscreen binary). `ln -sf SRC DST` treats
-	# an existing DST *directory* as "create the link inside it using SRC's
+	# They existed only because GuppyScreen's own compiled binary hardcoded
+	# a handful of /usr/data/printer_data/... and /usr/data/guppyscreen/...
+	# paths instead of the already-correct /opt/printer_data/... and
+	# /opt/guppyscreen/... bind-mount paths this script sets up two lines
+	# above. That GuppyScreen-side fix has now landed (see
+	# NebulaOS-guppyscreen's phase1.5/persistent-namespace branch) - nothing
+	# left in the shipped image reads either top-level alias.
+	#
+	# The symlinks were also a genuine namespace-ownership defect even
+	# guarded: /usr/data/printer_data aliased NebulaOS's ENTIRE private
+	# printer_data tree (config/logs/database/certs/comms/timelapse/misc)
+	# under a path this project does not own and that stock and the shared
+	# G-code tree also use - S05nebulaos-activate separately, and more
+	# carefully, bind-mounts ONLY the genuinely shared
+	# /usr/data/printer_data/gcodes into /opt/printer_data/gcodes, and this
+	# script's own whole-tree symlink ran first and silently defeated that
+	# on any device where it succeeded (see S05nebulaos-activate's own
+	# comments on the shared-gcode bind for the current, sole mechanism).
+	#
+	# CRITICAL, kept here as forensic history rather than deleted outright:
+	# real incident, found live testing on this project's actual test
+	# device: /usr/data (mmcblk0p10) is the SAME physical partition stock
+	# uses, and this device already had a real, previously-installed
+	# GuppyScreen there from real prior use (themes, calibration, backups,
+	# and a real ~6MB guppyscreen binary). `ln -sf SRC DST` treats an
+	# existing DST *directory* as "create the link inside it using SRC's
 	# basename" instead of replacing DST - so `ln -sf /opt/guppyscreen
 	# /usr/data/guppyscreen` did not create /usr/data/guppyscreen as a
 	# symlink (it already existed as a real directory); it silently landed
 	# inside it and overwrote the real guppyscreen binary with a symlink to
 	# a path that only exists on the custom image, breaking stock's own
-	# GuppyScreen outright. The printer_data case was the same mechanism but
-	# landed on a name nothing already used, so it only left a harmless
-	# stray extra entry rather than destroying anything. Recovered by hand
-	# from a real backup the device owner had made; both are now guarded so
-	# this can never happen again on a device with real stock content on
-	# this partition - if either path already has ANY content, real or
-	# leftover from us, this leaves it alone rather than guessing.
-	[ -e /usr/data/printer_data ] || ln -s /opt/printer_data /usr/data/printer_data
-	[ -e /usr/data/guppyscreen ] || ln -s /opt/guppyscreen /usr/data/guppyscreen
+	# GuppyScreen outright. Recovered by hand from a real backup the device
+	# owner had made. The guard added afterwards (only create if nothing
+	# already exists there) prevented a repeat, but "sometimes silently
+	# aliases NebulaOS's private tree under a shared path, sometimes
+	# silently does nothing and lets NebulaOS state land inside stock's own
+	# directory instead" was never actually safe either way - removing the
+	# need for the symlink at the source is the real fix.
 }
 
 case "$1" in

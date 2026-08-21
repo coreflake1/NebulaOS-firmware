@@ -43,7 +43,51 @@
 # as parameters, so every existing log line keeps its own script's
 # established "S04nebulaos-factory-seed: ..." / "S04nebulaos-migrate: ..."
 # prefix unchanged.
+#
+# Phase 1.5 hardware closure (2026-08-19): a lock left behind by a
+# supervisor process that died mid-validate_component()/mid-
+# validate_klipper_stack() - state.json still says "validating", nothing on
+# disk it was validating has ever been proven - blocked BOTH this gate
+# (every boot, forever, via the ALREADY-seeded branch below) AND S05nebulaos-
+# activate's own validate_app() lock check. nebulaos-update-supervisor.sh
+# already has its own boot-time reconcile for exactly this
+# (reconcile_klipper_stack_on_boot/reconcile_stale_component_locks_on_boot),
+# but that is a separate, LATER-started daemon - this gate runs from S04,
+# early in boot, and cannot wait for it. Clearing a lock whose own
+# state.json says "validating" here, before the blocking check below ever
+# runs, is what actually unblocks S04/S05 on the SAME boot the interruption
+# is discovered, rather than only on the boot after next.
+#
+# Deliberately narrow, matching the same "never guess" discipline as the
+# unseeded-namespace case below: only a lock whose sibling state file
+# explicitly says "validating" is touched, and only the LOCK FILE is
+# removed here - state.json itself is left exactly as it is (the supervisor
+# reads state.json directly, not lock presence, so it still finds and fully
+# repairs this state.json on its own next boot-time pass regardless of
+# whether the lock file already disappeared). A malformed/missing/unreadable
+# state file, or any other state (factory-fallback's own deliberate "a human
+# must clear this" terminal state included), leaves the lock exactly as
+# blocking as before - this must never bypass a real, recent, failed update.
+_maintenance_gate_reconcile_validating_locks() {
+	[ -d "$LOCKDIR" ] || return 0
+	updates_root=$(dirname "$LOCKDIR")
+	for lockfile in "$LOCKDIR"/*.lock; do
+		[ -e "$lockfile" ] || continue
+		name=$(basename "$lockfile" .lock)
+		state_file="$updates_root/$name/state.json"
+		[ -f "$state_file" ] || continue
+		state=$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "$state_file" 2>/dev/null | \
+			sed -E 's/.*"([^"]*)"$/\1/' | head -1)
+		if [ "$state" = "validating" ]; then
+			log "found an interrupted update transaction ($name, state=validating) from a previous supervisor process - clearing the stale lock now so migration/activation are not blocked until the update supervisor starts; nebulaos-update-supervisor.sh will fully reconcile $name's state.json on its own next boot-time pass"
+			rm -f "$lockfile"
+		fi
+	done
+}
+
 maintenance_gate_ok() {
+	_maintenance_gate_reconcile_validating_locks
+
 	active=$(wget -q -O - --timeout=3 'http://127.0.0.1:7125/printer/objects/query?print_stats' 2>/dev/null)
 	case "$active" in
 		*'"state":"printing"'*|*'"state":"paused"'*)

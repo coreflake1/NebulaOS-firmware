@@ -282,10 +282,19 @@ else
 fi
 
 # --- Scenario 12: the real, tracked overlay config passes end-to-end ---
+#
+# Phase 1.5 persistent-namespace mission (2026-08): printer.cfg now also
+# includes the immutable /etc/nebulaos/klipper/*.cfg files with ABSOLUTE
+# paths, so this call must pass the same 4th overlay_root argument the
+# real build call site (scripts/build/04-cross-compile-app-stack.sh) does
+# - without it, resolution correctly FATALs (see scenario 15 below), which
+# is exactly why this scenario needs updating rather than left as-is.
+
+REAL_OVERLAY_ROOT="$REPO_ROOT/scripts/build/overlay"
 
 if [ -f "$REAL_SRC/printer.cfg" ]; then
 	real_closure="$WORK/real-closure.txt"
-	if frontend_controls_resolve_closure "$REAL_SRC" printer.cfg "$real_closure" >"$WORK/real-log.txt" 2>&1; then
+	if frontend_controls_resolve_closure "$REAL_SRC" printer.cfg "$real_closure" "$REAL_OVERLAY_ROOT" >"$WORK/real-log.txt" 2>&1; then
 		if frontend_controls_validate_closure "$real_closure" "$EXPECTED_PATH" >"$WORK/real-vlog.txt" 2>&1; then
 			pass "the real tracked overlay printer.cfg closure passes validation end-to-end"
 		else
@@ -296,6 +305,87 @@ if [ -f "$REAL_SRC/printer.cfg" ]; then
 	fi
 else
 	fail "real overlay printer.cfg not found at $REAL_SRC - repository layout has changed"
+fi
+
+# --- Scenario 13: an absolute /etc/nebulaos/... include resolves --------
+# --- correctly against overlay_root (Phase 1.5 persistent-namespace ------
+# --- mission, item 3) ----------------------------------------------------
+
+d="$WORK/s13"; write_clean_fixture "$d"
+overlay13="$WORK/s13-overlay"
+mkdir -p "$overlay13/etc/nebulaos/klipper"
+cat > "$overlay13/etc/nebulaos/klipper/machine.cfg" <<'EOF'
+[some_slot_owned_section]
+value: 1
+EOF
+cat > "$d/printer.cfg" <<'EOF'
+[include frontend-controls.cfg]
+[include GuppyScreen/guppy_cmd.cfg]
+[include /etc/nebulaos/klipper/machine.cfg]
+
+[printer]
+kinematics: cartesian
+EOF
+closure13="$WORK/s13-closure.txt"
+if frontend_controls_resolve_closure "$d" printer.cfg "$closure13" "$overlay13" >"$WORK/s13-log.txt" 2>&1; then
+	if grep -q "\[some_slot_owned_section\]" "$closure13"; then
+		pass "an absolute /etc/nebulaos/... include resolves correctly against overlay_root"
+	else
+		fail "absolute /etc/nebulaos/... include resolved but the closure is missing its content"
+	fi
+else
+	fail "absolute /etc/nebulaos/... include unexpectedly failed to resolve ($(cat "$WORK/s13-log.txt"))"
+fi
+
+# --- Scenario 14: an absolute include OUTSIDE /etc/nebulaos/ is refused --
+# --- (item 3's other required case) - any other absolute path is FATAL, --
+# --- never silently followed, even when overlay_root is given and the ----
+# --- file genuinely exists there -----------------------------------------
+
+d="$WORK/s14"; write_clean_fixture "$d"
+overlay14="$WORK/s14-overlay"
+mkdir -p "$overlay14/etc/other"
+echo "[respond]" > "$overlay14/etc/other/evil.cfg"
+cat > "$d/printer.cfg" <<'EOF'
+[include frontend-controls.cfg]
+[include GuppyScreen/guppy_cmd.cfg]
+[include /etc/other/evil.cfg]
+
+[printer]
+kinematics: cartesian
+EOF
+closure14="$WORK/s14-closure.txt"
+if frontend_controls_resolve_closure "$d" printer.cfg "$closure14" "$overlay14" >"$WORK/s14-log.txt" 2>&1; then
+	fail "absolute include outside /etc/nebulaos/ was incorrectly allowed to resolve"
+else
+	if grep -q "outside the recognized /etc/nebulaos/" "$WORK/s14-log.txt"; then
+		pass "absolute include outside /etc/nebulaos/ is correctly refused, even though overlay_root was given and the file exists there"
+	else
+		fail "absolute include outside /etc/nebulaos/ failed, but not for the expected reason ($(cat "$WORK/s14-log.txt"))"
+	fi
+fi
+
+# --- Scenario 15: an absolute /etc/nebulaos/... include with NO -----------
+# --- overlay_root given at all is refused too, not silently ignored -------
+
+d="$WORK/s15"; write_clean_fixture "$d"
+cat > "$d/printer.cfg" <<'EOF'
+[include frontend-controls.cfg]
+[include GuppyScreen/guppy_cmd.cfg]
+[include /etc/nebulaos/klipper/machine.cfg]
+
+[printer]
+kinematics: cartesian
+EOF
+closure15="$WORK/s15-closure.txt"
+if frontend_controls_resolve_closure "$d" printer.cfg "$closure15" >"$WORK/s15-log.txt" 2>&1; then
+	fail "absolute /etc/nebulaos/... include resolved despite no overlay_root being given"
+else
+	if grep -q "no overlay_root was given" "$WORK/s15-log.txt"; then
+		pass "absolute /etc/nebulaos/... include is correctly refused when no overlay_root is given at all"
+	else
+		fail "missing-overlay_root case failed, but not for the expected reason ($(cat "$WORK/s15-log.txt"))"
+	fi
 fi
 
 echo ""

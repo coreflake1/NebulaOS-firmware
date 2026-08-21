@@ -194,14 +194,49 @@ post-build)
 		exit 1
 	}
 	echo "  == qualified baseline in use: $BASELINE_REF (from $DEPS_MANIFEST) =="
+	# Phase 1.5 closure mission (2026-08-19): semantic, not byte-identical,
+	# comparison for kernel.config/buildroot.config - see
+	# scripts/build/lib/baseline-config-compare.sh's own header for the full
+	# root-cause investigation. halley5_v30.dts gets no filter at all (still
+	# strictly byte-identical) since nothing about it was ever found to be
+	# provenance-only.
+	. "$SCRIPT_DIR/lib/baseline-config-compare.sh"
 	for f in kernel.config halley5_v30.dts buildroot.config; do
-		if git -C "$REPO_ROOT" diff --quiet "$BASELINE_REF" -- "artifacts/buildroot-halley5-v30-image/$f" 2>/dev/null; then
-			echo "  PASS: $f byte-identical to pinned baseline tag $BASELINE_REF"
+		artifact_path="$ARTIFACT_DIR/$f"
+		if [ ! -f "$artifact_path" ]; then
+			echo "  FAIL: $f is missing from $ARTIFACT_DIR - cannot compare"
+			FAILED=1
+			continue
+		fi
+		# set -eu is active in this script - a plain assignment from a
+		# non-zero command substitution would abort immediately, so the
+		# exit status is captured explicitly instead of relied on via $?.
+		diff_rc=0
+		diff_output=$(baseline_config_semantic_diff "$f" "$artifact_path" "$BASELINE_REF" "$REPO_ROOT" 2>&1) || diff_rc=$?
+		if [ "$diff_rc" -eq 0 ]; then
+			echo "  PASS: $f matches pinned baseline tag $BASELINE_REF (semantically - see scripts/build/lib/baseline-config-compare.sh for the narrow, named fields excluded from this comparison, if any)"
+		elif [ "$diff_rc" -eq 1 ]; then
+			echo "  FAIL: $f differs from pinned baseline tag $BASELINE_REF (real difference, not one of the named provenance-only fields):"
+			echo "$diff_output" | sed "s/^/    /"
+			FAILED=1
 		else
-			echo "  FAIL: $f differs from pinned baseline tag $BASELINE_REF"
+			echo "  FAIL: could not compare $f against $BASELINE_REF: $diff_output"
 			FAILED=1
 		fi
 	done
+	# Recorded per section 8's own requirement: excluding a field from the
+	# strict comparison must not make its current value disappear. Both are
+	# also already independently recorded in build-manifest.txt's
+	# kernel_config_sha256 (the FULL, unfiltered file hash, which still
+	# changes with these fields and so still detects any tampering even
+	# though it isn't used as a gate here).
+	if [ -f "$ARTIFACT_DIR/kernel.config" ]; then
+		echo "  == excluded-from-comparison field values (for the record, not gated) =="
+		grep -E "^CONFIG_CC_VERSION_TEXT=|^CONFIG_EXTRA_FIRMWARE_DIR=" "$ARTIFACT_DIR/kernel.config" | sed "s/^/     /"
+	fi
+	if [ -f "$ARTIFACT_DIR/buildroot.config" ]; then
+		grep -E "^# Buildroot .* Configuration\$|^BR2_HOST_GCC_AT_LEAST_[0-9]*=y\$" "$ARTIFACT_DIR/buildroot.config" | sed "s/^/     /"
+	fi
 	;;
 *)
 	echo "unknown mode '$MODE' - must be pre-build or post-build" >&2

@@ -118,8 +118,10 @@ fi
 
 # --- Test 7: camera-quality.cfg defines exactly the three expected
 # parameterless macros, each routed through the same shell command, and the
-# shell command's script path matches the runtime (/usr/data/...) path
-# convention used by every other GuppyScreen script in this config. ---
+# shell command's script path matches the runtime (/opt/printer_data/...)
+# path convention used by every other GuppyScreen script in this config -
+# Phase 1.5 persistent-namespace mission (2026-08) moved every such
+# hardcoded path off the removed /usr/data/printer_data top-level alias. ---
 for quality in LOW MED HIGH; do
 	if grep -q "^\[gcode_macro SET_CAMERA_QUALITY_${quality}\]$" "$CAMERA_CFG" \
 		&& grep -A3 "^\[gcode_macro SET_CAMERA_QUALITY_${quality}\]$" "$CAMERA_CFG" \
@@ -130,7 +132,7 @@ for quality in LOW MED HIGH; do
 	fi
 done
 
-if grep -q '^command: /usr/data/printer_data/config/GuppyScreen/scripts/set_camera_quality.py$' "$CAMERA_CFG"; then
+if grep -q '^command: /opt/printer_data/config/GuppyScreen/scripts/set_camera_quality.py$' "$CAMERA_CFG"; then
 	pass
 else
 	fail "camera-quality.cfg's gcode_shell_command does not point at the runtime script path"
