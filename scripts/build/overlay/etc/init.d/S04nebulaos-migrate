@@ -100,8 +100,51 @@ export GIT_CONFIG_KEY_1=core.packedGitWindowSize GIT_CONFIG_VALUE_1=1m
 export GIT_CONFIG_KEY_2=core.deltaBaseCacheLimit GIT_CONFIG_VALUE_2=8m
 export GIT_CONFIG_KEY_3=gc.auto GIT_CONFIG_VALUE_3=0
 
+DIAG_DIR="${SYSTEM}/diagnostics"
+DIAG_LOG="${DIAG_DIR}/migration.log"
+DIAG_STATE="${DIAG_DIR}/migration-state.json"
+DIAG_MAX_SIZE=65536
+
+_diag_init() {
+	mkdir -p "$DIAG_DIR" 2>/dev/null || true
+	if [ -f "$DIAG_LOG" ]; then
+		_sz=$(wc -c < "$DIAG_LOG" 2>/dev/null || echo 0)
+		if [ "$_sz" -gt "$DIAG_MAX_SIZE" ]; then
+			tail -c "$DIAG_MAX_SIZE" "$DIAG_LOG" > "$DIAG_LOG.tmp" 2>/dev/null
+			mv "$DIAG_LOG.tmp" "$DIAG_LOG" 2>/dev/null || true
+		fi
+	fi
+}
+
 log() {
 	echo "S04nebulaos-migrate: $1"
+	_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+	echo "$_ts $1" >> "$DIAG_LOG" 2>/dev/null || true
+}
+
+_diag_write_state() {
+	mkdir -p "$DIAG_DIR" 2>/dev/null || true
+	_now=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+	cat > "$DIAG_STATE" <<DIAGEOF
+{
+  "timestamp": "$_now",
+  "image_migration_version": "${_expected_version:-unknown}",
+  "installed_migration_version": "${_installed_version:-unknown}",
+  "migration_action": "${_migration_action:-unknown}",
+  "klipper_before": "${_klipper_before:-unknown}",
+  "klipper_after": "${_klipper_after:-unknown}",
+  "extensions_before": "${_extensions_before:-unknown}",
+  "extensions_after": "${_extensions_after:-unknown}",
+  "moonraker_before": "${_moonraker_before:-unknown}",
+  "moonraker_after": "${_moonraker_after:-unknown}",
+  "klipper_reseed": "${_klipper_reseed_result:-not_attempted}",
+  "extensions_reseed": "${_extensions_reseed_result:-not_attempted}",
+  "moonraker_reseed": "${_moonraker_reseed_result:-not_attempted}",
+  "generation_recorded": "${_generation_recorded:-no}",
+  "gate_result": "${_gate_result:-not_checked}",
+  "error": "${_last_error:-none}"
+}
+DIAGEOF
 }
 
 # Minimal flat-JSON field extractor - this project's own established
@@ -518,6 +561,30 @@ migrate_printer_cfg() {
 }
 
 start() {
+	_diag_init
+	_expected_version=""
+	_installed_version=""
+	_migration_action="starting"
+	_klipper_before="unknown"
+	_extensions_before="unknown"
+	_moonraker_before="unknown"
+	_klipper_after="unknown"
+	_extensions_after="unknown"
+	_moonraker_after="unknown"
+	_klipper_reseed_result="not_attempted"
+	_extensions_reseed_result="not_attempted"
+	_moonraker_reseed_result="not_attempted"
+	_generation_recorded="no"
+	_gate_result="not_checked"
+	_last_error="none"
+
+	log "--- migration pass starting ---"
+
+	_klipper_before=$( [ -d "$APPS/klipper/.git" ] && git -C "$APPS/klipper" rev-parse HEAD 2>/dev/null || echo "absent")
+	_extensions_before=$( [ -d "$APPS/nebulaos-klipper-extensions/.git" ] && git -C "$APPS/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "absent")
+	_moonraker_before=$( [ -d "$APPS/moonraker/.git" ] && git -C "$APPS/moonraker" rev-parse HEAD 2>/dev/null || echo "absent")
+	log "current persistent state: klipper=$_klipper_before extensions=$_extensions_before moonraker=$_moonraker_before"
+
 	# Deliberately before the generation comparison and before the
 	# maintenance gate: these are small, idempotent text-file rewrites, not
 	# the memory-heavy tar/git work the gate exists to hold back, and a
@@ -526,16 +593,31 @@ start() {
 	migrate_moonraker_pin_include
 	migrate_printer_cfg
 
-	[ -f "$SEEDS/seed-manifest.json" ] || { log "no seed manifest ($SEEDS/seed-manifest.json missing) - nothing to compare against, skipping"; return 0; }
+	if [ ! -f "$SEEDS/seed-manifest.json" ]; then
+		_migration_action="skipped:no_manifest"
+		_last_error="no seed-manifest.json"
+		log "no seed manifest ($SEEDS/seed-manifest.json missing) - nothing to compare against, skipping"
+		_diag_write_state
+		return 0
+	fi
 
-	expected_version=$(json_get "$SEEDS/seed-manifest.json" migration_version)
-	[ -n "$expected_version" ] || { log "ERROR: seed-manifest.json has no migration_version field - skipping (image predates this feature, or manifest is malformed)"; return 0; }
+	_expected_version=$(json_get "$SEEDS/seed-manifest.json" migration_version)
+	if [ -z "$_expected_version" ]; then
+		_migration_action="skipped:no_version"
+		_last_error="seed-manifest.json has no migration_version"
+		log "ERROR: seed-manifest.json has no migration_version field - skipping (image predates this feature, or manifest is malformed)"
+		_diag_write_state
+		return 0
+	fi
 
-	installed_version=""
-	[ -f "$GENERATION_FILE" ] && installed_version=$(json_get "$GENERATION_FILE" migration_version)
+	_installed_version=""
+	[ -f "$GENERATION_FILE" ] && _installed_version=$(json_get "$GENERATION_FILE" migration_version)
+	log "version comparison: installed='$_installed_version' expected='$_expected_version'"
 
-	if [ "$installed_version" = "$expected_version" ]; then
-		log "installed generation ($installed_version) already matches this image - nothing to do"
+	if [ "$_installed_version" = "$_expected_version" ]; then
+		_migration_action="skipped:version_match"
+		log "installed generation ($_installed_version) already matches this image - nothing to do"
+		_diag_write_state
 		return 0
 	fi
 
@@ -545,14 +627,26 @@ start() {
 	# there is nothing to back up or replace, just record the baseline
 	# generation so future boots have something to compare against.
 	if [ ! -e "$APPS/klipper/.git" ]; then
+		_migration_action="baseline_only"
 		log "no existing klipper checkout - nothing to migrate (factory-seed will handle first-time provisioning); recording baseline generation only"
-		record_generation "$expected_version"
+		record_generation "$_expected_version"
+		_generation_recorded="yes"
+		_diag_write_state
 		return 0
 	fi
 
-	log "generation mismatch: installed='$installed_version' expected='$expected_version' - migration needed"
-	maintenance_gate_ok || return 0
+	log "generation mismatch: installed='$_installed_version' expected='$_expected_version' - migration needed"
+	if ! maintenance_gate_ok; then
+		_migration_action="blocked:maintenance_gate"
+		_gate_result="blocked"
+		_last_error="maintenance gate refused (see gate log for details: print active, stale lock, or no swap)"
+		log "migration BLOCKED by maintenance gate - this is a diagnosed failure, not a silent skip. See persistent diagnostic at $DIAG_STATE"
+		_diag_write_state
+		return 0
+	fi
+	_gate_result="passed"
 
+	_migration_action="migrating"
 	BACKUP_DIR="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)"
 	mkdir -p "$BACKUP_DIR"
 	log "backing up current application tree to $BACKUP_DIR before touching anything"
@@ -566,7 +660,13 @@ start() {
 	# the tree dirty in the first place. See S04nebulaos-factory-seed's
 	# matching note.
 	if [ -e "$APPS/klipper/.git" ]; then
-		reseed_git_app klipper master "https://github.com/Klipper3d/klipper.git" || klipper_ok=0
+		if reseed_git_app klipper master "https://github.com/Klipper3d/klipper.git"; then
+			_klipper_reseed_result="success"
+		else
+			klipper_ok=0
+			_klipper_reseed_result="failed"
+			_last_error="klipper reseed failed"
+		fi
 	fi
 	# A device seeded by a pre-Phase-1 image has no extensions checkout at
 	# all, so there is nothing to reseed and nothing to back up - but the
@@ -575,15 +675,37 @@ start() {
 	# recording a generation that claims a component this device does not
 	# have.
 	if [ -e "$APPS/nebulaos-klipper-extensions/.git" ]; then
-		reseed_git_app nebulaos-klipper-extensions main \
-			"https://github.com/coreflake1/NebulaOS-klipper-extensions.git" || extensions_ok=0
+		if reseed_git_app nebulaos-klipper-extensions main \
+			"https://github.com/coreflake1/NebulaOS-klipper-extensions.git"; then
+			_extensions_reseed_result="success"
+		else
+			extensions_ok=0
+			_extensions_reseed_result="failed"
+			_last_error="extensions reseed failed"
+		fi
 	else
 		log "no existing extensions checkout (device predates the no-fork architecture) - provisioning it from this image's archive as part of this migration"
-		seed_missing_extensions || extensions_ok=0
+		if seed_missing_extensions; then
+			_extensions_reseed_result="provisioned"
+		else
+			extensions_ok=0
+			_extensions_reseed_result="provision_failed"
+			_last_error="extensions provision failed"
+		fi
 	fi
 	if [ -e "$APPS/moonraker/.git" ]; then
-		reseed_git_app moonraker master "https://github.com/Arksine/moonraker.git" || moonraker_ok=0
+		if reseed_git_app moonraker master "https://github.com/Arksine/moonraker.git"; then
+			_moonraker_reseed_result="success"
+		else
+			moonraker_ok=0
+			_moonraker_reseed_result="failed"
+			_last_error="moonraker reseed failed"
+		fi
 	fi
+
+	_klipper_after=$( [ -d "$APPS/klipper/.git" ] && git -C "$APPS/klipper" rev-parse HEAD 2>/dev/null || echo "absent")
+	_extensions_after=$( [ -d "$APPS/nebulaos-klipper-extensions/.git" ] && git -C "$APPS/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "absent")
+	_moonraker_after=$( [ -d "$APPS/moonraker/.git" ] && git -C "$APPS/moonraker" rev-parse HEAD 2>/dev/null || echo "absent")
 
 	# The Klipper stack is validated as a pair. Report it as one, so a
 	# reader of the boot log sees "the pair failed", not two independent
@@ -593,11 +715,16 @@ start() {
 	fi
 
 	if [ "$klipper_ok" = "1" ] && [ "$extensions_ok" = "1" ] && [ "$moonraker_ok" = "1" ]; then
-		record_generation "$expected_version"
-		log "migration complete - generation now $expected_version. Previous application tree preserved at $BACKUP_DIR (not deleted automatically - safe to remove by hand once the new generation is confirmed working)."
+		record_generation "$_expected_version"
+		_generation_recorded="yes"
+		_migration_action="completed"
+		log "migration complete - generation now $_expected_version. Previous application tree preserved at $BACKUP_DIR (not deleted automatically - safe to remove by hand once the new generation is confirmed working)."
+		log "result: klipper=$_klipper_after extensions=$_extensions_after moonraker=$_moonraker_after"
 	else
+		_migration_action="incomplete"
 		log "migration INCOMPLETE - at least one component failed and was left at its previous version (see errors above). Generation NOT advanced, so this will retry next boot. Nothing was destroyed: any component that failed still has its pre-migration tree in place at $APPS, and $BACKUP_DIR holds whatever was successfully backed up before the failure."
 	fi
+	_diag_write_state
 }
 
 record_generation() {
