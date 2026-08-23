@@ -77,10 +77,18 @@ make_seed_archive() {
 	cp -r "$src/." "$tmp/"
 	# Ensure the archived copy is checked out on the branch Moonraker's
 	# reserved slot actually expects, without disturbing $src itself.
-	if ! git -C "$tmp" show-ref --verify --quiet "refs/heads/$active_branch"; then
-		git -C "$tmp" branch "$active_branch"
-	fi
-	git -C "$tmp" checkout -q "$active_branch"
+	#
+	# Phase 1.8 candidate-001 root cause: the old code did a plain
+	# `git checkout "$active_branch"` which, when $src had a DETACHED HEAD
+	# at the pinned commit (the normal state after clone_pinned's non-shallow
+	# path does `git checkout "$ref"`), switched to the local branch at its
+	# ORIGINAL position (the clone's default HEAD, e.g. main at 448b59c)
+	# instead of staying at the pinned commit (e.g. 7260389). The archive
+	# then contained the wrong content. `checkout -B` forces the local
+	# branch to the current HEAD position, which is always correct: if HEAD
+	# is detached at the pin, the branch moves there; if HEAD is already on
+	# the branch (shallow-clone path), it stays.
+	git -C "$tmp" checkout -q -B "$active_branch"
 
 	# Real bug found live (first full first-boot qualification, 2026-07-28):
 	# a plain `tar -xzf` of vendor/klipper's real working tree still has to
