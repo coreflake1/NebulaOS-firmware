@@ -58,17 +58,26 @@
 # runs, is what actually unblocks S04/S05 on the SAME boot the interruption
 # is discovered, rather than only on the boot after next.
 #
-# Deliberately narrow, matching the same "never guess" discipline as the
-# unseeded-namespace case below: only a lock whose sibling state file
-# explicitly says "validating" is touched, and only the LOCK FILE is
-# removed here - state.json itself is left exactly as it is (the supervisor
-# reads state.json directly, not lock presence, so it still finds and fully
-# repairs this state.json on its own next boot-time pass regardless of
-# whether the lock file already disappeared). A malformed/missing/unreadable
-# state file, or any other state (factory-fallback's own deliberate "a human
-# must clear this" terminal state included), leaves the lock exactly as
-# blocking as before - this must never bypass a real, recent, failed update.
-_maintenance_gate_reconcile_validating_locks() {
+# Clears locks whose sibling state.json is in a TERMINAL state — one where
+# no active update process is running and the supervisor itself cannot
+# recover without a new boot-time pass. Only the LOCK FILE is removed;
+# state.json is left for the supervisor to reconcile on its own later pass.
+#
+# Terminal states cleared:
+#   "validating"      — supervisor died mid-validate (Phase 1.5 closure bug)
+#   "interrupted"     — supervisor restarted mid-transaction
+#   "factory-fallback" — supervisor explicitly gave up (restore failed)
+#
+# Phase 1.8 hardware qualification (2026-08-23): factory-fallback and
+# interrupted locks blocked image migration on EVERY boot of candidate-001
+# AND candidate-002. The gate's original design preserved factory-fallback
+# for "human must clear" semantics, but this created a permanent deadlock
+# for image migrations — S04 runs before services, so no supervisor or
+# human intervention can occur before the gate check. An image migration
+# replaces the entire checkout, making any stale update state irrelevant.
+# A malformed/missing/unreadable state file, or a state not in the terminal
+# list, still leaves the lock exactly as blocking as before.
+_maintenance_gate_reconcile_stale_locks() {
 	[ -d "$LOCKDIR" ] || return 0
 	updates_root=$(dirname "$LOCKDIR")
 	for lockfile in "$LOCKDIR"/*.lock; do
@@ -78,15 +87,17 @@ _maintenance_gate_reconcile_validating_locks() {
 		[ -f "$state_file" ] || continue
 		state=$(grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' "$state_file" 2>/dev/null | \
 			sed -E 's/.*"([^"]*)"$/\1/' | head -1)
-		if [ "$state" = "validating" ]; then
-			log "found an interrupted update transaction ($name, state=validating) from a previous supervisor process - clearing the stale lock now so migration/activation are not blocked until the update supervisor starts; nebulaos-update-supervisor.sh will fully reconcile $name's state.json on its own next boot-time pass"
-			rm -f "$lockfile"
-		fi
+		case "$state" in
+			validating|interrupted|factory-fallback)
+				log "found a stale update lock ($name, state=$state) from a previous boot — clearing so migration/activation are not permanently blocked; nebulaos-update-supervisor.sh will reconcile $name's state.json on its own next pass"
+				rm -f "$lockfile"
+				;;
+		esac
 	done
 }
 
 maintenance_gate_ok() {
-	_maintenance_gate_reconcile_validating_locks
+	_maintenance_gate_reconcile_stale_locks
 
 	active=$(wget -q -O - --timeout=3 'http://127.0.0.1:7125/printer/objects/query?print_stats' 2>/dev/null)
 	case "$active" in

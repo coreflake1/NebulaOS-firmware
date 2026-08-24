@@ -11,11 +11,11 @@
 # Two cooperating fixes are exercised here, and the ordering between them is itself the
 # thing most worth pinning down with a test:
 #
-#   1. nebulaos-maintenance-gate.sh's _maintenance_gate_reconcile_validating_locks() - runs
+#   1. nebulaos-maintenance-gate.sh's _maintenance_gate_reconcile_stale_locks() - runs
 #      from S04, early in boot, BEFORE nebulaos-update-supervisor.sh's own daemon has even
-#      started. Clears ONLY the lock FILE for a component whose state.json says
-#      "validating" - this is what actually unblocks migration/activation on the SAME boot
-#      the interruption is discovered, not just the boot after next.
+#      started. Clears the lock FILE for a component whose state.json is in a terminal
+#      state (validating, interrupted, factory-fallback) - this is what actually unblocks
+#      migration/activation on the SAME boot the interruption is discovered.
 #
 #   2. nebulaos-update-supervisor.sh's reconcile_stale_component_locks_on_boot() - runs
 #      later, from the supervisor daemon's own loop(). Fully repairs state.json (resets
@@ -224,19 +224,45 @@ else
 	fail "pair transaction lock: not reconciled correctly ($out7)"
 fi
 
-# --- scenario 8: mixed - one stale, one live, present at once -----------------------------
+# --- scenario 8: factory-fallback lock cleared (Phase 1.8 hardware bug) -------------------
 
 t8="$WORK/t8"; mkdir -p "$t8/updates/locks"
 apps8=$(seeded_apps)
-write_fixture_state "$t8" klipper validating 845396f 4510ee6
-write_fixture_state "$t8" mainsail factory-fallback v1 v2
-: > "$t8/updates/locks/klipper.lock"
-: > "$t8/updates/locks/mainsail.lock"
+write_fixture_stack_state "$t8" factory-fallback 61c0c8d 4bdd419
+: > "$t8/updates/locks/klipper-stack.lock"
 out8=$(run_gate "$t8/updates/locks" "$apps8")
-if [ ! -e "$t8/updates/locks/klipper.lock" ] && [ -e "$t8/updates/locks/mainsail.lock" ] && echo "$out8" | grep -q GATE_BLOCKED; then
-	pass "mixed locks: only the stale one is cleared, the live (factory-fallback) one still blocks the gate"
+if echo "$out8" | grep -q GATE_PASSED && [ ! -e "$t8/updates/locks/klipper-stack.lock" ]; then
+	pass "factory-fallback lock (klipper-stack): cleared, gate proceeds — the Phase 1.8 hardware bug"
 else
-	fail "mixed locks: reconciliation did not discriminate correctly ($out8, klipper.lock exists=$([ -e "$t8/updates/locks/klipper.lock" ] && echo yes || echo no), mainsail.lock exists=$([ -e "$t8/updates/locks/mainsail.lock" ] && echo yes || echo no))"
+	fail "factory-fallback lock: not reconciled correctly ($out8)"
+fi
+
+# --- scenario 8b: interrupted lock cleared -----------------------------------------------
+
+t8b="$WORK/t8b"; mkdir -p "$t8b/updates/locks"
+apps8b=$(seeded_apps)
+write_fixture_state "$t8b" klipper interrupted 845396f 845396f
+: > "$t8b/updates/locks/klipper.lock"
+out8b=$(run_gate "$t8b/updates/locks" "$apps8b")
+if echo "$out8b" | grep -q GATE_PASSED && [ ! -e "$t8b/updates/locks/klipper.lock" ]; then
+	pass "interrupted lock (klipper): cleared, gate proceeds"
+else
+	fail "interrupted lock: not reconciled correctly ($out8b)"
+fi
+
+# --- scenario 8c: mixed - one terminal, one live, present at once -------------------------
+
+t8c="$WORK/t8c"; mkdir -p "$t8c/updates/locks"
+apps8c=$(seeded_apps)
+write_fixture_state "$t8c" klipper validating 845396f 4510ee6
+write_fixture_state "$t8c" mainsail healthy v1 v2
+: > "$t8c/updates/locks/klipper.lock"
+: > "$t8c/updates/locks/mainsail.lock"
+out8c=$(run_gate "$t8c/updates/locks" "$apps8c")
+if [ ! -e "$t8c/updates/locks/klipper.lock" ] && [ -e "$t8c/updates/locks/mainsail.lock" ] && echo "$out8c" | grep -q GATE_BLOCKED; then
+	pass "mixed locks: terminal (validating) cleared, non-terminal (healthy) still blocks"
+else
+	fail "mixed locks: reconciliation did not discriminate correctly ($out8c, klipper.lock exists=$([ -e "$t8c/updates/locks/klipper.lock" ] && echo yes || echo no), mainsail.lock exists=$([ -e "$t8c/updates/locks/mainsail.lock" ] && echo yes || echo no))"
 fi
 
 # --- scenario 9: second boot after recovery is clean/idempotent ---------------------------
@@ -357,6 +383,37 @@ EOF
 	fi
 else
 	echo "SKIP: $MIGRATE_SCRIPT not present for the end-to-end check"
+fi
+
+# =========================================================================
+# End-to-end: the exact Phase 1.8 hardware bug (factory-fallback blocks migration)
+# =========================================================================
+
+if [ -f "$MIGRATE_SCRIPT" ]; then
+	tF="$WORK/e2e-fb"
+	mkdir -p "$tF/apps/klipper/.git" "$tF/system" "$tF/updates/locks" "$tF/seeds"
+	write_fixture_stack_state "$tF" factory-fallback 61c0c8d 4bdd419
+	: > "$tF/updates/locks/klipper-stack.lock"
+	cat > "$tF/seeds/seed-manifest.json" <<'EOF'
+{"migration_version": "test-generation-2"}
+EOF
+	logF="$WORK/e2e-fb.log"
+	env PATH="$FAKE_BIN:$PATH" S04NEBULAOS_MIGRATE_NO_AUTORUN=1 \
+		SEEDS="$tF/seeds" APPS="$tF/apps" SYSTEM="$tF/system" \
+		LOCKDIR="$tF/updates/locks" GATE_LIB="$GATE_LIB" \
+		sh -c ". '$MIGRATE_SCRIPT'; start" > "$logF" 2>&1
+	if ! grep -q "BLOCKED: an update transaction lock is present" "$logF"; then
+		pass "end-to-end: S04 gate no longer blocks on factory-fallback lock (the Phase 1.8 hardware bug)"
+	else
+		fail "end-to-end: the gate still blocks migration on a factory-fallback lock ($(cat "$logF"))"
+	fi
+	if [ ! -e "$tF/updates/locks/klipper-stack.lock" ]; then
+		pass "end-to-end: the factory-fallback lock file was cleared during S04 boot"
+	else
+		fail "end-to-end: the factory-fallback lock file was never cleared"
+	fi
+else
+	echo "SKIP: $MIGRATE_SCRIPT not present for the Phase 1.8 end-to-end check"
 fi
 
 echo ""

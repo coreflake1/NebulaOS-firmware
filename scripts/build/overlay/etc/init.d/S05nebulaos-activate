@@ -71,8 +71,25 @@ KLIPPER_STACK_LOCK="klipper-stack"
 [ -f "$COMPOSE_LIB" ] && . "$COMPOSE_LIB"
 [ -f "$CHELPER_LIB" ] && . "$CHELPER_LIB"
 
+DIAG_DIR="${NEBULAOS_ROOT}/system/diagnostics"
+DIAG_LOG="${DIAG_DIR}/activation.log"
+DIAG_MAX_SIZE=65536
+
+_diag_init() {
+	mkdir -p "$DIAG_DIR" 2>/dev/null || true
+	if [ -f "$DIAG_LOG" ]; then
+		_sz=$(wc -c < "$DIAG_LOG" 2>/dev/null || echo 0)
+		if [ "$_sz" -gt "$DIAG_MAX_SIZE" ]; then
+			tail -c "$DIAG_MAX_SIZE" "$DIAG_LOG" > "$DIAG_LOG.tmp" 2>/dev/null
+			mv "$DIAG_LOG.tmp" "$DIAG_LOG" 2>/dev/null || true
+		fi
+	fi
+}
+
 log() {
 	echo "S05nebulaos-activate: $1"
+	_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+	echo "$_ts $1" >> "$DIAG_LOG" 2>/dev/null || true
 }
 
 # Records one app's activation decision. Appended as simple key=value lines
@@ -229,6 +246,9 @@ activate_klipper_stack() {
 }
 
 start() {
+	_diag_init
+	log "--- activation pass starting ---"
+
 	# /usr/data must be a real, writable mount before anything else here
 	# is meaningful - S01persistent-datastore already mounted it, but
 	# re-confirm rather than assume, since this script's own correctness
@@ -344,9 +364,25 @@ start() {
 
 	# Assemble the human/machine-readable activation state record.
 	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	_act_klipper_sha=$( [ -d "$NEBULAOS_ROOT/apps/klipper/.git" ] && git -C "$NEBULAOS_ROOT/apps/klipper" rev-parse HEAD 2>/dev/null || echo "absent")
+	_act_extensions_sha=$( [ -d "$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions/.git" ] && git -C "$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions" rev-parse HEAD 2>/dev/null || echo "absent")
+	_act_moonraker_sha=$( [ -d "$NEBULAOS_ROOT/apps/moonraker/.git" ] && git -C "$NEBULAOS_ROOT/apps/moonraker" rev-parse HEAD 2>/dev/null || echo "absent")
+	_act_gen=$( [ -f "$NEBULAOS_ROOT/system/app-generation.json" ] && grep -o '"migration_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$NEBULAOS_ROOT/system/app-generation.json" 2>/dev/null | sed -E 's/.*"([^"]*)"$/\1/' | head -1 || echo "absent")
+	_act_bind_klipper="no"
+	awk '$2=="/opt/klipper" {found=1} END{exit !found}' /proc/mounts 2>/dev/null && _act_bind_klipper="yes"
+	_act_compose_count=0
+	if [ -d "$NEBULAOS_ROOT/apps/klipper/klippy/extras" ]; then
+		_act_compose_count=$(find "$NEBULAOS_ROOT/apps/klipper/klippy/extras" -maxdepth 1 -type l 2>/dev/null | wc -l)
+	fi
 	{
 		echo "{"
 		echo "  \"activated_at\": \"$now\","
+		echo "  \"active_klipper_sha\": \"$_act_klipper_sha\","
+		echo "  \"active_extensions_sha\": \"$_act_extensions_sha\","
+		echo "  \"active_moonraker_sha\": \"$_act_moonraker_sha\","
+		echo "  \"active_generation\": \"$_act_gen\","
+		echo "  \"klipper_bind_active\": \"$_act_bind_klipper\","
+		echo "  \"composition_symlink_count\": $_act_compose_count,"
 		echo "  \"decisions\": {"
 		first=1
 		if [ -e "$NEBULAOS_ROOT/system/.activation-decisions" ]; then
@@ -362,6 +398,7 @@ start() {
 		echo "}"
 	} > "$STATE_FILE"
 	log "activation complete - state recorded at $STATE_FILE"
+	log "active SHAs: klipper=$_act_klipper_sha extensions=$_act_extensions_sha bind=$_act_bind_klipper compose_links=$_act_compose_count gen=$_act_gen"
 }
 
 # S05NEBULAOS_ACTIVATE_NO_AUTORUN=1 lets tests source this script to call

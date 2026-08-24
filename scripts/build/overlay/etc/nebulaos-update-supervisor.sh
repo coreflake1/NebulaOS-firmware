@@ -844,7 +844,7 @@ reconcile_klipper_stack_on_boot() {
 #
 # Phase 1.5 hardware closure (2026-08-19): iterates state.json files, NOT
 # lock files - nebulaos-maintenance-gate.sh's own
-# _maintenance_gate_reconcile_validating_locks() now runs earlier in boot
+# _maintenance_gate_reconcile_stale_locks() now runs earlier in boot
 # (from S04, before this supervisor daemon even starts) and may have already
 # removed the lock file for exactly this reason, to unblock S04/S05 on the
 # same boot. If this function only looked for a lock file, a device the gate

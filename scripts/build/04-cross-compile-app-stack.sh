@@ -735,6 +735,68 @@ moonraker_is_shallow=$(git -C "$VENDOR/moonraker" rev-parse --is-shallow-reposit
 mainsail_version=$(cat "$VENDOR/mainsail-dist/dist/.version" 2>/dev/null || echo "unknown")
 build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# --- Build-integrity assertions (Phase 1.8 candidate-002) ---
+# Candidate-001 shipped the wrong extensions because make_seed_archive switched
+# to the local branch (448b59c) instead of the pinned commit (7260389). These
+# assertions catch that class of bug at build time, before an image is ever
+# created. Every seed archive's actual Git HEAD must match the dependency pin
+# that 00-fetch-vendor-sources.sh verified — if make_seed_archive silently
+# switches to a different commit, the build fails here instead of producing an
+# image that deploys the wrong code.
+echo "== verifying seed archive integrity against dependency pins =="
+_assert_seed_matches_pin() {
+	name="$1"; archive="$2"; expected_pin="$3"
+	_assert_tmp=$(mktemp -d)
+	sh -c "gzip -dc '$archive' | tar -xo -C '$_assert_tmp'" 2>/dev/null
+	actual_head=$(git -C "$_assert_tmp" rev-parse HEAD 2>/dev/null)
+	rm -rf "$_assert_tmp"
+	if [ "$actual_head" != "$expected_pin" ]; then
+		echo "FATAL: $name seed archive HEAD ($actual_head) does not match dependency pin ($expected_pin)" >&2
+		echo "The archive was built from the wrong commit. This is the exact bug that produced candidate-001's wrong extension seed." >&2
+		exit 1
+	fi
+	echo "  $name: archive HEAD matches pin ($expected_pin)"
+}
+_assert_seed_matches_pin klipper \
+	"$OVERLAY/opt/nebulaos-seeds/klipper.tar.gz" "$KLIPPER_PIN"
+_assert_seed_matches_pin nebulaos-klipper-extensions \
+	"$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" "$KLIPPER_EXTENSIONS_PIN"
+_assert_seed_matches_pin moonraker \
+	"$OVERLAY/opt/nebulaos-seeds/moonraker.tar.gz" "$MOONRAKER_PIN"
+
+# Also verify the extensions manifest declares the correct Klipper qualification
+# target and does not allow unqualified operation.
+_ext_manifest="$VENDOR/nebulaos-klipper-extensions/nebulaos-extensions.json"
+_ext_qualified=$(grep -o '"qualified_commit"[[:space:]]*:[[:space:]]*"[^"]*"' "$_ext_manifest" | \
+	sed -E 's/.*"([^"]*)"$/\1/' | head -1)
+_ext_allow_unq=$(grep -o '"allow_unqualified"[[:space:]]*:[[:space:]]*[a-z]*' "$_ext_manifest" | \
+	sed -E 's/.*:[[:space:]]*//' | head -1)
+if [ "$_ext_qualified" != "$KLIPPER_PIN" ]; then
+	echo "FATAL: extensions manifest qualified_commit ($_ext_qualified) does not match KLIPPER_PIN ($KLIPPER_PIN)" >&2
+	exit 1
+fi
+if [ "$_ext_allow_unq" != "false" ]; then
+	echo "FATAL: extensions manifest allow_unqualified=$_ext_allow_unq (must be false)" >&2
+	exit 1
+fi
+echo "  extensions manifest: qualified_commit matches KLIPPER_PIN, allow_unqualified=false"
+echo "== seed archive integrity verified =="
+
+# Verify seed_commit output from make_seed_archive matches the pin as well.
+# This is the value that goes into seed-manifest.json.
+if [ "$klipper_seed_commit" != "$KLIPPER_PIN" ]; then
+	echo "FATAL: klipper_seed_commit ($klipper_seed_commit) != KLIPPER_PIN ($KLIPPER_PIN)" >&2
+	exit 1
+fi
+if [ "$extensions_seed_commit" != "$KLIPPER_EXTENSIONS_PIN" ]; then
+	echo "FATAL: extensions_seed_commit ($extensions_seed_commit) != KLIPPER_EXTENSIONS_PIN ($KLIPPER_EXTENSIONS_PIN)" >&2
+	exit 1
+fi
+if [ "$moonraker_seed_commit" != "$MOONRAKER_PIN" ]; then
+	echo "FATAL: moonraker_seed_commit ($moonraker_seed_commit) != MOONRAKER_PIN ($MOONRAKER_PIN)" >&2
+	exit 1
+fi
+
 # 2026-08-08 (Clean-Update + Virgin Baseline mission, Phase 3): a derived,
 # not manually-maintained, migration identifier - see
 # docs/NEBULAOS_PERSISTENT_LIFECYCLE.md for the full design. Deliberately
