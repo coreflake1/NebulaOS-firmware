@@ -73,13 +73,21 @@ that flips a switch, then reboot the printer. Two minutes, no tools, no opening 
 That's the whole thing. If you ever want to switch back, repeat the same steps with the other
 command.
 
-### A safety net you get for free
+### What happens if custom firmware fails to start?
 
-Custom firmware has a built-in "oops" protection: the very first thing it does on every boot is
-quietly set the switch back to **stock**. Only after everything (Klipper, Moonraker, the screen)
-is confirmed actually working does it flip the switch back to "boot custom again next time." So if
-a custom boot ever crashes or hangs, the *next* reboot automatically lands you back on stock —
-even if you can't get to a keyboard. You never get stuck.
+**Important change (Phase 1.8B):** custom firmware no longer automatically falls back to stock on
+failure. The automatic stock fallback was removed because booting into stock Creality firmware
+causes it to auto-flash the printer's MCU (motor/heater controller) with old firmware, which
+destroys the qualified MCU build and can leave the printer in a worse state than the original
+problem.
+
+If a custom boot fails (Klipper doesn't start, screen is unresponsive, etc.), the printer stays on
+custom firmware. You'll need to recover manually — usually by SSHing in and either fixing the
+problem or switching to stock deliberately using Method 1 above. If SSH is also unavailable, use
+Method 2 (USB recovery).
+
+The manual recovery commands from Method 1 still work exactly the same way. The only change is that
+the printer no longer does the stock switch *for you* automatically.
 
 ---
 

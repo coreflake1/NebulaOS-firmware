@@ -1,27 +1,30 @@
 #!/bin/sh
 #
-# Revert-first boot safety (FIRMWARE.md sec 21/22). Runs before every other
-# init script, even syslogd/klogd - its only job is to point the ota marker
-# back at the stock kernel/rootfs (p5/p7) the instant this custom image
-# starts booting at all.
+# Boot-time OTA marker policy (FIRMWARE.md sec 21/22). Runs before every
+# other init script, even syslogd/klogd.
 #
-# Effect: if anything after this point crashes, hangs, or never even reaches
-# S99confirm-good, the *next* reboot - power cycle, watchdog, whatever -
-# lands back on stock automatically. No USB cable, no boot/reset buttons, no
-# working shell on the failed boot required. S99confirm-good is the only
-# thing that ever flips this back forward, and only once the real app stack
-# is confirmed listening, not just because init reached that point.
+# HISTORY: this script used to unconditionally write "ota:kernel" (stock
+# slot) on every boot, so that any failure before S99confirm-good would cause
+# the next reboot to land on stock automatically. That automatic stock
+# fallback was REMOVED in Phase 1.8B because booting the stock Creality
+# slot auto-flashes the MCU with old Creality firmware, destroying the
+# qualified native GD32F303 MCU build. The risk of silently bricking the
+# MCU outweighs the convenience of automatic rollback.
 #
-# Deliberately touches only /dev/mmcblk0p1 (the 1MB "ota" partition) - never
-# /dev/mmcblk0p6 or p8 (kernel2/rootfs2, this image's own home). Real device
-# forensics for this mechanism: FIRMWARE.md sec 19. Byte format details and
-# verification: /etc/ota_marker.sh (shared with S99confirm-good).
+# CURRENT POLICY: this script is a deliberate NO-OP. The OTA marker stays
+# on whatever value it already has (normally "ota:kernel2", i.e. NebulaOS).
+# If Klipper fails to start, the device stays on NebulaOS and requires
+# MANUAL recovery via SSH or USB (see docs/DEVELOPER_RECOVERY.md). This is
+# safer than an automatic stock boot that destroys the MCU firmware.
+#
+# The ota_marker.sh library is still sourced so that write_ota_marker
+# remains available in this environment for manual recovery commands.
 
 . /etc/ota_marker.sh
 
 case "$1" in
 	start)
-		write_ota_marker "ota:kernel"
+		echo "S00revert-safety: automatic stock fallback DISABLED (MCU safety - Phase 1.8B). Marker unchanged; manual recovery required on failure."
 		;;
 	*)
 		;;
