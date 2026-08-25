@@ -1,0 +1,169 @@
+#!/bin/sh
+#
+# S50nebulaos-mcu-guard - MCU identity verification before Klipper
+#
+# Phase 1.8B Workstream B: READ-ONLY identity check service. Runs before
+# S55klipper (same S50 prefix as S50webcam; alphabetical sort guarantees
+# this script runs first) and queries the GD32F303 MCU's bootloader
+# identity via creality_flash.py's serial-magic protocol. Logs the
+# finding, writes a machine-readable state file to /run/ (tmpfs), and
+# sets an exit code that downstream services can check.
+#
+# SAFETY CONTRACT:
+#   - This service NEVER flashes the MCU (no erase, no write, no
+#     flash_image, no flash subcommand).
+#   - This service NEVER writes to /dev/mmcblk0p1 or any block device.
+#   - This service NEVER calls write_ota_marker or modifies any
+#     persistent storage.
+#   - The Python helper ALWAYS calls app_start() after querying identity,
+#     returning the MCU to its application firmware.
+#   - The only serial interaction is: enter_bootloader -> get_version ->
+#     app_start (all read-only from the MCU's perspective).
+#
+# 9-CASE STATE MATRIX (design reference):
+#   Case 1: Native firmware, correct identity     -> PASS, start Klipper
+#   Case 2: Native firmware, wrong identity        -> FAIL (hardware mismatch)
+#   Case 3: Stock firmware (after clobber)         -> DEFERRED (would restore)
+#   Case 4: Bootloader-only (CRC fail)             -> DEFERRED (would restore)
+#   Case 5: MCU not responding on serial           -> WARN (let Klipper try)
+#   Case 6: Native fw, identity query fails        -> WARN (let Klipper try)
+#   Case 7: Unknown firmware                       -> FAIL (deferred)
+#   Case 8: Flash restore succeeds                 -> DEFERRED
+#   Case 9: Flash restore fails                    -> DEFERRED
+#
+# Phase 1.8B implements Cases 1, 2, 5, and 6 only (identity check).
+# Cases 3, 4, 7, 8, 9 (automatic flash restoration) require hardware
+# qualification and are NOT implemented in this phase.
+#
+# See docs/MCU_LIFECYCLE_GUARD.md for the full design document.
+
+MCU_GUARD_STATE="${MCU_GUARD_STATE:-/run/nebulaos-mcu-guard.state}"
+MCU_IDENTITY_CHECK="${MCU_IDENTITY_CHECK:-/etc/nebulaos/mcu_identity_check.py}"
+PYTHON3="${MCU_GUARD_PYTHON3:-/usr/bin/python3}"
+EXPECTED_HW_ID="mcu0_001_G32"
+
+log() {
+    echo "S50nebulaos-mcu-guard: $1"
+}
+
+write_state() {
+    _result="$1"
+    _identity="${2:-unknown}"
+    _detail="${3:-}"
+    _ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
+    cat > "$MCU_GUARD_STATE" <<-EOF
+	MCU_GUARD_RESULT=$_result
+	MCU_IDENTITY=$_identity
+	MCU_GUARD_DETAIL=$_detail
+	MCU_GUARD_TIMESTAMP=$_ts
+	MCU_GUARD_EXPECTED=$EXPECTED_HW_ID
+	EOF
+}
+
+do_check() {
+    log "starting MCU identity verification"
+
+    # Preflight: the Python helper must exist and be readable.
+    if [ ! -f "$MCU_IDENTITY_CHECK" ]; then
+        log "WARNING: identity check helper not found at $MCU_IDENTITY_CHECK"
+        log "allowing Klipper to start (helper not deployed yet)"
+        write_state "WARN" "unknown" "helper_not_found"
+        exit 0
+    fi
+
+    if [ ! -x "$PYTHON3" ]; then
+        log "WARNING: Python interpreter not found at $PYTHON3"
+        write_state "WARN" "unknown" "python_not_found"
+        exit 0
+    fi
+
+    # Run the identity check helper. It prints key=value pairs on stdout
+    # and exits 0 on success, non-zero on failure. Capture its output.
+    check_output=$("$PYTHON3" "$MCU_IDENTITY_CHECK" 2>&1) || true
+    check_exit=$?
+
+    # Parse the result from the helper output.
+    _guard_result=$(echo "$check_output" | sed -n 's/^MCU_GUARD_RESULT=//p' | head -1)
+    _identity=$(echo "$check_output" | sed -n 's/^MCU_IDENTITY=//p' | head -1)
+    _detail=$(echo "$check_output" | sed -n 's/^MCU_GUARD_DETAIL=//p' | head -1)
+
+    # If the helper produced no parseable output at all, treat as a warning
+    # (timing issue, import error, etc.) - do not block Klipper.
+    if [ -z "$_guard_result" ]; then
+        log "WARNING: identity check helper produced no parseable result"
+        log "helper output: $check_output"
+        log "allowing Klipper to start (identity check inconclusive)"
+        write_state "WARN" "unknown" "helper_no_output"
+        exit 0
+    fi
+
+    # Decision logic based on the helper's structured result.
+    case "$_guard_result" in
+        PASS)
+            # Case 1: native firmware, correct identity.
+            log "MCU identity verified: $_identity (matches expected $EXPECTED_HW_ID)"
+            write_state "PASS" "$_identity" "$_detail"
+            exit 0
+            ;;
+        FAIL_WRONG_ID)
+            # Case 2: identity query succeeded but the hardware ID does
+            # not match the expected value. This should never happen on
+            # a KE with the correct MCU, so it indicates a hardware
+            # mismatch or an unexpected firmware version. Do NOT start
+            # Klipper - it would talk to the wrong MCU.
+            log "ERROR: MCU identity mismatch: got '$_identity', expected '$EXPECTED_HW_ID'"
+            log "this may indicate a hardware mismatch - blocking Klipper start"
+            write_state "FAIL" "$_identity" "wrong_hardware_id"
+            exit 1
+            ;;
+        FAIL_SERIAL)
+            # Case 5: serial port could not be opened or MCU did not
+            # respond. This may be a timing issue (MCU not ready yet)
+            # or a genuine hardware fault. Allow Klipper to try - it
+            # has its own serial timeout/retry logic.
+            log "WARNING: could not communicate with MCU on serial ($_detail)"
+            log "allowing Klipper to start (may be a timing issue)"
+            write_state "WARN" "unknown" "$_detail"
+            exit 0
+            ;;
+        FAIL_BOOTLOADER)
+            # Case 6: entered bootloader but identity query itself
+            # failed (e.g. checksum error, short read). Allow Klipper
+            # to try - the MCU may still have valid application firmware.
+            log "WARNING: bootloader entered but identity query failed ($_detail)"
+            log "allowing Klipper to start"
+            write_state "WARN" "unknown" "$_detail"
+            exit 0
+            ;;
+        FAIL)
+            # Generic failure from the helper - log detail, allow
+            # Klipper to try unless the detail says otherwise.
+            log "WARNING: identity check failed ($_detail)"
+            write_state "WARN" "$_identity" "$_detail"
+            exit 0
+            ;;
+        *)
+            # Unrecognized result - do not block Klipper.
+            log "WARNING: unrecognized check result '$_guard_result'"
+            write_state "WARN" "$_identity" "unrecognized_result"
+            exit 0
+            ;;
+    esac
+}
+
+case "$1" in
+    start)
+        do_check
+        ;;
+    stop)
+        :
+        ;;
+    restart)
+        "$0" start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+exit 0

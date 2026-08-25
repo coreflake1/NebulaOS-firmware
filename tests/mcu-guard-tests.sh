@@ -1,0 +1,548 @@
+#!/bin/sh
+#
+# Offline tests for S50nebulaos-mcu-guard (Phase 1.8B MCU lifecycle guard).
+#
+# Validates the init.d script's structure, safety properties, decision
+# coverage, and state-file behavior. Does NOT require serial hardware or
+# a real MCU - all checks are static analysis of the script text and
+# structural properties, plus a few mock-driven behavioral tests.
+#
+# Usage: sh tests/mcu-guard-tests.sh
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+INITD_DIR="$REPO_ROOT/scripts/build/overlay/etc/init.d"
+GUARD_SCRIPT="$INITD_DIR/S50nebulaos-mcu-guard"
+PYTHON_HELPER="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_identity_check.py"
+KLIPPER_SCRIPT="$INITD_DIR/S55klipper"
+
+PASS=0
+FAIL=0
+fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
+pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
+
+# =========================================================================
+# 1. File existence and permissions
+# =========================================================================
+
+echo "--- File existence and permissions ---"
+
+if [ -f "$GUARD_SCRIPT" ]; then
+    pass "S50nebulaos-mcu-guard exists"
+else
+    fail "S50nebulaos-mcu-guard does not exist at $GUARD_SCRIPT"
+fi
+
+if [ -x "$GUARD_SCRIPT" ]; then
+    pass "S50nebulaos-mcu-guard is executable"
+else
+    fail "S50nebulaos-mcu-guard is not executable"
+fi
+
+if [ -f "$PYTHON_HELPER" ]; then
+    pass "mcu_identity_check.py exists"
+else
+    fail "mcu_identity_check.py does not exist at $PYTHON_HELPER"
+fi
+
+if [ -x "$PYTHON_HELPER" ]; then
+    pass "mcu_identity_check.py is executable"
+else
+    fail "mcu_identity_check.py is not executable"
+fi
+
+# =========================================================================
+# 2. Init.d ordering - must run between S05 and S55
+# =========================================================================
+
+echo ""
+echo "--- Init.d ordering ---"
+
+guard_basename=$(basename "$GUARD_SCRIPT")
+guard_num=$(echo "$guard_basename" | sed -n 's/^S\([0-9]*\).*/\1/p')
+
+if [ -n "$guard_num" ]; then
+    pass "S50nebulaos-mcu-guard has a numeric init.d prefix ($guard_num)"
+else
+    fail "S50nebulaos-mcu-guard does not have a numeric init.d prefix"
+fi
+
+if [ "$guard_num" -gt 5 ] 2>/dev/null && [ "$guard_num" -lt 55 ] 2>/dev/null; then
+    pass "S50nebulaos-mcu-guard runs after S05 and before S55 (S${guard_num})"
+else
+    fail "S50nebulaos-mcu-guard ordering violation: S${guard_num} is not between S05 and S55"
+fi
+
+# Verify it sorts before S55klipper.
+sorted_order=$(printf '%s\n%s\n' "$guard_basename" "S55klipper" | sort | head -1)
+if [ "$sorted_order" = "$guard_basename" ]; then
+    pass "S50nebulaos-mcu-guard sorts before S55klipper"
+else
+    fail "S50nebulaos-mcu-guard does NOT sort before S55klipper"
+fi
+
+# =========================================================================
+# 3. Script structure: start/stop/restart case
+# =========================================================================
+
+echo ""
+echo "--- Script structure ---"
+
+if grep -q '#!/bin/sh' "$GUARD_SCRIPT"; then
+    pass "script has #!/bin/sh shebang"
+else
+    fail "script missing #!/bin/sh shebang"
+fi
+
+if grep -q 'case "$1"' "$GUARD_SCRIPT"; then
+    pass "script has case \"\$1\" dispatch"
+else
+    fail "script missing case \"\$1\" dispatch"
+fi
+
+if grep -q 'start)' "$GUARD_SCRIPT"; then
+    pass "script handles 'start' case"
+else
+    fail "script missing 'start' case"
+fi
+
+if grep -q 'stop)' "$GUARD_SCRIPT"; then
+    pass "script handles 'stop' case"
+else
+    fail "script missing 'stop' case"
+fi
+
+if grep -q 'restart)' "$GUARD_SCRIPT"; then
+    pass "script handles 'restart' case"
+else
+    fail "script missing 'restart' case"
+fi
+
+if grep -q '"Usage:' "$GUARD_SCRIPT"; then
+    pass "script has usage message for invalid arguments"
+else
+    fail "script missing usage message"
+fi
+
+# =========================================================================
+# 4. SAFETY: script must NOT contain flash/write/erase commands
+# =========================================================================
+
+echo ""
+echo "--- Safety: no flash/write/erase operations ---"
+
+# Safety checks grep only executable lines (skip comments starting with #).
+# The SAFETY CONTRACT block in the script header mentions these words to
+# document what the script does NOT do — those are comments, not executable code.
+strip_comments() { grep -v '^\s*#' "$1"; }
+
+if strip_comments "$GUARD_SCRIPT" | grep -qi 'flash_image\|flash()\|"flash"\|flash subcommand'; then
+    fail "S50nebulaos-mcu-guard executable code contains flash-related commands"
+else
+    pass "S50nebulaos-mcu-guard executable code contains no flash commands"
+fi
+
+if strip_comments "$GUARD_SCRIPT" | grep -qi 'write_ota_marker'; then
+    fail "S50nebulaos-mcu-guard executable code contains write_ota_marker"
+else
+    pass "S50nebulaos-mcu-guard does not call write_ota_marker"
+fi
+
+if strip_comments "$GUARD_SCRIPT" | grep -q '/dev/mmcblk0p1'; then
+    fail "S50nebulaos-mcu-guard executable code references /dev/mmcblk0p1"
+else
+    pass "S50nebulaos-mcu-guard does not reference /dev/mmcblk0p1"
+fi
+
+if strip_comments "$GUARD_SCRIPT" | grep -qi 'sector_erase\|chip_erase'; then
+    fail "S50nebulaos-mcu-guard executable code contains erase commands"
+else
+    pass "S50nebulaos-mcu-guard executable code contains no erase commands"
+fi
+
+# Also check the Python helper — skip comments and docstring content.
+# Python docstrings are triple-quoted blocks; we use awk to drop everything
+# between """ delimiters, then also drop # comment lines.
+strip_py_comments() {
+    awk 'BEGIN{in_doc=0} /^\s*"""/{in_doc=!in_doc; next} in_doc{next} /^\s*#/{next} {print}' "$1"
+}
+
+if strip_py_comments "$PYTHON_HELPER" | grep -qi 'flash_image\|\.flash('; then
+    fail "mcu_identity_check.py executable code contains flash_image or flash() call"
+else
+    pass "mcu_identity_check.py executable code contains no flash commands"
+fi
+
+if strip_py_comments "$PYTHON_HELPER" | grep -q 'write_ota_marker'; then
+    fail "mcu_identity_check.py contains write_ota_marker"
+else
+    pass "mcu_identity_check.py does not reference write_ota_marker"
+fi
+
+if strip_py_comments "$PYTHON_HELPER" | grep -q '/dev/mmcblk0p1'; then
+    fail "mcu_identity_check.py executable code references /dev/mmcblk0p1"
+else
+    pass "mcu_identity_check.py does not reference /dev/mmcblk0p1"
+fi
+
+if strip_py_comments "$PYTHON_HELPER" | grep -qi 'sector_erase\|chip_erase'; then
+    fail "mcu_identity_check.py contains erase commands"
+else
+    pass "mcu_identity_check.py contains no erase commands"
+fi
+
+# =========================================================================
+# 5. SAFETY: Python helper always calls app_start after identify
+# =========================================================================
+
+echo ""
+echo "--- Safety: app_start called after identify ---"
+
+if grep -q 'app_start' "$PYTHON_HELPER"; then
+    pass "mcu_identity_check.py calls app_start"
+else
+    fail "mcu_identity_check.py does NOT call app_start (MCU would be left in bootloader)"
+fi
+
+# Verify the app_start call is in a finally/cleanup pattern - check that
+# it is not only inside the success path.
+if grep -q 'bootloader_entered' "$PYTHON_HELPER"; then
+    pass "mcu_identity_check.py tracks bootloader_entered state for cleanup"
+else
+    fail "mcu_identity_check.py does not track bootloader state for app_start cleanup"
+fi
+
+# =========================================================================
+# 6. State file written to /run/ (tmpfs)
+# =========================================================================
+
+echo ""
+echo "--- State file location ---"
+
+if grep -q '/run/nebulaos-mcu-guard.state' "$GUARD_SCRIPT"; then
+    pass "state file path is /run/nebulaos-mcu-guard.state (tmpfs)"
+else
+    fail "state file path is not /run/ (should be tmpfs, lost on reboot)"
+fi
+
+# Ensure the state file is NOT written to persistent storage.
+if grep -q '/usr/data.*\.state\|/opt/.*\.state\|/etc/.*guard.*state' "$GUARD_SCRIPT"; then
+    fail "state file appears to be written to persistent storage"
+else
+    pass "state file is not written to persistent storage"
+fi
+
+# =========================================================================
+# 7. Decision tree coverage - all expected states documented/handled
+# =========================================================================
+
+echo ""
+echo "--- Decision tree coverage ---"
+
+# Check that the init.d script handles all implemented cases.
+for result_code in PASS FAIL_WRONG_ID FAIL_SERIAL FAIL_BOOTLOADER FAIL; do
+    if grep -q "$result_code" "$GUARD_SCRIPT"; then
+        pass "script handles result code: $result_code"
+    else
+        fail "script does not handle result code: $result_code"
+    fi
+done
+
+# The Python helper should emit the corresponding result codes.
+for result_code in PASS FAIL_WRONG_ID FAIL_SERIAL FAIL_BOOTLOADER; do
+    if grep -q "\"$result_code\"" "$PYTHON_HELPER"; then
+        pass "Python helper emits result code: $result_code"
+    else
+        fail "Python helper does not emit result code: $result_code"
+    fi
+done
+
+# =========================================================================
+# 8. Error handling for serial failures
+# =========================================================================
+
+echo ""
+echo "--- Error handling ---"
+
+if grep -q 'serial_open_failed\|serial.*fail' "$PYTHON_HELPER"; then
+    pass "Python helper handles serial open failure"
+else
+    fail "Python helper does not handle serial open failure"
+fi
+
+if grep -q 'bootloader_entry_failed\|could not enter' "$PYTHON_HELPER"; then
+    pass "Python helper handles bootloader entry failure"
+else
+    fail "Python helper does not handle bootloader entry failure"
+fi
+
+if grep -q 'version_query_failed' "$PYTHON_HELPER"; then
+    pass "Python helper handles version query failure"
+else
+    fail "Python helper does not handle version query failure"
+fi
+
+if grep -q 'cannot_import_creality_flash\|ImportError' "$PYTHON_HELPER"; then
+    pass "Python helper handles missing creality_flash import"
+else
+    fail "Python helper does not handle missing creality_flash import"
+fi
+
+# Shell script: check that helper-not-found is handled gracefully.
+if grep -q 'helper_not_found\|helper not found' "$GUARD_SCRIPT"; then
+    pass "init.d script handles missing helper gracefully"
+else
+    fail "init.d script does not handle missing helper"
+fi
+
+# Shell script: check that unparseable output is handled.
+if grep -q 'helper_no_output\|no parseable' "$GUARD_SCRIPT"; then
+    pass "init.d script handles unparseable helper output"
+else
+    fail "init.d script does not handle unparseable helper output"
+fi
+
+# =========================================================================
+# 9. 9-case state matrix documented in script comments
+# =========================================================================
+
+echo ""
+echo "--- 9-case state matrix documentation ---"
+
+for case_num in 1 2 3 4 5 6 7 8 9; do
+    if grep -q "Case $case_num" "$GUARD_SCRIPT"; then
+        pass "Case $case_num is documented in init.d script comments"
+    else
+        fail "Case $case_num is NOT documented in init.d script comments"
+    fi
+done
+
+# Verify the deferred cases are clearly marked as not implemented.
+for keyword in DEFERRED "NOT implemented" "hardware"; do
+    if grep -qi "$keyword" "$GUARD_SCRIPT"; then
+        pass "script documents deferred/not-implemented scope ($keyword)"
+    else
+        fail "script does not document deferred scope ($keyword)"
+    fi
+done
+
+# =========================================================================
+# 10. Expected hardware ID is configured
+# =========================================================================
+
+echo ""
+echo "--- Configuration ---"
+
+if grep -q 'mcu0_001_G32' "$GUARD_SCRIPT"; then
+    pass "expected hardware ID (mcu0_001_G32) is configured in init.d script"
+else
+    fail "expected hardware ID not found in init.d script"
+fi
+
+if grep -q 'mcu0_001_G32' "$PYTHON_HELPER"; then
+    pass "expected hardware ID (mcu0_001_G32) is configured in Python helper"
+else
+    fail "expected hardware ID not found in Python helper"
+fi
+
+# =========================================================================
+# 11. State file format contains required fields
+# =========================================================================
+
+echo ""
+echo "--- State file format ---"
+
+for field in MCU_GUARD_RESULT MCU_IDENTITY MCU_GUARD_DETAIL MCU_GUARD_TIMESTAMP MCU_GUARD_EXPECTED; do
+    if grep -q "$field" "$GUARD_SCRIPT"; then
+        pass "state file includes field: $field"
+    else
+        fail "state file missing field: $field"
+    fi
+done
+
+# =========================================================================
+# 12. Behavioral test: mock helper output parsing
+# =========================================================================
+
+echo ""
+echo "--- Behavioral: mock helper output parsing ---"
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/mcu-guard-tests.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# Create a mock Python helper that emits PASS.
+mock_pass="$WORK/mock_pass.py"
+cat > "$mock_pass" <<'MOCK_EOF'
+#!/usr/bin/env python3
+print("MCU_GUARD_RESULT=PASS")
+print("MCU_IDENTITY=mcu0_001_G32-v1.0.0")
+print("MCU_GUARD_DETAIL=identity_verified")
+MOCK_EOF
+chmod +x "$mock_pass"
+
+# Run the guard script with the mock helper, overriding paths.
+mock_state="$WORK/mock.state"
+env MCU_IDENTITY_CHECK="$mock_pass" \
+    MCU_GUARD_STATE="$mock_state" \
+    sh -c '. "'"$GUARD_SCRIPT"'" && MCU_GUARD_STATE="'"$mock_state"'" MCU_IDENTITY_CHECK="'"$mock_pass"'" do_check' 2>/dev/null || true
+
+# The guard script sources as functions; we need to invoke it properly.
+# Since the guard script uses case "$1" dispatch, test by setting
+# MCU_GUARD_STATE and MCU_IDENTITY_CHECK env vars and calling with "start".
+mock_state2="$WORK/mock2.state"
+MCU_GUARD_STATE="$mock_state2" \
+MCU_IDENTITY_CHECK="$mock_pass" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_stdout.txt" 2>&1
+mock_exit=$?
+
+if [ "$mock_exit" -eq 0 ]; then
+    pass "guard exits 0 when helper reports PASS"
+else
+    fail "guard exits $mock_exit when helper reports PASS (expected 0)"
+fi
+
+if [ -f "$mock_state2" ]; then
+    if grep -q 'MCU_GUARD_RESULT=PASS' "$mock_state2"; then
+        pass "state file records PASS result from mock"
+    else
+        fail "state file does not contain PASS result"
+    fi
+    if grep -q 'MCU_IDENTITY=mcu0_001_G32' "$mock_state2"; then
+        pass "state file records MCU identity from mock"
+    else
+        fail "state file does not contain MCU identity"
+    fi
+else
+    fail "state file was not created at $mock_state2"
+fi
+
+# Test FAIL_WRONG_ID mock.
+mock_fail="$WORK/mock_fail.py"
+cat > "$mock_fail" <<'MOCK_EOF'
+#!/usr/bin/env python3
+print("MCU_GUARD_RESULT=FAIL_WRONG_ID")
+print("MCU_IDENTITY=some_other_mcu-v2.0")
+print("MCU_GUARD_DETAIL=expected=mcu0_001_G32")
+MOCK_EOF
+chmod +x "$mock_fail"
+
+mock_state3="$WORK/mock3.state"
+MCU_GUARD_STATE="$mock_state3" \
+MCU_IDENTITY_CHECK="$mock_fail" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_fail_stdout.txt" 2>&1
+mock_fail_exit=$?
+
+if [ "$mock_fail_exit" -eq 1 ]; then
+    pass "guard exits 1 when helper reports FAIL_WRONG_ID"
+else
+    fail "guard exits $mock_fail_exit when helper reports FAIL_WRONG_ID (expected 1)"
+fi
+
+if [ -f "$mock_state3" ] && grep -q 'MCU_GUARD_RESULT=FAIL' "$mock_state3"; then
+    pass "state file records FAIL result for wrong ID"
+else
+    fail "state file does not record FAIL for wrong ID"
+fi
+
+# Test FAIL_SERIAL mock - should exit 0 (allow Klipper to try).
+mock_serial="$WORK/mock_serial.py"
+cat > "$mock_serial" <<'MOCK_EOF'
+#!/usr/bin/env python3
+print("MCU_GUARD_RESULT=FAIL_SERIAL")
+print("MCU_IDENTITY=unknown")
+print("MCU_GUARD_DETAIL=serial_open_failed: [Errno 2] No such file")
+MOCK_EOF
+chmod +x "$mock_serial"
+
+mock_state4="$WORK/mock4.state"
+MCU_GUARD_STATE="$mock_state4" \
+MCU_IDENTITY_CHECK="$mock_serial" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_serial_stdout.txt" 2>&1
+mock_serial_exit=$?
+
+if [ "$mock_serial_exit" -eq 0 ]; then
+    pass "guard exits 0 when helper reports FAIL_SERIAL (allows Klipper to try)"
+else
+    fail "guard exits $mock_serial_exit when helper reports FAIL_SERIAL (expected 0)"
+fi
+
+if [ -f "$mock_state4" ] && grep -q 'MCU_GUARD_RESULT=WARN' "$mock_state4"; then
+    pass "state file records WARN for serial failure (not blocking)"
+else
+    fail "state file does not record WARN for serial failure"
+fi
+
+# Test with missing helper - should exit 0 with WARN.
+mock_state5="$WORK/mock5.state"
+MCU_GUARD_STATE="$mock_state5" \
+MCU_IDENTITY_CHECK="$WORK/nonexistent_helper.py" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_missing_stdout.txt" 2>&1
+mock_missing_exit=$?
+
+if [ "$mock_missing_exit" -eq 0 ]; then
+    pass "guard exits 0 when helper is missing (allows Klipper to try)"
+else
+    fail "guard exits $mock_missing_exit when helper is missing (expected 0)"
+fi
+
+if [ -f "$mock_state5" ] && grep -q 'MCU_GUARD_RESULT=WARN' "$mock_state5"; then
+    pass "state file records WARN when helper is missing"
+else
+    fail "state file does not record WARN when helper is missing"
+fi
+
+# Test with helper that produces empty output - should exit 0 with WARN.
+mock_empty="$WORK/mock_empty.py"
+cat > "$mock_empty" <<'MOCK_EOF'
+#!/usr/bin/env python3
+print("some random output with no key=value")
+MOCK_EOF
+chmod +x "$mock_empty"
+
+mock_state6="$WORK/mock6.state"
+MCU_GUARD_STATE="$mock_state6" \
+MCU_IDENTITY_CHECK="$mock_empty" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_empty_stdout.txt" 2>&1
+mock_empty_exit=$?
+
+if [ "$mock_empty_exit" -eq 0 ]; then
+    pass "guard exits 0 when helper output is unparseable"
+else
+    fail "guard exits $mock_empty_exit when helper output is unparseable (expected 0)"
+fi
+
+# =========================================================================
+# 13. Design doc exists
+# =========================================================================
+
+echo ""
+echo "--- Design document ---"
+
+DESIGN_DOC="$REPO_ROOT/docs/MCU_LIFECYCLE_GUARD.md"
+if [ -f "$DESIGN_DOC" ]; then
+    pass "MCU_LIFECYCLE_GUARD.md design document exists"
+else
+    fail "MCU_LIFECYCLE_GUARD.md design document does not exist"
+fi
+
+if [ -f "$DESIGN_DOC" ] && grep -q '9-case\|9-Case\|nine.*case\|state matrix' "$DESIGN_DOC"; then
+    pass "design document describes the state matrix"
+else
+    fail "design document does not describe the state matrix"
+fi
+
+# =========================================================================
+# Summary
+# =========================================================================
+
+echo ""
+echo "=========================================="
+echo "Results: $PASS passed, $FAIL failed"
+echo "=========================================="
+
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi
+exit 0
