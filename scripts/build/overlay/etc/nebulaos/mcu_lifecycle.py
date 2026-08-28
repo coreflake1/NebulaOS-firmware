@@ -27,6 +27,30 @@ Ordering rationale: application identify is tried FIRST and is non-invasive
 already booted into). The bootloader check is only performed when actually
 needed, so a healthy NATIVE_CANDIDATE_001 boot never has its running
 connection disturbed by a bootloader-entry attempt it doesn't need.
+
+TWO-STAGE AUTHORIZATION (Phase 1.8B Option C, 2026-08-28): candidate-001's
+hardware qualification found that this module's OLD hardware-identity check
+(_check_hardware_identity(), via creality_flash.py's serial magic-sequence
+enter_bootloader()) does not work against genuinely stock Creality firmware
+- see mcu_restore.py's module docstring for the full trace and the proven-
+working replacement (mcu_restart.py's Klipper-own-command restart, used
+inside restore() itself, after this module authorizes the attempt).
+
+This means an EXACT known-stock application identity now authorizes
+RESTORE_AUTHORIZED directly - this is Stage 1, the software gate, and it is
+non-invasive (no bootloader entry, no MCU disruption). Stage 2, the hardware
+gate (candidate hash validation, then bootloader entry via the new
+mechanism, then live hardware-ID verification), happens entirely inside
+mcu_restore.restore() - see that module's docstring. decide() no longer
+calls _check_hardware_identity() for the KNOWN_STOCK case at all.
+
+_check_hardware_identity() (the OLD magic-sequence check) is kept, UNCHANGED,
+for exactly one remaining purpose: diagnostic-only hardware identity
+context when the application identity itself is unreadable or unrecognized
+(MCU_UNREACHABLE / SUPPORTED_HW_UNKNOWN_APP / UNSUPPORTED_HW below) - none of
+those paths ever authorize a flash, so using the old bootloader-entry method
+there is a diagnostic convenience, not a safety-relevant choice. It is
+deliberately NOT invoked for KNOWN_STOCK.
 """
 
 import os
@@ -155,9 +179,28 @@ def decide(creality_flash_module=None, transport_factory=None,
             hw_id_status="not_checked_not_needed",
             detail="native_candidate_001_confirmed_via_application_identity")
 
-    # Every remaining path needs the bootloader-level hardware check: either
-    # to gate a restore (known stock) or to get diagnostic context when the
-    # application identity was unknown or unreadable.
+    if app_class == known.KNOWN_STOCK:
+        # Stage 1 (software gate) only: an EXACT known-stock application
+        # identity authorizes calling restore() directly - non-invasive, no
+        # bootloader entry here. Stage 2 (candidate hash validation, then
+        # bootloader entry via mcu_restart.py's Klipper-own-command restart,
+        # then live hardware-ID verification) happens entirely inside
+        # mcu_restore.restore() - see that module's docstring. This is why
+        # hw_id_status is "not_checked_pending_restore", not "not_checked" -
+        # it WILL be checked, just later, and only as part of an actual
+        # restore attempt rather than as a separate disruptive probe here.
+        return LifecycleDecision(
+            SUPPORTED_HW_KNOWN_STOCK_APP, RESTORE_AUTHORIZED,
+            application_identity=version, application_class=app_class,
+            hw_id_status="not_checked_pending_restore",
+            detail="known_stock_application_identity_confirmed_exact_match")
+
+    # Every remaining path (application identify failed outright, or
+    # returned something not recognized as native/known-stock) needs the
+    # OLD bootloader-level hardware check for diagnostic context only -
+    # neither path below ever authorizes a flash, so the (here, harmless)
+    # magic-sequence bootloader-entry method is still fine to use as a
+    # best-effort diagnostic probe.
     if creality_flash_module is None or transport_factory is None:
         import sys as _sys
         _sys.path.insert(0, os.environ.get("CREALITY_FLASH_PATH", "/opt/nebulaos/tools"))
@@ -194,16 +237,9 @@ def decide(creality_flash_module=None, transport_factory=None,
             application_identity=version, application_class=app_class,
             hw_id=hw_id, hw_id_status=hw_status, detail=hw_detail)
 
-    # hw_status == "MATCH" from here on: hardware is confirmed supported.
-    if app_class == known.KNOWN_STOCK:
-        return LifecycleDecision(
-            SUPPORTED_HW_KNOWN_STOCK_APP, RESTORE_AUTHORIZED,
-            application_identity=version, application_class=app_class,
-            hw_id=hw_id, hw_id_status=hw_status,
-            detail="known_stock_application_and_supported_hardware_confirmed")
-
-    # app_class is UNKNOWN_APPLICATION, or application identify failed
-    # outright but the hardware itself checks out.
+    # hw_status == "MATCH" from here on: hardware is confirmed supported,
+    # but app_class is UNKNOWN_APPLICATION (or None, if identify itself
+    # failed) - never auto-flash an unrecognized application.
     return LifecycleDecision(
         SUPPORTED_HW_UNKNOWN_APP, ALLOW_KLIPPER_START_WARN,
         application_identity=version, application_class=app_class,

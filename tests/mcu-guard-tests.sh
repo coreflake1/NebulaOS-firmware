@@ -18,6 +18,7 @@ GUARD_SCRIPT="$INITD_DIR/S50nebulaos-mcu-guard"
 PYTHON_HELPER="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_identity_check.py"
 LIFECYCLE_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_lifecycle.py"
 RESTORE_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_restore.py"
+RESTART_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_restart.py"
 KLIPPER_SCRIPT="$INITD_DIR/S55klipper"
 
 PASS=0
@@ -575,6 +576,72 @@ fi
 # =========================================================================
 # 13. Design doc exists
 # =========================================================================
+
+echo ""
+echo "--- mcu_restart.py (Phase 1.8B Option C, 2026-08-28) ---"
+
+if [ -f "$RESTART_MODULE" ]; then
+    pass "mcu_restart.py exists"
+else
+    fail "mcu_restart.py does not exist at $RESTART_MODULE"
+fi
+
+if grep -q 'RESTART_COMMAND_NAMES = ("reset", "config_reset")' "$RESTART_MODULE" 2>/dev/null; then
+    pass "mcu_restart.py only ever tries Klipper's own 'reset'/'config_reset' commands"
+else
+    fail "mcu_restart.py's restart command list does not match the expected ('reset', 'config_reset') - HARDCODED_RAW_PROTOCOL_BYTES risk"
+fi
+
+if grep -q 'lookup_command' "$RESTART_MODULE" 2>/dev/null && ! grep -qE 'raw_send\(\s*\[0x|bytes\(\[0x' "$RESTART_MODULE" 2>/dev/null; then
+    pass "mcu_restart.py looks up commands via msgparser (no hardcoded raw protocol bytes)"
+else
+    fail "mcu_restart.py may contain hardcoded raw protocol bytes - re-check for invented packets"
+fi
+
+if grep -q 'import mcu_application_identify as app_identify' "$RESTART_MODULE" 2>/dev/null && \
+   grep -q 'app_identify.run_connected' "$RESTART_MODULE" 2>/dev/null; then
+    pass "mcu_restart.py reuses mcu_application_identify's shared reactor-connect helper (no duplicated reactor plumbing)"
+else
+    fail "mcu_restart.py does not reuse the shared reactor-connect helper"
+fi
+
+echo "--- S50 releases /dev/ttyS1 before S55 starts (candidate-002, 2026-08-28) ---"
+
+# The ordering check above (section 2) proves S50 sorts before S55 - this
+# proves the OTHER half of "S50 releases the port before S55 starts": the
+# python3 helper invocation itself is synchronous (command substitution,
+# not backgrounded), so do_check() cannot return - and therefore the whole
+# init.d script cannot exit, and therefore init cannot proceed to S55 - until
+# that python3 process has fully exited, at which point the kernel has
+# already closed every file descriptor it held (including /dev/ttyS1),
+# independent of whether the Python code itself called close() explicitly.
+if grep -qF 'check_output=$("$PYTHON3" "$MCU_IDENTITY_CHECK" 2>&1)' "$GUARD_SCRIPT"; then
+    pass "S50's python3 helper invocation is synchronous (command substitution, not backgrounded)"
+else
+    fail "S50's python3 helper invocation could not be confirmed synchronous - re-check do_check()"
+fi
+
+# Note: the invocation line legitimately contains a '&' as part of the
+# "2>&1" stderr redirect - that is not backgrounding. What would indicate
+# backgrounding is a bare trailing '&' outside of a redirect, which the
+# exact-literal check above already rules out (it requires the line to end
+# in "2>&1)" with nothing after).
+
+echo "--- creality_flash.py runtime dependency (Gate 1 hardware failure regression, 2026-08-28) ---"
+
+TOOLS_DIR="$REPO_ROOT/scripts/build/overlay/opt/nebulaos/tools"
+
+if [ -f "$TOOLS_DIR/creality_flash.py" ]; then
+    pass "creality_flash.py is deployed to overlay/opt/nebulaos/tools/ (the default CREALITY_FLASH_PATH mcu_lifecycle.py/mcu_restore.py import from)"
+else
+    fail "creality_flash.py is NOT deployed to overlay/opt/nebulaos/tools/ - this is exactly the gap that crashed the guard with ModuleNotFoundError on its first real boot (2026-08-28 hardware qualification, Gate 1)"
+fi
+
+if [ -f "$TOOLS_DIR/creality_validator.py" ]; then
+    pass "creality_validator.py is deployed alongside creality_flash.py (creality_flash.py imports it from its own directory)"
+else
+    fail "creality_validator.py is NOT deployed to overlay/opt/nebulaos/tools/ - creality_flash.py imports it and will fail without it"
+fi
 
 echo ""
 echo "--- Design document ---"

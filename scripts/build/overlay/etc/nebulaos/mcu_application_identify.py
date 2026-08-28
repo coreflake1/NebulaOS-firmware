@@ -21,7 +21,14 @@ version from msgparser.get_version_info()) - so this script's result is
 directly comparable to what `printer/objects/query?mcu` reports once
 Klipper is running.
 
-SAFETY CONTRACT:
+run_connected() below is the shared reactor-driven connect helper: it
+performs the connect once and hands the live, connected SerialReader to a
+caller-supplied action_fn - mcu_restart.py's request_generic_restart() reuses
+it for the pre-Klippy MCU_RESTART operation (candidate-002, Phase 1.8B
+Option C), so both callers share one correct reactor pattern instead of each
+re-deriving the reactor.run()/pause() plumbing independently.
+
+SAFETY CONTRACT (this module):
   - READ-ONLY. Connects, reads the identify dictionary, disconnects.
   - Never sends any command beyond the identify handshake itself.
   - Never touches the bootloader protocol (that's creality_flash.py's job,
@@ -38,24 +45,53 @@ class ApplicationIdentifyError(Exception):
     pass
 
 
-def get_application_identity(port, baud, timeout=5.0, klippy_lib_path=None):
-    """Connect to the MCU at the application baud rate, complete the
-    identify handshake, and return (version, build_versions). Raises
-    ApplicationIdentifyError on any failure (port unopenable, handshake
-    timeout, malformed dictionary). Always disconnects before returning."""
+def _import_klippy_serial_modules(klippy_lib_path=None):
     lib_path = klippy_lib_path or KLIPPY_LIB_PATH
     if lib_path not in sys.path:
         sys.path.insert(0, lib_path)
+    import reactor
+    import serialhdl
+    return reactor, serialhdl
 
+
+def run_connected(port, baud, action_fn, timeout=5.0, klippy_lib_path=None,
+                   error_cls=ApplicationIdentifyError):
+    """Connect to the MCU at (port, baud) and call action_fn(serial_reader)
+    with a live, connected serialhdl.SerialReader - then always disconnect
+    and clean up the reactor before returning. action_fn's return value is
+    passed through; an exception it raises is re-raised (as error_cls if not
+    already one) after cleanup has run.
+
+    reactor.Reactor.pause() only dispatches registered callbacks/timers once
+    its greenlet dispatch loop is running (self._g_dispatch is set, which
+    happens inside run()) - called before that, it silently falls back to a
+    plain time.sleep() (see reactor.py's pause()/_sys_pause()), so a
+    callback registered and then waited-on via a bare top-level pause() loop
+    would NEVER actually fire, timing out every time regardless of whether
+    the MCU responds. This was discovered live on real hardware (2026-08-28
+    Phase 1.8B hardware qualification) - a prior version of this function
+    did exactly that and always failed with identify_handshake_timeout,
+    which no offline test caught because every test injects
+    application_identify_fn directly and never exercises this reactor
+    plumbing. The fix, matching upstream Klipper's own scripts/dump_mcu.py
+    (this module's stated model): drive everything through one top-level
+    callback dispatched by run(), exactly like dump_mcu.py's
+    MCUDump.run()/_run_dump_task() do - nested pause() calls made from
+    inside that callback then correctly use the real dispatch greenlet
+    instead of the do-nothing fallback. action_fn itself may safely call
+    serial_reader/reactor methods that internally pause() - it always runs
+    from inside the dispatched callback.
+    """
     try:
-        import reactor
-        import serialhdl
+        reactor, serialhdl = _import_klippy_serial_modules(klippy_lib_path)
     except ImportError as e:
-        raise ApplicationIdentifyError(f"cannot_import_klippy_serial_modules: {e}")
+        raise error_cls(f"cannot_import_klippy_serial_modules: {e}")
 
     r = reactor.Reactor()
     serial_reader = serialhdl.SerialReader(r)
-    try:
+    outcome = {}
+
+    def _do_run(eventtime):
         completion = r.completion()
         connected = {"ok": False}
 
@@ -75,21 +111,53 @@ def get_application_identity(port, baud, timeout=5.0, klippy_lib_path=None):
             if completion.test():
                 break
         else:
-            raise ApplicationIdentifyError("identify_handshake_timeout")
+            outcome["error"] = "identify_handshake_timeout"
+            r.end()
+            return
 
         if not completion.wait():
-            raise ApplicationIdentifyError(
-                connected.get("error", "connect_uart_failed"))
+            outcome["error"] = connected.get("error", "connect_uart_failed")
+            r.end()
+            return
 
-        version, build_versions = serial_reader.get_msgparser().get_version_info()
-        if not version:
-            raise ApplicationIdentifyError("empty_version_in_identify_dict")
-        return version, build_versions
+        try:
+            outcome["result"] = action_fn(serial_reader)
+        except Exception as e:
+            outcome["error"] = str(e)
+        r.end()
+
+    try:
+        r.register_callback(_do_run)
+        r.run()
     finally:
         try:
             serial_reader.disconnect()
         except Exception:
             pass
+        try:
+            r.finalize()
+        except Exception:
+            pass
+
+    if "error" in outcome:
+        raise error_cls(outcome["error"])
+    return outcome.get("result")
+
+
+def get_application_identity(port, baud, timeout=5.0, klippy_lib_path=None):
+    """Connect to the MCU at the application baud rate, complete the
+    identify handshake, and return (version, build_versions). Raises
+    ApplicationIdentifyError on any failure (port unopenable, handshake
+    timeout, malformed dictionary). Always disconnects before returning."""
+
+    def _read_version(serial_reader):
+        version, build_versions = serial_reader.get_msgparser().get_version_info()
+        if not version:
+            raise ApplicationIdentifyError("empty_version_in_identify_dict")
+        return version, build_versions
+
+    return run_connected(port, baud, _read_version, timeout, klippy_lib_path,
+                          error_cls=ApplicationIdentifyError)
 
 
 if __name__ == "__main__":

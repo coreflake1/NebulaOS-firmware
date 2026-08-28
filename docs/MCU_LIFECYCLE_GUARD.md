@@ -19,6 +19,21 @@ corrected design: two separately-checked identities, and restoration
 implemented (behind mocks, never run against real hardware in this review)
 rather than left deferred.
 
+**Revision note (candidate-002 MCU fix, 2026-08-28):** candidate-001's live
+hardware qualification found three real bugs, none of which the mocked test
+suite above could catch (see
+`_project/missions/phase1.8b-candidate-001-hardware-qualification-summary.md`
+for the full incident): `creality_flash.py`/`creality_validator.py` were
+never actually deployed to `/opt/nebulaos/tools/`; `mcu_application_identify.py`
+called `reactor.pause()` before ever calling `reactor.run()`, which silently
+never dispatches (always timed out, regardless of MCU state); and, most
+significantly, `_check_hardware_identity()`'s serial magic-sequence
+bootloader entry (`creality_flash.enter_bootloader()`) does not work against
+genuinely stock Creality firmware at all - confirmed live. This document is
+updated for the fix to all three - see "Bootloader entry mechanism (Option
+C)" below for the architectural change, and `mcu_restart.py`'s own module
+docstring for the full upstream trace proving the replacement mechanism.
+
 ## Problem
 
 Booting the stock Creality OS slot automatically overwrites the MCU with
@@ -47,11 +62,21 @@ BEFORE Klipper starts, so that:
   `get_msgparser().get_version_info()`. This is non-invasive - it doesn't
   require entering the bootloader, so a healthy native-app connection is
   never disturbed.
-- **HARDWARE identity** (`creality_flash.py`'s bootloader protocol, called
-  from `mcu_lifecycle.py`): is this a supported physical KE MCU. Requires
-  deliberately entering the bootloader, so it is only invoked when needed:
-  to gate a restore (application looked like known stock) or to get
-  diagnostic context when application identity couldn't be determined.
+- **HARDWARE identity** (`creality_flash.py`'s bootloader protocol): is this
+  a supported physical KE MCU. Requires deliberately entering the
+  bootloader. As of candidate-002 (2026-08-28), this check's ROLE differs by
+  application class:
+  - **Known stock**: `mcu_lifecycle.decide()` no longer performs this check
+    at all before authorizing - see "Bootloader entry mechanism (Option C)"
+    below. The hardware check happens inside `mcu_restore.restore()`
+    itself, after bootloader entry via the new mechanism, immediately
+    before any erase/write.
+  - **Unknown/unreadable application**: `mcu_lifecycle.py`'s
+    `_check_hardware_identity()` (the original magic-sequence method) is
+    still used here, unchanged, purely for diagnostic context - neither of
+    these paths ever authorizes a flash, so the magic-sequence method
+    (proven NOT to work for a first stock-to-native transition, but not
+    otherwise known to be broken) remains an acceptable best-effort probe.
 
 `mcu_known_identities.py` holds the exact, non-invented values already on
 file in this repo's own build evidence:
@@ -67,7 +92,7 @@ file in this repo's own build evidence:
 | State | Meaning | Action |
 |---|---|---|
 | `SUPPORTED_HW_NATIVE_APP` | Application identity exactly matches candidate-001 | `ALLOW_KLIPPER_START` - no flash, bootloader never entered |
-| `SUPPORTED_HW_KNOWN_STOCK_APP` | Application identity exactly matches the known stock string, AND bootloader hw-id confirmed supported | `RESTORE_AUTHORIZED` - the only state that may flash |
+| `SUPPORTED_HW_KNOWN_STOCK_APP` | Application identity exactly matches the known stock string (Stage 1, software gate only - see Option C below; hardware is NOT yet checked at this point) | `RESTORE_AUTHORIZED` - the only state that may flash. `restore()` itself performs Stage 2 (candidate hash, then bootloader entry, then hardware-ID check) before any erase/write. |
 | `SUPPORTED_HW_UNKNOWN_APP` | Application identity present but unrecognized, OR application identify failed but hardware checks out | `ALLOW_KLIPPER_START_WARN` - never auto-flash, diagnostics preserved |
 | `UNSUPPORTED_HW` | Bootloader hw-id reachable but does not match the allow-list | `BLOCK_KLIPPER_START` - never flash, regardless of application class |
 | `MCU_UNREACHABLE` | Neither application identify nor the bootloader check could reach the MCU | `ALLOW_KLIPPER_START_WARN` - bounded (one attempt), no stock fallback, let Klipper's own retry logic try |
@@ -81,10 +106,75 @@ startup entirely would make an unrecognized-but-valid firmware update look
 like total device failure. The only thing this state forbids is automatic
 restoration.
 
+## Bootloader entry mechanism (Option C, candidate-002, 2026-08-28)
+
+Candidate-001's hardware qualification found that `creality_flash.py`'s
+serial magic-sequence bootloader entry (`enter_bootloader()`) does not work
+against genuinely stock Creality firmware - confirmed live (five attempts
+all returned baud-misaligned garbage, not a bootloader response), and
+already documented in `NebulaOS-klipper-mcu/tools/stage4_first_flash.py`'s
+own docstring from Phase 1.7 ("the stock firmware's `bootloader_request()`
+lacks the 12KB bootloader branch"). The magic sequence is a feature the
+NebulaOS candidate patch itself adds to the *application* firmware
+(recognizing the byte pattern and voluntarily jumping to the bootloader) -
+it was never present in Creality's own, separately-compiled stock
+application, so it can never work for the very first stock-to-native
+transition.
+
+Three architectural options were considered (see
+`_project/missions/phase1.8b-candidate-001-hardware-qualification-summary.md`
+§3 for the original framing):
+- (a) detect this case and defer to a documented manual operator step
+- (b) move the restore decision to run after Klipper starts, so it can use
+  Moonraker's `FIRMWARE_RESTART`
+- (c) replicate exactly what Klipper's own `FIRMWARE_RESTART` sends,
+  directly, pre-Klippy, without needing Klipper or Moonraker running
+
+**Option (c) was chosen and implemented as `mcu_restart.py`.** Traced from
+upstream Klipper `58bd67db3ce1be1951c3e4a6d1156a79903d4edc`'s
+`klippy/mcu.py`: when `restart_method: command` (this project's own
+configured value - see `machine.cfg`'s `[mcu]` section), a `FIRMWARE_RESTART`
+looks up `"reset"`, falling back to `"config_reset"`, in the MCU's own real
+command dictionary (`msgparser.lookup_command()` - never raises out, a
+missing command is simply not found) and sends whichever exists via a
+fire-and-forget `raw_send()` - no ACK is expected, since the MCU reboots
+before it could reply. Both are standard, zero-argument, generic Klipper
+commands (`src/generic/armcm_reset.c`'s `command_reset` /
+`src/linux/main.c`'s `command_config_reset`), not anything specific to this
+project's own patches.
+
+`mcu_restart.request_generic_restart()` replicates exactly this operation
+using the same pre-Klippy `reactor`/`serialhdl` machinery
+`mcu_application_identify.py` already uses (via a shared `run_connected()`
+helper) - no Moonraker, no Klippy, no invented/hardcoded packet. **Empirical
+evidence this works against genuinely stock firmware**: the 2026-08-28
+hardware qualification session's `stage4_first_flash.py` run triggered
+exactly this operation via Moonraker's `/printer/firmware_restart` (Klippy's
+own `FIRMWARE_RESTART` handling) against the printer while it was running
+genuinely stock firmware, and the subsequent bootloader handshake succeeded
+- see `gate1-manual-remediation-and-restore.txt` in that mission's evidence
+directory.
+
+If the MCU's dictionary exposes neither command (`RestartRequestRefused`),
+or the resulting handshake never succeeds after bounded retries, `restore()`
+falls back once to the original magic-sequence `enter_bootloader()` before
+giving up - still exactly one bounded `restore()` call, still zero new
+protocol implementations invented.
+
 ## Restoration (`mcu_restore.py`)
 
 The only module that erases/writes the MCU, and only when
 `mcu_lifecycle.decide()` already returned `RESTORE_AUTHORIZED`.
+
+**Two-stage authorization** (candidate-002): Stage 1 (software gate, in
+`mcu_lifecycle.decide()`) is an exact known-stock application identity match
+- non-invasive, authorizes calling `restore()` without touching the
+bootloader. Stage 2 (hardware gate, entirely inside `restore()`): the
+candidate artifact must hash-match BEFORE any restart/bootloader-entry is
+attempted ("bad candidate hash -> no reset, no flash"), then bootloader
+entry via the mechanism above, then the live hardware ID must match the
+allow-list BEFORE any erase/write ("unsupported HW -> never flash," now
+enforced here rather than in `decide()`).
 
 - **Artifact provenance**: a NEW proposed convention (no prior on-device
   deployment path existed before this review) - the build pipeline is
@@ -101,10 +191,12 @@ The only module that erases/writes the MCU, and only when
   once at build time, rather than on every boot, removes the on-device
   toolchain dependency entirely.
 - **Runtime validation** (`mcu_restore.py`, every restore attempt):
-  SHA256 verification against the pinned hash (cheap, no toolchain),
-  the hardware allow-list (already checked by `mcu_lifecycle.py` before
-  authorizing the call, and re-checked inside `creality_flash.flash()`
-  itself), flash-result verification (status-byte checking already in
+  SHA256 verification against the pinned hash BEFORE any bootloader
+  interaction (cheap, no toolchain), bootloader entry via `mcu_restart.py`
+  (falling back to the magic-sequence method if refused/unreachable), the
+  hardware allow-list checked directly via `creality_flash.get_version()`/
+  `check_identity()` immediately after entry and before any erase/write,
+  flash-result verification (status-byte checking already in
   `flash_image()`), and **post-flash application identity verification** -
   re-running the identify handshake and confirming it now reports exactly
   `NATIVE_CANDIDATE_001_VERSION`, not merely "flash reported success."
@@ -151,14 +243,22 @@ S50nebulaos-mcu-guard runs before S55klipper by init.d sort order
   identify handshake.
 - **mcu_known_identities.py**: the pinned candidate-001/known-stock
   version strings and classification.
-- **mcu_restore.py**: the bounded, gated flash-restore path.
+- **mcu_restart.py** (candidate-002): sends Klipper's own generic
+  `"reset"`/`"config_reset"` restart command via real `msgproto`/`serialhdl`
+  - see "Bootloader entry mechanism (Option C)" above.
+- **mcu_restore.py**: the bounded, gated flash-restore path - candidate
+  validation, bootloader entry (via `mcu_restart.py`, falling back to the
+  magic-sequence method), hardware-ID verification, flash, post-verify.
 
 All hardware/filesystem interaction points in `mcu_lifecycle.py` and
 `mcu_restore.py` are injectable (`creality_flash_module`,
-`transport_factory`, `application_identify_fn`, `file_exists_fn`,
-`hash_fn`) specifically so `tests/mcu-lifecycle-decision-tests.py` can
-exercise every state and CASE 1-11 from the pre-build review mission with
-mocks - no real serial hardware.
+`transport_factory`, `application_identify_fn`, `restart_fn`,
+`file_exists_fn`, `hash_fn`, `read_bytes_fn`, `sleep_fn`) specifically so
+`tests/mcu-lifecycle-decision-tests.py` can exercise every state and
+CASE 1-11 from the pre-build review mission with mocks - no real serial
+hardware. `tests/mcu-real-reactor-msgproto-tests.py` (candidate-002)
+separately exercises real (unmocked) `reactor.py`/`serialhdl.py`/
+`msgproto.py` - see "Test coverage" below.
 
 ### State file
 
@@ -200,31 +300,74 @@ MCU_RESTORE_RESULT=RESTORED_AND_VERIFIED|CANDIDATE_ARTIFACT_MISSING|CANDIDATE_HA
   `mcu_lifecycle.decide()`/`mcu_restore.restore()` with mocked
   application-identify and creality_flash collaborators - covers CASE 1-11
   from the pre-build review mission, including two explicit regression
-  tests for the original hardware-ID/application-ID conflation bug.
+  tests for the original hardware-ID/application-ID conflation bug, plus
+  (candidate-002) explicit coverage of the restart-command mechanism: used
+  when it succeeds, falls back to the magic-sequence method when refused,
+  fails closed when both fail, never flashes on a post-entry hardware
+  mismatch, and never lets an unexpected exception from an injected
+  `restart_fn` escape `restore()` uncaught. Also includes
+  `RealCrealityFlashImportTests`, which calls `decide()` completely
+  unmocked to prove the real `creality_flash` import path resolves.
+- `tests/mcu-real-reactor-msgproto-tests.py` (candidate-002): uses Klipper's
+  own real `reactor.py`/`serialhdl.py`/`msgproto.py` - no mocks of
+  Klipper's own code. Directly proves (a) the exact reactor dispatch bug
+  class is fixed, by demonstrating the OLD pattern (register + bare
+  top-level `pause()`) never dispatches while the NEW pattern (nested
+  inside a `run()`-dispatched callback) does; (b) `mcu_restart.py`'s
+  `"reset"` command lookup/encoding against this project's own real,
+  vendored candidate-001 dictionary (`tests/fixtures/candidate-001.klipper.dict`);
+  and (c) `run_connected()` fails within a bounded time against a
+  nonexistent serial port, using the real `connect_uart()` call path. A
+  full pty-based simulation of the wire-level IDENTIFY handshake itself was
+  considered and deliberately not attempted - see that test file's own
+  module docstring for the scoping rationale.
 
 ## Hardware test plan (still required before real deployment)
 
-Nothing in this document has been run against real hardware. Before this
-guard (including the restore path) can be trusted on a real device:
+**Status update (candidate-002, 2026-08-28)**: items 1, 2, 4, and 5 below
+were exercised live during candidate-001's hardware qualification (fixing
+the two bugs this document's candidate-002 revision addresses along the
+way) - see `_evidence/qualification-logs/phase1.8b-candidate-001-2026-08-28/`.
+Item 3, the restore path, was NOT exercised via the guard's own
+`mcu_restore.restore()` at all in that session - the actual MCU restore was
+performed using `NebulaOS-klipper-mcu/tools/stage4_first_flash.py` directly,
+manually, bypassing this module's decision logic entirely (because at the
+time, the bootloader-entry mechanism this document now describes as Option
+C did not exist yet - it is candidate-002's own fix). **The new
+`mcu_restart.py`-based restore path in this revision has only been
+exercised against mocks (`tests/mcu-lifecycle-decision-tests.py`) and real-
+but-hardware-less Klipper modules (`tests/mcu-real-reactor-msgproto-tests.py`)
+- it has never been run against the real GD32F303 MCU.** A real build,
+reflash, and a genuine known-stock-to-native restore attempt through the
+actual `S50nebulaos-mcu-guard` -> `mcu_identity_check.py` ->
+`mcu_lifecycle.decide()` -> `mcu_restore.restore()` chain (not a manual
+`stage4_first_flash.py` invocation) is still required before this can be
+called hardware-qualified.
 
-1. **Cold boot identity check**: verify `mcu_application_identify.py`'s
-   pre-Klippy handshake actually completes reliably against the real MCU
-   at boot time, before S55klipper starts, without racing Klipper's own
-   connection attempt.
+1. **Cold boot identity check**: DONE (candidate-001 qualification, once
+   the reactor bug fixed in this revision is included in a real build) -
+   `mcu_application_identify.py`'s pre-Klippy handshake was confirmed live
+   against the real MCU.
 2. **Timing validation**: measure guard-start to Klipper-start time with
-   the new two-stage (application-first, bootloader-conditional) design.
-3. **Restore path, once authorized on purpose**: verify
-   `mcu_restore.restore()` actually flashes and post-verifies correctly
-   from an init.d context (serial timing, no competing serial users) -
-   this has only ever been exercised against mocks in this review.
-4. **Artifact deployment**: `/opt/nebulaos/mcu-candidates/candidate-001.bin`
-   is now wired into the build overlay and SHA256-verified by
-   `06-verify.sh` at build time - but this has only been exercised through
-   the build pipeline, never through an actual flash from a real device
-   boot.
-5. **Failure modes**: disconnect the MCU serial cable and boot; verify
-   `MCU_UNREACHABLE` is reported and Klipper is still allowed to attempt
-   its own connection.
+   the new two-stage (application-first, bootloader-conditional) design,
+   including the new restart-command settle/retry delays
+   (`mcu_restore.py`'s `POST_RESTART_SETTLE_S`/`BOOTLOADER_HANDSHAKE_*`
+   constants) on a real boot.
+3. **Restore path via the actual guard, once authorized on purpose**: verify
+   `mcu_restore.restore()` itself - not a manual bypass tool - actually
+   enters the bootloader via `mcu_restart.py`, flashes, and post-verifies
+   correctly from a real init.d context (serial timing, no competing
+   serial users, S55klipper not yet started). **Not yet done** - this is
+   the single most important remaining hardware test for candidate-002.
+4. **Artifact deployment**: DONE -
+   `/opt/nebulaos/mcu-candidates/candidate-001.bin` is wired into the build
+   overlay and was confirmed present/correct on the real device during
+   candidate-001's qualification.
+5. **Failure modes**: DONE (candidate-001 qualification exercised
+   `MCU_UNREACHABLE`-adjacent conditions) - still worth re-confirming after
+   a real build of this revision: disconnect the MCU serial cable and boot;
+   verify `MCU_UNREACHABLE` is reported and Klipper is still allowed to
+   attempt its own connection.
 
 ## Safety rules
 
@@ -241,3 +384,22 @@ guard (including the restore path) can be trusted on a real device:
    has already started) has no code path back into this guard or into
    `mcu_restore.py` - restoration is decided once, at boot, before
    S55klipper, never re-triggered by a later application-level failure.
+7. (candidate-002) `mcu_restart.py` only ever sends `"reset"` or
+   `"config_reset"` - both looked up from the MCU's own real command
+   dictionary at connect time via `msgparser.lookup_command()` - never a
+   hardcoded/invented raw byte sequence. If neither exists in the
+   dictionary, it raises `RestartRequestRefused` and sends nothing; it
+   never attempts an alternate/invented command.
+8. (candidate-002) `mcu_restore.restore()` never raises - any unexpected
+   exception from the bootloader-entry step (including from an injected
+   `restart_fn`, or a bug in it) is caught and converted into a
+   `RestoreResult(FLASH_FAILED, ...)` via the magic-sequence fallback path,
+   so an unhandled exception can never silently choose the safety outcome
+   by crashing this function instead of returning a result the caller can
+   act on.
+9. S50 releases `/dev/ttyS1` before S55 starts by construction, not by
+   explicit `close()` calls: `do_check()`'s python3 invocation is a
+   synchronous command substitution (never backgrounded), so init cannot
+   proceed to S55 until that process has fully exited - at which point the
+   kernel has already closed every file descriptor it held, regardless of
+   what the Python code itself did.

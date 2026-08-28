@@ -1077,6 +1077,84 @@ check /etc/nebulaos/mcu_lifecycle.py
 check /etc/nebulaos/mcu_restore.py
 check /etc/nebulaos/mcu_application_identify.py
 check /etc/nebulaos/mcu_known_identities.py
+check /etc/nebulaos/mcu_restart.py
 check /etc/init.d/S50nebulaos-mcu-guard
+
+# CREALITY_FLASH_PATH runtime dependency (Phase 1.8B hardware qualification,
+# Gate 1 failure, 2026-08-28): mcu_lifecycle.decide()/mcu_restore.restore()'s
+# fallback branches (used whenever no mock is injected - i.e. always, in
+# production) do `import creality_flash` after inserting CREALITY_FLASH_PATH
+# (default /opt/nebulaos/tools) onto sys.path. This file previously was not
+# part of the overlay at all - the guard crashed with ModuleNotFoundError on
+# its very first real boot, before ever classifying the MCU or attempting a
+# restore, because every offline unit test always injects a mock
+# creality_flash_module and so never exercises this real import path. A
+# presence check alone would not have caught a future path/API drift, so this
+# also does a real import of the extracted files below.
+check /opt/nebulaos/tools/creality_flash.py
+check /opt/nebulaos/tools/creality_validator.py
+
+echo "=== MCU lifecycle import-chain smoke test (extracted files, real import, no mocks) ==="
+MCU_SMOKE_DIR="$(mktemp -d)"
+MCU_SMOKE_OK=1
+for f in mcu_lifecycle.py:/etc/nebulaos/mcu_lifecycle.py \
+         mcu_restore.py:/etc/nebulaos/mcu_restore.py \
+         mcu_application_identify.py:/etc/nebulaos/mcu_application_identify.py \
+         mcu_known_identities.py:/etc/nebulaos/mcu_known_identities.py \
+         mcu_restart.py:/etc/nebulaos/mcu_restart.py \
+         creality_flash.py:/opt/nebulaos/tools/creality_flash.py \
+         creality_validator.py:/opt/nebulaos/tools/creality_validator.py; do
+	dest_name="${f%%:*}"
+	rootfs_path="${f#*:}"
+	if ! debugfs -R "dump $rootfs_path ${MCU_SMOKE_DIR}/${dest_name}" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1; then
+		echo "MISS could not extract $rootfs_path for import smoke test"
+		MCU_SMOKE_OK=0
+	fi
+done
+if [ "$MCU_SMOKE_OK" -eq 1 ]; then
+	# Plain `import mcu_lifecycle` would NOT catch this class of bug: the
+	# `import creality_flash` line is deferred inside decide()'s fallback
+	# branch (taken whenever no mock is injected - i.e. always, in
+	# production), not at module load time. So this actually calls
+	# decide() with no mocks, exactly as the init.d guard does, using a
+	# stubbed application_identify_fn so no real serial hardware/MCU is
+	# needed on the x86 build host - the point is to force execution
+	# through the real `import creality_flash` line and the real
+	# SerialTransport construction (which fails closed to UNREACHABLE on
+	# a build host with no /dev/ttyS1, exactly like a genuinely
+	# disconnected MCU would). mcu_restore.restore() has an identical
+	# lazy-import block for the same module, so a successful decide()
+	# call here is direct evidence that pattern resolves correctly too.
+	if python3 -c "
+import sys
+sys.path.insert(0, '${MCU_SMOKE_DIR}')
+import mcu_lifecycle
+import mcu_restart
+
+def fake_identify(port, baud):
+    raise RuntimeError('no MCU on build host - expected, forces the fallback path')
+
+decision = mcu_lifecycle.decide(application_identify_fn=fake_identify)
+assert decision.state == mcu_lifecycle.MCU_UNREACHABLE, decision.state
+
+# Phase 1.8B Option C (candidate-002): mcu_restart.request_generic_restart()
+# must also import and run cleanly with no real hardware present - it
+# should fail closed with RestartRequestError (no /dev/ttyS1 on the build
+# host), never raise an unrelated/unexpected exception or hang.
+try:
+    mcu_restart.request_generic_restart('/dev/ttyS1', 230400, timeout=1.0)
+    raise SystemExit('expected RestartRequestError on a build host with no MCU')
+except mcu_restart.RestartRequestError:
+    pass
+
+print('IMPORT_CHAIN_OK')
+" 2>&1 | tee "${MCU_SMOKE_DIR}/smoke.log" | grep -q "IMPORT_CHAIN_OK"; then
+		echo "OK   mcu_lifecycle.decide()/mcu_restart.request_generic_restart()'s real (non-mocked) import paths resolve cleanly"
+	else
+		echo "MISS import chain failed - see detail below (this is exactly the failure mode that crashed the guard on first real boot before this check existed)"
+		cat "${MCU_SMOKE_DIR}/smoke.log"
+	fi
+fi
+rm -rf "${MCU_SMOKE_DIR}"
 
 echo "== verification complete - review any MISS lines above =="
