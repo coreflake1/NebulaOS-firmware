@@ -187,8 +187,8 @@ if require_stage "case A"; then
 
 	if grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tA/config/printer.cfg" \
 		&& grep -qxF '[include /etc/nebulaos/klipper/machine.cfg]' "$tA/config/printer.cfg" \
-		&& grep -qF '#[include /etc/nebulaos/klipper/prtouch.cfg]' "$tA/config/printer.cfg"; then
-		pass "case A: migrated file has platform+machine includes and prtouch commented out"
+		&& grep -qxF '[include /etc/nebulaos/klipper/prtouch.cfg]' "$tA/config/printer.cfg"; then
+		pass "case A: migrated file has platform+machine+prtouch(z_compensate) includes active"
 	else
 		fail "case A: migrated file is missing one or more of the new includes"
 	fi
@@ -386,7 +386,7 @@ if require_stage "case G"; then
 
 	if grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tG/config/printer.cfg" \
 		&& grep -qxF '[include /etc/nebulaos/klipper/machine.cfg]' "$tG/config/printer.cfg" \
-		&& grep -qF '#[include /etc/nebulaos/klipper/prtouch.cfg]' "$tG/config/printer.cfg"; then
+		&& grep -qxF '[include /etc/nebulaos/klipper/prtouch.cfg]' "$tG/config/printer.cfg"; then
 		pass "case G: pre-nebulaos_compat device migrates to the new split includes just like a post-nebulaos_compat one"
 	else
 		fail "case G: pre-nebulaos_compat device did not migrate to the new includes"

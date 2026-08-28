@@ -156,22 +156,23 @@ EOF
 	# tests/klipper-config-load-smoke-tests.py for that full, root-requiring
 	# proof); this offline test only needs the real section content, not a
 	# real absolute-include resolution.
-	# Phase 1.8B integration candidate: [prtouch_v2] and prtouch.cfg are
-	# gone entirely (native nozzle-clear replaced PRTouch's runtime -
+	# Phase 1.8B integration candidate: [prtouch_v2] is gone entirely (native
+	# nozzle-clear replaced PRTouch's runtime - see
 	# extras/PRTOUCH_REMOVAL_PLAN.md in NebulaOS-klipper-extensions). This
 	# test used to also instantiate a real PRTouchV2 object from
 	# prtouch.cfg's own [prtouch_v2] section; that module no longer exists,
-	# so only [z_compensate] is validated now.
-	# [z_compensate] itself still lives inside prtouch.cfg (alongside the now-dead
-	# [prtouch_v2] section) - moving it to its own always-included file is a real,
-	# separate architectural cleanup this test does not attempt (see the Phase 1.8B
-	# integration report's own note on this: prtouch.cfg's include is commented out
-	# in the shipped printer.cfg, so z_compensate.py - and therefore
-	# CRTENSE_NOZZLE_CLEAR/Z_OFFSET_CALIBRATION - is not actually loaded in
-	# NebulaOS's own default candidate config today, independent of anything in
-	# this PRTouch-removal pass). This test only validates that [z_compensate]'s
-	# own section content, wherever it currently lives, still parses correctly
-	# against real ZCompensate code now that PRTouch has been removed from it.
+	# so only [z_compensate] is validated now. prtouch.cfg's include, which
+	# used to be commented out (a stale claim that "the native GD32 MCU does
+	# not ship HX711-capable firmware" - already contradicted by this
+	# project's own Phase 1.8A hardware qualification of Z_OFFSET_CALIBRATION
+	# via the native HX711 path), is now ACTIVE - without it, neither
+	# Z_OFFSET_CALIBRATION nor CRTENSE_NOZZLE_CLEAR would exist as a gcode
+	# command at all. [z_compensate] still lives inside prtouch.cfg itself
+	# (kept at that name/path rather than renamed, to avoid rippling the
+	# rename through every other overlay/test/doc reference to it). This
+	# test validates that [z_compensate]'s own section content, in its
+	# now-active location, still parses correctly against real ZCompensate
+	# code now that PRTouch has been removed from it.
 	provisioned_cfg="$NEBULAOS_ROOT/printer_data/config/printer.cfg"
 	if PYTHONPATH="$REPO_ROOT" python3 - "$provisioned_cfg" "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/prtouch.cfg" <<'PYEOF'
 import configparser, sys
@@ -188,11 +189,12 @@ def real_section(text, section):
     return dict(parser[section])
 
 provisioned_text = open(sys.argv[1]).read()
-for line in provisioned_text.splitlines():
-    if line.strip() == "[include /etc/nebulaos/klipper/prtouch.cfg]":
-        raise SystemExit(
-            "provisioned printer.cfg has an ACTIVE (uncommented) prtouch.cfg include - "
-            "PRTouch removal (Phase 1.8B) should have left this commented out or absent")
+if not any(line.strip() == "[include /etc/nebulaos/klipper/prtouch.cfg]"
+           for line in provisioned_text.splitlines()):
+    raise SystemExit(
+        "provisioned printer.cfg does not actively include prtouch.cfg - "
+        "z_compensate.py (Z_OFFSET_CALIBRATION, CRTENSE_NOZZLE_CLEAR) would "
+        "never load at all")
 
 text = provisioned_text + "\n" + open(sys.argv[2]).read()
 zc_values = real_section(text, "z_compensate")
