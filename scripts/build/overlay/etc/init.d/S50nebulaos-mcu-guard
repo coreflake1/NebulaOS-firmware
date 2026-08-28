@@ -20,20 +20,26 @@
 #   - The only serial interaction is: enter_bootloader -> get_version ->
 #     app_start (all read-only from the MCU's perspective).
 #
-# 9-CASE STATE MATRIX (design reference):
-#   Case 1: Native firmware, correct identity     -> PASS, start Klipper
-#   Case 2: Native firmware, wrong identity        -> FAIL (hardware mismatch)
-#   Case 3: Stock firmware (after clobber)         -> DEFERRED (would restore)
-#   Case 4: Bootloader-only (CRC fail)             -> DEFERRED (would restore)
-#   Case 5: MCU not responding on serial           -> WARN (let Klipper try)
-#   Case 6: Native fw, identity query fails        -> WARN (let Klipper try)
-#   Case 7: Unknown firmware                       -> FAIL (deferred)
-#   Case 8: Flash restore succeeds                 -> DEFERRED
-#   Case 9: Flash restore fails                    -> DEFERRED
+# CORRECTED DESIGN (offline pre-build review, superseding the original
+# bootloader-hw-id-only version of this service): mcu_identity_check.py now
+# delegates to mcu_lifecycle.py, which checks APPLICATION identity (which
+# firmware is running - via a pre-Klippy Klipper-protocol identify handshake)
+# separately from HARDWARE identity (which physical MCU - via the bootloader
+# protocol). The two are NOT the same thing: the bootloader hardware ID has
+# been observed identical whether candidate-001 or stock firmware is
+# installed, so the original hw-id-only check could never actually prove
+# candidate-001 was the running application. See mcu_lifecycle.py.
 #
-# Phase 1.8B implements Cases 1, 2, 5, and 6 only (identity check).
-# Cases 3, 4, 7, 8, 9 (automatic flash restoration) require hardware
-# qualification and are NOT implemented in this phase.
+# STATE MACHINE (mcu_lifecycle.py / mcu_restore.py):
+#   SUPPORTED_HW_NATIVE_APP       -> PASS, start Klipper, no flash
+#   SUPPORTED_HW_KNOWN_STOCK_APP  -> restore authorized (mcu_restore.py runs
+#                                     ONE bounded flash attempt, gated by a
+#                                     pinned SHA256 + hardware allow-list)
+#   SUPPORTED_HW_UNKNOWN_APP      -> WARN, let Klipper try, NEVER auto-flash
+#   UNSUPPORTED_HW                -> FAIL, block Klipper, NEVER flash
+#   MCU_UNREACHABLE               -> WARN, let Klipper try (its own retry
+#                                     logic is the second line of defense),
+#                                     no stock fallback, bounded (one attempt)
 #
 # See docs/MCU_LIFECYCLE_GUARD.md for the full design document.
 
@@ -57,6 +63,11 @@ write_state() {
 	MCU_GUARD_DETAIL=$_detail
 	MCU_GUARD_TIMESTAMP=$_ts
 	MCU_GUARD_EXPECTED=$EXPECTED_HW_ID
+	MCU_LIFECYCLE_STATE=${_lifecycle_state:-unknown}
+	MCU_APPLICATION_IDENTITY=${_application_identity:-unknown}
+	MCU_APPLICATION_CLASS=${_application_class:-unknown}
+	MCU_HW_ID_STATUS=${_hw_id_status:-not_checked}
+	MCU_RESTORE_RESULT=${_restore_result:-not_attempted}
 	EOF
 }
 
@@ -82,10 +93,17 @@ do_check() {
     check_output=$("$PYTHON3" "$MCU_IDENTITY_CHECK" 2>&1) || true
     check_exit=$?
 
-    # Parse the result from the helper output.
-    _guard_result=$(echo "$check_output" | sed -n 's/^MCU_GUARD_RESULT=//p' | head -1)
-    _identity=$(echo "$check_output" | sed -n 's/^MCU_IDENTITY=//p' | head -1)
-    _detail=$(echo "$check_output" | sed -n 's/^MCU_GUARD_DETAIL=//p' | head -1)
+    # Parse the result from the helper output. mcu_identity_check.py's
+    # final line is always MCU_GUARD_RESULT=PASS|WARN|FAIL (take the LAST
+    # match, since the restore path prints an earlier provisional line
+    # before mcu_restore.py's outcome is known).
+    _guard_result=$(echo "$check_output" | sed -n 's/^MCU_GUARD_RESULT=//p' | tail -1)
+    _detail=$(echo "$check_output" | sed -n 's/^MCU_LIFECYCLE_DETAIL=//p' | head -1)
+    _lifecycle_state=$(echo "$check_output" | sed -n 's/^MCU_LIFECYCLE_STATE=//p' | head -1)
+    _application_identity=$(echo "$check_output" | sed -n 's/^MCU_APPLICATION_IDENTITY=//p' | head -1)
+    _application_class=$(echo "$check_output" | sed -n 's/^MCU_APPLICATION_CLASS=//p' | head -1)
+    _hw_id_status=$(echo "$check_output" | sed -n 's/^MCU_HW_ID_STATUS=//p' | head -1)
+    _restore_result=$(echo "$check_output" | sed -n 's/^MCU_RESTORE_RESULT=//p' | head -1)
 
     # If the helper produced no parseable output at all, treat as a warning
     # (timing issue, import error, etc.) - do not block Klipper.
@@ -97,55 +115,33 @@ do_check() {
         exit 0
     fi
 
-    # Decision logic based on the helper's structured result.
+    log "lifecycle_state=$_lifecycle_state application_class=$_application_class hw_id_status=$_hw_id_status restore_result=$_restore_result"
+
+    # Decision logic based on the helper's structured result. The helper
+    # (mcu_identity_check.py, delegating to mcu_lifecycle.py/mcu_restore.py)
+    # always prints exactly one of PASS/WARN/FAIL as its final
+    # MCU_GUARD_RESULT line - the detailed reasoning (which state, which
+    # identity, whether a restore was attempted) is in the fields already
+    # captured above and persisted to the state file below.
     case "$_guard_result" in
         PASS)
-            # Case 1: native firmware, correct identity.
-            log "MCU identity verified: $_identity (matches expected $EXPECTED_HW_ID)"
-            write_state "PASS" "$_identity" "$_detail"
+            log "MCU lifecycle check passed: $_lifecycle_state ($_detail)"
+            write_state "PASS" "$_application_identity" "$_detail"
             exit 0
             ;;
-        FAIL_WRONG_ID)
-            # Case 2: identity query succeeded but the hardware ID does
-            # not match the expected value. This should never happen on
-            # a KE with the correct MCU, so it indicates a hardware
-            # mismatch or an unexpected firmware version. Do NOT start
-            # Klipper - it would talk to the wrong MCU.
-            log "ERROR: MCU identity mismatch: got '$_identity', expected '$EXPECTED_HW_ID'"
-            log "this may indicate a hardware mismatch - blocking Klipper start"
-            write_state "FAIL" "$_identity" "wrong_hardware_id"
-            exit 1
-            ;;
-        FAIL_SERIAL)
-            # Case 5: serial port could not be opened or MCU did not
-            # respond. This may be a timing issue (MCU not ready yet)
-            # or a genuine hardware fault. Allow Klipper to try - it
-            # has its own serial timeout/retry logic.
-            log "WARNING: could not communicate with MCU on serial ($_detail)"
-            log "allowing Klipper to start (may be a timing issue)"
-            write_state "WARN" "unknown" "$_detail"
-            exit 0
-            ;;
-        FAIL_BOOTLOADER)
-            # Case 6: entered bootloader but identity query itself
-            # failed (e.g. checksum error, short read). Allow Klipper
-            # to try - the MCU may still have valid application firmware.
-            log "WARNING: bootloader entered but identity query failed ($_detail)"
-            log "allowing Klipper to start"
-            write_state "WARN" "unknown" "$_detail"
+        WARN)
+            log "WARNING: $_lifecycle_state ($_detail) - allowing Klipper to start"
+            write_state "WARN" "$_application_identity" "$_detail"
             exit 0
             ;;
         FAIL)
-            # Generic failure from the helper - log detail, allow
-            # Klipper to try unless the detail says otherwise.
-            log "WARNING: identity check failed ($_detail)"
-            write_state "WARN" "$_identity" "$_detail"
-            exit 0
+            log "ERROR: $_lifecycle_state ($_detail) - blocking Klipper start"
+            write_state "FAIL" "$_application_identity" "$_detail"
+            exit 1
             ;;
         *)
-            # Unrecognized result - do not block Klipper.
             log "WARNING: unrecognized check result '$_guard_result'"
-            write_state "WARN" "$_identity" "unrecognized_result"
+            write_state "WARN" "$_application_identity" "unrecognized_result"
             exit 0
             ;;
     esac

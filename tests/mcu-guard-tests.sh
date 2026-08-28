@@ -16,6 +16,8 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 INITD_DIR="$REPO_ROOT/scripts/build/overlay/etc/init.d"
 GUARD_SCRIPT="$INITD_DIR/S50nebulaos-mcu-guard"
 PYTHON_HELPER="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_identity_check.py"
+LIFECYCLE_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_lifecycle.py"
+RESTORE_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_restore.py"
 KLIPPER_SCRIPT="$INITD_DIR/S55klipper"
 
 PASS=0
@@ -200,18 +202,21 @@ fi
 echo ""
 echo "--- Safety: app_start called after identify ---"
 
-if grep -q 'app_start' "$PYTHON_HELPER"; then
-    pass "mcu_identity_check.py calls app_start"
+# Phase 1.8B: the bootloader interaction itself moved from
+# mcu_identity_check.py (now a thin orchestrator) into
+# mcu_lifecycle.py's _check_hardware_identity().
+if grep -q 'app_start' "$LIFECYCLE_MODULE"; then
+    pass "mcu_lifecycle.py calls app_start"
 else
-    fail "mcu_identity_check.py does NOT call app_start (MCU would be left in bootloader)"
+    fail "mcu_lifecycle.py does NOT call app_start (MCU would be left in bootloader)"
 fi
 
 # Verify the app_start call is in a finally/cleanup pattern - check that
 # it is not only inside the success path.
-if grep -q 'bootloader_entered' "$PYTHON_HELPER"; then
-    pass "mcu_identity_check.py tracks bootloader_entered state for cleanup"
+if grep -q 'bootloader_entered' "$LIFECYCLE_MODULE"; then
+    pass "mcu_lifecycle.py tracks bootloader_entered state for cleanup"
 else
-    fail "mcu_identity_check.py does not track bootloader state for app_start cleanup"
+    fail "mcu_lifecycle.py does not track bootloader state for app_start cleanup"
 fi
 
 # =========================================================================
@@ -241,8 +246,12 @@ fi
 echo ""
 echo "--- Decision tree coverage ---"
 
-# Check that the init.d script handles all implemented cases.
-for result_code in PASS FAIL_WRONG_ID FAIL_SERIAL FAIL_BOOTLOADER FAIL; do
+# Check that the init.d script handles all top-level result codes. As of
+# the Phase 1.8B redesign (mcu_lifecycle.py/mcu_restore.py), the detailed
+# per-case reasoning lives in MCU_LIFECYCLE_STATE/MCU_APPLICATION_CLASS
+# (checked separately below) - the shell script itself only ever dispatches
+# on PASS/WARN/FAIL.
+for result_code in PASS WARN FAIL; do
     if grep -q "$result_code" "$GUARD_SCRIPT"; then
         pass "script handles result code: $result_code"
     else
@@ -250,12 +259,21 @@ for result_code in PASS FAIL_WRONG_ID FAIL_SERIAL FAIL_BOOTLOADER FAIL; do
     fi
 done
 
-# The Python helper should emit the corresponding result codes.
-for result_code in PASS FAIL_WRONG_ID FAIL_SERIAL FAIL_BOOTLOADER; do
-    if grep -q "\"$result_code\"" "$PYTHON_HELPER"; then
-        pass "Python helper emits result code: $result_code"
+# The Python entry point should emit the corresponding result codes.
+for result_code in PASS WARN FAIL; do
+    if grep -q "MCU_GUARD_RESULT=$result_code" "$PYTHON_HELPER"; then
+        pass "Python entry point emits result code: $result_code"
     else
-        fail "Python helper does not emit result code: $result_code"
+        fail "Python entry point does not emit result code: $result_code"
+    fi
+done
+
+# The full lifecycle state matrix should be represented in mcu_lifecycle.py.
+for state in SUPPORTED_HW_NATIVE_APP SUPPORTED_HW_KNOWN_STOCK_APP SUPPORTED_HW_UNKNOWN_APP UNSUPPORTED_HW MCU_UNREACHABLE; do
+    if grep -q "$state" "$LIFECYCLE_MODULE"; then
+        pass "mcu_lifecycle.py handles state: $state"
+    else
+        fail "mcu_lifecycle.py does not handle state: $state"
     fi
 done
 
@@ -266,28 +284,28 @@ done
 echo ""
 echo "--- Error handling ---"
 
-if grep -q 'serial_open_failed\|serial.*fail' "$PYTHON_HELPER"; then
-    pass "Python helper handles serial open failure"
+if grep -q 'serial_open_failed\|UNREACHABLE' "$LIFECYCLE_MODULE"; then
+    pass "mcu_lifecycle.py handles serial open failure"
 else
-    fail "Python helper does not handle serial open failure"
+    fail "mcu_lifecycle.py does not handle serial open failure"
 fi
 
-if grep -q 'bootloader_entry_failed\|could not enter' "$PYTHON_HELPER"; then
-    pass "Python helper handles bootloader entry failure"
+if grep -q 'bootloader_entry_failed\|could not enter' "$LIFECYCLE_MODULE"; then
+    pass "mcu_lifecycle.py handles bootloader entry failure"
 else
-    fail "Python helper does not handle bootloader entry failure"
+    fail "mcu_lifecycle.py does not handle bootloader entry failure"
 fi
 
-if grep -q 'version_query_failed' "$PYTHON_HELPER"; then
-    pass "Python helper handles version query failure"
+if grep -q 'version_query_failed' "$LIFECYCLE_MODULE"; then
+    pass "mcu_lifecycle.py handles version query failure"
 else
-    fail "Python helper does not handle version query failure"
+    fail "mcu_lifecycle.py does not handle version query failure"
 fi
 
-if grep -q 'cannot_import_creality_flash\|ImportError' "$PYTHON_HELPER"; then
-    pass "Python helper handles missing creality_flash import"
+if grep -q 'cannot_import_klippy_serial_modules\|ImportError' "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_application_identify.py"; then
+    pass "mcu_application_identify.py handles missing klippy import"
 else
-    fail "Python helper does not handle missing creality_flash import"
+    fail "mcu_application_identify.py does not handle missing klippy import"
 fi
 
 # Shell script: check that helper-not-found is handled gracefully.
@@ -305,23 +323,34 @@ else
 fi
 
 # =========================================================================
-# 9. 9-case state matrix documented in script comments
+# 9. State matrix documented in script comments
 # =========================================================================
+#
+# Superseded (Phase 1.8B offline pre-build review): the original numbered
+# 9-case matrix, where cases 3/4/7/8/9 were explicitly DEFERRED pending
+# hardware qualification, has been replaced by a named 5-state model
+# (mcu_lifecycle.py) where restoration IS implemented (offline, behind
+# mocks - see mcu-lifecycle-decision-tests.py) rather than deferred. These
+# checks now verify the new state names are documented instead of the old
+# numbered cases.
 
 echo ""
-echo "--- 9-case state matrix documentation ---"
+echo "--- State matrix documentation ---"
 
-for case_num in 1 2 3 4 5 6 7 8 9; do
-    if grep -q "Case $case_num" "$GUARD_SCRIPT"; then
-        pass "Case $case_num is documented in init.d script comments"
+for state_name in SUPPORTED_HW_NATIVE_APP SUPPORTED_HW_KNOWN_STOCK_APP SUPPORTED_HW_UNKNOWN_APP UNSUPPORTED_HW MCU_UNREACHABLE; do
+    if grep -q "$state_name" "$GUARD_SCRIPT"; then
+        pass "state $state_name is documented in init.d script comments"
     else
-        fail "Case $case_num is NOT documented in init.d script comments"
+        fail "state $state_name is NOT documented in init.d script comments"
     fi
 done
 
-# Verify the deferred cases are clearly marked as not implemented.
-for keyword in DEFERRED "NOT implemented" "hardware"; do
-    if grep -qi "$keyword" "$GUARD_SCRIPT"; then
+# Verify the still-genuinely-unimplemented scope is honestly documented:
+# the artifact deployment/build-pipeline convention (mcu_restore.py's
+# CANDIDATE_PATH) is a NEW proposed path, not yet wired into build.sh - see
+# mcu_restore.py's own module docstring.
+for keyword in "NEW proposed"; do
+    if grep -qi "$keyword" "$RESTORE_MODULE"; then
         pass "script documents deferred/not-implemented scope ($keyword)"
     else
         fail "script does not document deferred scope ($keyword)"
@@ -341,10 +370,17 @@ else
     fail "expected hardware ID not found in init.d script"
 fi
 
-if grep -q 'mcu0_001_G32' "$PYTHON_HELPER"; then
-    pass "expected hardware ID (mcu0_001_G32) is configured in Python helper"
+if grep -q 'mcu0_001_G32' "$LIFECYCLE_MODULE"; then
+    pass "expected hardware ID (mcu0_001_G32) is configured in mcu_lifecycle.py"
 else
-    fail "expected hardware ID not found in Python helper"
+    fail "expected hardware ID not found in mcu_lifecycle.py"
+fi
+
+KNOWN_IDENTITIES_MODULE="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_known_identities.py"
+if grep -q 'v0\.13\.0-742-g01a9c2f92' "$KNOWN_IDENTITIES_MODULE"; then
+    pass "candidate-001's exact application version string is pinned in mcu_known_identities.py"
+else
+    fail "candidate-001's application version string not found in mcu_known_identities.py"
 fi
 
 # =========================================================================
@@ -376,9 +412,14 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 mock_pass="$WORK/mock_pass.py"
 cat > "$mock_pass" <<'MOCK_EOF'
 #!/usr/bin/env python3
+print("MCU_LIFECYCLE_STATE=SUPPORTED_HW_NATIVE_APP")
+print("MCU_LIFECYCLE_ACTION=ALLOW_KLIPPER_START")
+print("MCU_APPLICATION_IDENTITY=v0.13.0-742-g01a9c2f92")
+print("MCU_APPLICATION_CLASS=NATIVE_CANDIDATE_001")
+print("MCU_HW_ID=unknown")
+print("MCU_HW_ID_STATUS=not_checked_not_needed")
+print("MCU_LIFECYCLE_DETAIL=native_candidate_001_confirmed_via_application_identity")
 print("MCU_GUARD_RESULT=PASS")
-print("MCU_IDENTITY=mcu0_001_G32-v1.0.0")
-print("MCU_GUARD_DETAIL=identity_verified")
 MOCK_EOF
 chmod +x "$mock_pass"
 
@@ -409,7 +450,7 @@ if [ -f "$mock_state2" ]; then
     else
         fail "state file does not contain PASS result"
     fi
-    if grep -q 'MCU_IDENTITY=mcu0_001_G32' "$mock_state2"; then
+    if grep -q 'MCU_IDENTITY=v0.13.0-742-g01a9c2f92' "$mock_state2"; then
         pass "state file records MCU identity from mock"
     else
         fail "state file does not contain MCU identity"
@@ -418,13 +459,19 @@ else
     fail "state file was not created at $mock_state2"
 fi
 
-# Test FAIL_WRONG_ID mock.
+# Test the UNSUPPORTED_HW mock (formerly FAIL_WRONG_ID under the old,
+# hardware-ID-only design - now one of several states that map to FAIL).
 mock_fail="$WORK/mock_fail.py"
 cat > "$mock_fail" <<'MOCK_EOF'
 #!/usr/bin/env python3
-print("MCU_GUARD_RESULT=FAIL_WRONG_ID")
-print("MCU_IDENTITY=some_other_mcu-v2.0")
-print("MCU_GUARD_DETAIL=expected=mcu0_001_G32")
+print("MCU_LIFECYCLE_STATE=UNSUPPORTED_HW")
+print("MCU_LIFECYCLE_ACTION=BLOCK_KLIPPER_START")
+print("MCU_APPLICATION_IDENTITY=38d96adc-dirty-20231016_135251-longer-virtual-machine")
+print("MCU_APPLICATION_CLASS=KNOWN_STOCK")
+print("MCU_HW_ID=some_other_mcu-v2.0")
+print("MCU_HW_ID_STATUS=MISMATCH")
+print("MCU_LIFECYCLE_DETAIL=expected=mcu0_001_G32")
+print("MCU_GUARD_RESULT=FAIL")
 MOCK_EOF
 chmod +x "$mock_fail"
 
@@ -435,9 +482,9 @@ MCU_IDENTITY_CHECK="$mock_fail" \
 mock_fail_exit=$?
 
 if [ "$mock_fail_exit" -eq 1 ]; then
-    pass "guard exits 1 when helper reports FAIL_WRONG_ID"
+    pass "guard exits 1 when helper reports UNSUPPORTED_HW/FAIL"
 else
-    fail "guard exits $mock_fail_exit when helper reports FAIL_WRONG_ID (expected 1)"
+    fail "guard exits $mock_fail_exit when helper reports UNSUPPORTED_HW/FAIL (expected 1)"
 fi
 
 if [ -f "$mock_state3" ] && grep -q 'MCU_GUARD_RESULT=FAIL' "$mock_state3"; then
@@ -527,7 +574,7 @@ else
     fail "MCU_LIFECYCLE_GUARD.md design document does not exist"
 fi
 
-if [ -f "$DESIGN_DOC" ] && grep -q '9-case\|9-Case\|nine.*case\|state matrix' "$DESIGN_DOC"; then
+if [ -f "$DESIGN_DOC" ] && grep -qi 'state matrix' "$DESIGN_DOC"; then
     pass "design document describes the state matrix"
 else
     fail "design document does not describe the state matrix"

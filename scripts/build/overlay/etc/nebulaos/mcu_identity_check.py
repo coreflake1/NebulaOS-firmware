@@ -1,137 +1,74 @@
 #!/usr/bin/env python3
-"""MCU identity check helper for S50nebulaos-mcu-guard.
+"""MCU lifecycle check + restore entry point for S50nebulaos-mcu-guard.
 
-Queries the GD32F303 MCU's bootloader identity via the Creality serial
-protocol and prints structured key=value results on stdout for the
-calling init.d script to parse.
+Corrected in Phase 1.8B (offline pre-build review): the original version of
+this file only ever performed a bootloader-level hardware-ID check
+(creality_flash.identify()/check_identity()) and reported PASS whenever the
+bootloader answered with the expected hardware ID - regardless of which
+application firmware was actually running. That hardware ID has been
+observed identical whether candidate-001 or stock Creality firmware is
+installed, so it could never actually prove candidate-001 was running (see
+mcu_lifecycle.py's module docstring for the exact evidence).
 
-SAFETY CONTRACT:
-  - This script is READ-ONLY. It enters the bootloader, queries the
-    version string, and ALWAYS calls app_start() to return the MCU to
-    its application firmware before exiting.
-  - It NEVER calls flash_image(), flash(), or any write/erase command.
-  - It NEVER writes to /dev/mmcblk0p1 or any block device.
+This entry point now delegates to mcu_lifecycle.decide() (which correctly
+separates application identity from hardware identity) and, only when that
+decision explicitly authorizes it, to mcu_restore.restore(). It never
+performs any bootloader or flash interaction directly - all of that lives
+in mcu_lifecycle.py/mcu_restore.py so it can be exercised by tests with
+injected mocks instead of real hardware.
 
-DEPLOYMENT NOTE:
-  On the target device, creality_flash.py lives in the NebulaOS-klipper-mcu
-  repo and is deployed to a known path (e.g. /opt/nebulaos/tools/ or as
-  part of the MCU tooling package). The CREALITY_FLASH_PATH environment
-  variable can override the default import path. Integration with the MCU
-  repo's deployment is tracked separately from this init.d service.
-
-Protocol flow:
-  1. Open /dev/ttyS1 at app baud (230400)
-  2. Send 32-byte bootloader-request magic
-  3. Switch to bootloader baud (115200)
-  4. Handshake (0x75 exchange)
-  5. Get version (25-byte identity + 1-byte checksum)
-  6. App start (return MCU to application mode)
-  7. Print result and exit
+SAFETY CONTRACT (unchanged from the original file, still enforced):
+  - No erase/write occurs anywhere except inside mcu_restore.restore(),
+    and only when mcu_lifecycle.decide() returned RESTORE_AUTHORIZED.
+  - Every bootloader interaction always calls app_start() before this
+    process exits (enforced inside mcu_lifecycle._check_hardware_identity
+    and mcu_restore.restore()'s use of creality_flash.flash(), which itself
+    calls app_start() after a successful write).
+  - Never writes to /dev/mmcblk0p1 or any block device - this file and its
+    two collaborators only ever touch the MCU serial port and (in
+    mcu_restore.py only) the MCU's own flash via the existing, separately
+    hardware-identity-gated creality_flash.flash() function.
 """
 
-import os
 import sys
-import time
 
-# --- Configuration (overridable via environment) -------------------------
-
-MCU_SERIAL_PORT = os.environ.get("MCU_SERIAL_PORT", "/dev/ttyS1")
-MCU_APP_BAUD = int(os.environ.get("MCU_APP_BAUD", "230400"))
-MCU_BOOTLOADER_BAUD = int(os.environ.get("MCU_BOOTLOADER_BAUD", "115200"))
-MCU_EXPECTED_HW_ID = os.environ.get("MCU_EXPECTED_HW_ID", "mcu0_001_G32")
-MCU_BOOTLOADER_ATTEMPTS = int(os.environ.get("MCU_BOOTLOADER_ATTEMPTS", "3"))
-
-# Path to creality_flash.py's parent directory. On target:
-#   /opt/nebulaos/tools  (where the MCU repo deploys its tooling)
-# For development/testing, set CREALITY_FLASH_PATH to the local checkout.
-CREALITY_FLASH_PATH = os.environ.get("CREALITY_FLASH_PATH", "/opt/nebulaos/tools")
+import mcu_lifecycle
+import mcu_restore
 
 
-def emit(result, identity="unknown", detail=""):
-    """Print structured key=value output for the init.d script to parse."""
-    print(f"MCU_GUARD_RESULT={result}")
-    print(f"MCU_IDENTITY={identity}")
-    print(f"MCU_GUARD_DETAIL={detail}")
+def emit(fields):
+    for key, value in fields.items():
+        print(f"{key}={value}")
 
 
 def main():
-    # Import creality_flash from the configured path.
-    if CREALITY_FLASH_PATH not in sys.path:
-        sys.path.insert(0, CREALITY_FLASH_PATH)
+    decision = mcu_lifecycle.decide()
+    fields = decision.as_dict()
 
-    try:
-        import creality_flash
-    except ImportError as e:
-        emit("FAIL", detail=f"cannot_import_creality_flash: {e}")
-        sys.exit(1)
-
-    # Open the serial transport.
-    try:
-        transport = creality_flash.SerialTransport(
-            MCU_SERIAL_PORT, baud=MCU_APP_BAUD, timeout=2.0
-        )
-    except Exception as e:
-        emit("FAIL_SERIAL", detail=f"serial_open_failed: {e}")
-        sys.exit(1)
-
-    # Enter bootloader and query identity. The identify() function calls
-    # enter_bootloader() (magic + baud switch + handshake) then
-    # get_version(). We call it directly rather than reimplementing the
-    # protocol, but we MUST call app_start() afterward regardless of
-    # success or failure.
-    version_string = None
-    bootloader_entered = False
-    try:
-        version_string = creality_flash.identify(transport)
-        bootloader_entered = True
-    except creality_flash.FlashError as e:
-        error_msg = str(e)
-        if "could not enter" in error_msg.lower():
-            # Could not enter bootloader at all - serial magic failed.
-            # This is Case 5 (MCU not responding) or the MCU is running
-            # application firmware that does not respond to the magic
-            # sequence (stock firmware path, requires FIRMWARE_RESTART).
-            emit("FAIL_SERIAL", detail=f"bootloader_entry_failed: {error_msg}")
-            sys.exit(1)
+    if decision.action == mcu_lifecycle.RESTORE_AUTHORIZED:
+        restore_result = mcu_restore.restore()
+        fields.update(restore_result.as_dict())
+        emit(fields)
+        if restore_result.state == mcu_restore.RESTORED_AND_VERIFIED:
+            print("MCU_GUARD_RESULT=PASS")
+            sys.exit(0)
         else:
-            # Entered bootloader but version query failed.
-            bootloader_entered = True
-            emit("FAIL_BOOTLOADER", detail=f"version_query_failed: {error_msg}")
-            # Fall through to app_start below.
-    except Exception as e:
-        emit("FAIL_SERIAL", detail=f"unexpected_error: {e}")
-        sys.exit(1)
+            # CANDIDATE_ARTIFACT_MISSING / CANDIDATE_HASH_BAD / FLASH_FAILED:
+            # bounded failure, no stock fallback, preserve diagnostics, do
+            # not let Klipper start against a partially-restored/unknown MCU.
+            print("MCU_GUARD_RESULT=FAIL")
+            sys.exit(1)
 
-    # CRITICAL: always return the MCU to application mode after entering
-    # the bootloader. The bootloader has a 15-second handshake window;
-    # leaving it in bootloader mode would prevent Klipper from connecting.
-    if bootloader_entered:
-        try:
-            # Ensure we are at bootloader baud for app_start.
-            transport.set_baudrate(MCU_BOOTLOADER_BAUD)
-            creality_flash.app_start(transport)
-        except Exception as e:
-            # Log the app_start failure but do not change the primary
-            # result - the identity check outcome is what matters for
-            # the decision tree. The MCU's bootloader will time out and
-            # return to app mode on its own after ~15 seconds if
-            # app_start fails.
-            print(f"MCU_GUARD_WARNING=app_start_failed: {e}", file=sys.stderr)
+    emit(fields)
 
-    # If we got here without a version string, the error was already
-    # emitted above (FAIL_BOOTLOADER path with fall-through).
-    if version_string is None:
-        sys.exit(1)
-
-    # Check the hardware identity against the expected value.
-    if creality_flash.check_identity(version_string, (MCU_EXPECTED_HW_ID,)):
-        # Case 1: correct identity.
-        emit("PASS", identity=version_string, detail="identity_verified")
+    if decision.action == mcu_lifecycle.ALLOW_KLIPPER_START:
+        print("MCU_GUARD_RESULT=PASS")
         sys.exit(0)
-    else:
-        # Case 2: wrong identity.
-        emit("FAIL_WRONG_ID", identity=version_string,
-             detail=f"expected={MCU_EXPECTED_HW_ID}")
+    elif decision.action == mcu_lifecycle.ALLOW_KLIPPER_START_WARN:
+        print("MCU_GUARD_RESULT=WARN")
+        sys.exit(0)
+    else:  # BLOCK_KLIPPER_START
+        print("MCU_GUARD_RESULT=FAIL")
         sys.exit(1)
 
 
