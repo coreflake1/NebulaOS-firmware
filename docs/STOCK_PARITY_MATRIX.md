@@ -32,7 +32,7 @@ was checked, real MCU communication was not.
 | Feature | Stock evidence | Custom evidence | Status | Notes |
 |---|---|---|---|---|
 | Boot to userspace | `artifacts/parity/stock/01-uname.txt` | `artifacts/parity/custom/01-uname.txt` | PARITY_CONFIRMED | Linux 4.4.94 vs. 6.6.18-rt23, both boot to a working shell. |
-| OTA A/B slot + automatic fallback | Not applicable (stock is the fallback target) | `S00revert-safety`/`S99confirm-good`, verified this session: `ota:kernel2` committed automatically after a real reboot | PARITY_CONFIRMED (custom-only mechanism, by design) | See `FIRMWARE.md` sec 21-23, 54. |
+| OTA A/B slot + automatic fallback | Not applicable (stock is the fallback target) | `S00revert-safety`/`S99confirm-good`, verified this session: `ota:kernel2` committed automatically after a real reboot | SUPERSEDED — see note | See `FIRMWARE.md` sec 21-23, 54. **Note (Phase 1.8B):** automatic marker-writing on both the arm-on-boot and confirm-good paths was removed in `phase1.8b/boot-safety` (booting stock auto-flashes and destroys the qualified MCU firmware, so an automatic fallback was a hardware-safety risk, not a convenience worth keeping). This row documents what was true when originally captured; current behavior is in `docs/A_B_SLOT_MODEL.md`. |
 | Root filesystem | `/dev/root /rom squashfs ro` + `overlayfs` writable layer on `mmcblk0p9`, `/usr/data` on `mmcblk0p10` (both real, persistent ext4) | `/dev/root / squashfs ro` + `tmpfs` on `/opt/printer_data` and `/usr/data` | EXPECTED_DIFFERENCE | Deliberate, documented tradeoff for an unproven test image (`FIRMWARE.md` sec 24) - custom has no persistent writable storage of its own yet; a real, separate follow-up. |
 
 ## Driver / kernel-module parity (stock `lsmod` vs. custom kernel config)

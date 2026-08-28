@@ -50,26 +50,36 @@ confirm-good                    S99confirm-good
      |  OTA marker forward once the real app stack is actually healthy,
      |  not just "init reached this point")
      v
-rollback-on-failure             S00revert-safety (already armed BEFORE this
-                                 boot even starts - see below)
+rollback-on-failure             REMOVED as of Phase 1.8B - see below.
 ```
 
-## Rollback is armed before the new boot, not after
+## Automatic rollback-to-stock was removed in Phase 1.8B (`phase1.8b/boot-safety`, 86a0c01)
 
-`S00revert-safety` runs first, before every other init script, and
-unconditionally points the OTA marker back at the STOCK slot the instant a
-custom-slot boot begins at all. Only `S99confirm-good` - running last, after
-klipper/moonraker/guppyscreen/nginx are all up, and only once Moonraker's
-`klippy_state` genuinely reports `ready` - flips the marker forward again.
+**This section previously described `S00revert-safety` unconditionally arming an automatic
+rollback to stock on every boot. That mechanism no longer exists — the description below is
+historical, kept so the reasoning for the change is visible, not a description of current
+behavior.**
 
-This means the "rollback on failure" step in the flow above is not a
-separate mechanism bolted onto the end of an update - it is *already true
-of every single boot*, update or not, before this mission ever started. If
-anything after `S00revert-safety` crashes, hangs, or never reaches
-`S99confirm-good`, the next reboot (power cycle, watchdog, anything) lands
-back on stock automatically, with no cable, no button, no working shell
-required. An update simply rides this same mechanism rather than needing
-its own.
+Booting the stock Creality slot auto-flashes the GD32F303 MCU with old Creality firmware,
+destroying whatever native MCU firmware is currently qualified and installed. The old design meant
+any transient Klipper/Moonraker failure inside NebulaOS — not just a genuinely broken image — could
+silently trigger exactly that MCU-destroying fallback on the next reboot. That risk outweighed the
+convenience of automatic recovery.
+
+As of Phase 1.8B: `S00revert-safety` is a deliberate no-op (it logs that automatic fallback is
+disabled and why, and does not touch the marker). `S99confirm-good` still polls Moonraker's
+`klippy_state` and logs the result, but no longer writes the marker on either the success or the
+timeout path. **A NebulaOS boot that crashes, hangs, or never reaches a healthy Klipper/Moonraker
+state now simply stays on NebulaOS** — there is no cable-free, button-free automatic path back to
+stock any more. Manual recovery (SSH `write_ota_marker`, Creality's own tools, or USB mask-ROM
+recovery) remains fully available — see `docs/DEVELOPER_RECOVERY.md` and
+`docs/HOW_TO_SWITCH_STOCK_AND_CUSTOM.md`. `docs/A_B_SLOT_MODEL.md` has the full current-state
+description of what each script does now.
+
+An update that lands on a genuinely broken image therefore now requires a human to notice and
+manually recover, rather than self-healing on the next reboot — a deliberate trade of convenience
+for hardware safety. This is tracked as a known limitation of the current A/B model (see the vNext
+roadmap's Phase 6/7 discussion of pre-init rollback), not something Phase 1.8B claims to solve.
 
 ## Persistent migration is what makes a slot-flash-only update actually work
 
@@ -122,7 +132,7 @@ separate, future work, not part of this mission.
 | Package + manifest + SHA256 | `scripts/build/package-deployment.sh` |
 | GitHub Release publish | `scripts/release.sh` |
 | Inactive-slot flash + read-back | `scripts/flash-spare-slot.sh` |
-| Rollback-armed-by-default | `scripts/build/overlay/etc/init.d/S00revert-safety` |
-| Confirm-good (arms forward) | `scripts/build/overlay/etc/init.d/S99confirm-good` |
+| Boot-start no-op (Phase 1.8B: automatic rollback removed) | `scripts/build/overlay/etc/init.d/S00revert-safety` |
+| Health diagnostic (Phase 1.8B: no longer writes the marker) | `scripts/build/overlay/etc/init.d/S99confirm-good` |
 | Persistent migration | `scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed`, `S04nebulaos-migrate` |
 | Runtime version truth | `klippy_extras/nebulaos_version.py` (`[nebulaos_version]`) |
