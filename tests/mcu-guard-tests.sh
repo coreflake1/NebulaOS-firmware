@@ -345,17 +345,29 @@ for state_name in SUPPORTED_HW_NATIVE_APP SUPPORTED_HW_KNOWN_STOCK_APP SUPPORTED
     fi
 done
 
-# Verify the still-genuinely-unimplemented scope is honestly documented:
-# the artifact deployment/build-pipeline convention (mcu_restore.py's
-# CANDIDATE_PATH) is a NEW proposed path, not yet wired into build.sh - see
-# mcu_restore.py's own module docstring.
-for keyword in "NEW proposed"; do
-    if grep -qi "$keyword" "$RESTORE_MODULE"; then
-        pass "script documents deferred/not-implemented scope ($keyword)"
+# Phase 1.8B integration candidate: the artifact deployment path (mcu_restore.py's
+# CANDIDATE_PATH) is now actually wired into the build - verify the packaged
+# binary and its provenance sidecar exist in the overlay tree that
+# 02-configure-buildroot.sh copies verbatim into the built rootfs.
+REPO_ROOT_FOR_OVERLAY="$REPO_ROOT/scripts/build/overlay/opt/nebulaos/mcu-candidates"
+if [ -f "$REPO_ROOT_FOR_OVERLAY/candidate-001.bin" ]; then
+    pass "candidate-001.bin is packaged in the build overlay"
+else
+    fail "candidate-001.bin is NOT packaged in the build overlay"
+fi
+if [ -f "$REPO_ROOT_FOR_OVERLAY/candidate-001.provenance.json" ]; then
+    pass "candidate-001.provenance.json is packaged alongside the binary"
+else
+    fail "candidate-001.provenance.json is NOT packaged alongside the binary"
+fi
+if [ -f "$REPO_ROOT_FOR_OVERLAY/candidate-001.bin" ]; then
+    packaged_sha=$(sha256sum "$REPO_ROOT_FOR_OVERLAY/candidate-001.bin" | cut -d' ' -f1)
+    if [ "$packaged_sha" = "c2db4f34586c5df88b0d8d40e1d2d1c0f3bea90ab879c7c3a1ccc3a64f91db0c" ]; then
+        pass "packaged candidate-001.bin SHA256 matches the pinned value"
     else
-        fail "script does not document deferred scope ($keyword)"
+        fail "packaged candidate-001.bin SHA256 does NOT match the pinned value (got $packaged_sha)"
     fi
-done
+fi
 
 # =========================================================================
 # 10. Expected hardware ID is configured

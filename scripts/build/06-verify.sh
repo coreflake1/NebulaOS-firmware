@@ -1050,4 +1050,33 @@ fi
 # README.md's real stale reference was actually found and fixed
 # (2026-08-14/15) - not something to re-attempt here.
 
+echo "=== MCU restore candidate artifact (Phase 1.8B, docs/MCU_LIFECYCLE_GUARD.md) ==="
+# mcu_restore.py's default MCU_CANDIDATE_PATH. Build-time validation per
+# MCU_LIFECYCLE_GUARD.md's "runtime validation split": the on-device
+# arm-none-eabi-readelf-dependent ELF/target validation already happened
+# once, in NebulaOS-klipper-mcu's CI (candidate-001.txt's
+# OFFLINE_VALIDATOR_TARGET_RECHECK=PASS) - this check only re-confirms the
+# packaged artifact that actually landed in this rootfs is byte-identical
+# to that already-validated one, via SHA256, so mcu_restore.py never needs
+# the toolchain on-device.
+check /opt/nebulaos/mcu-candidates/candidate-001.bin
+MCU_CANDIDATE_EXPECTED_SHA256="c2db4f34586c5df88b0d8d40e1d2d1c0f3bea90ab879c7c3a1ccc3a64f91db0c"
+MCU_CANDIDATE_EXTRACT="$(mktemp)"
+if debugfs -R "dump /opt/nebulaos/mcu-candidates/candidate-001.bin ${MCU_CANDIDATE_EXTRACT}" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1; then
+	MCU_CANDIDATE_ACTUAL_SHA256=$(sha256sum "${MCU_CANDIDATE_EXTRACT}" | cut -d' ' -f1)
+	if [ "$MCU_CANDIDATE_ACTUAL_SHA256" = "$MCU_CANDIDATE_EXPECTED_SHA256" ]; then
+		echo "OK   candidate-001.bin SHA256 matches pinned value ($MCU_CANDIDATE_EXPECTED_SHA256)"
+	else
+		echo "MISS candidate-001.bin SHA256 mismatch: expected $MCU_CANDIDATE_EXPECTED_SHA256, got $MCU_CANDIDATE_ACTUAL_SHA256"
+	fi
+else
+	echo "MISS could not extract /opt/nebulaos/mcu-candidates/candidate-001.bin from rootfs.ext2 for hash verification"
+fi
+rm -f "${MCU_CANDIDATE_EXTRACT}"
+check /etc/nebulaos/mcu_lifecycle.py
+check /etc/nebulaos/mcu_restore.py
+check /etc/nebulaos/mcu_application_identify.py
+check /etc/nebulaos/mcu_known_identities.py
+check /etc/init.d/S50nebulaos-mcu-guard
+
 echo "== verification complete - review any MISS lines above =="

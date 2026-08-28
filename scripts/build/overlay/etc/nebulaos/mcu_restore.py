@@ -3,22 +3,27 @@ that erases/writes the MCU, and only when mcu_lifecycle.decide() has
 already returned RESTORE_AUTHORIZED (known-stock application identity AND
 a confirmed-supported bootloader hardware ID).
 
-Artifact provenance (this is a NEW proposed convention - no prior on-device
-deployment path for the MCU candidate existed anywhere in this repo before
-this module; do not treat the path below as an existing fact):
+Artifact provenance (wired into the build as of the Phase 1.8B integration
+candidate - scripts/build/overlay/opt/nebulaos/mcu-candidates/candidate-001.bin,
+copied byte-for-byte from the already-validated NebulaOS-klipper-mcu build
+output, SHA256-verified identical at overlay-copy time and re-verified at
+build-verify time in 06-verify.sh):
   - Source of truth for the candidate binary and its hash: NebulaOS-klipper-mcu
     (build-time provenance in phase1.8-candidate-001.txt: MCU_REPO_COMMIT
-    3aefd286..., built via that repo's GitHub Actions pipeline). This module
-    does not build or fetch the artifact itself - it only validates and
-    flashes whatever the OS image's build process already packaged.
-  - Proposed on-device install path: /opt/nebulaos/mcu-candidates/<name>.bin
-    plus a co-located provenance JSON. The build pipeline is responsible for
-    placing the exact GitHub-Actions-built, already-ELF/target-validated
-    artifact there - see creality_validator.py's validate_target(), which
-    requires arm-none-eabi-readelf and is NOT re-run here (that binutils
-    dependency is exactly why stage4_first_flash.py needed --skip-validator
-    on-device; the fix is to never require it on-device at all, by doing
-    that validation once at build time instead of on every boot).
+    3aefd286..., built via that repo's GitHub Actions pipeline; the identical
+    file also ships as candidate-001.provenance.json alongside the binary in
+    this repo's overlay). This module does not build or fetch the artifact
+    itself - it only validates and flashes whatever the OS image's build
+    process already packaged.
+  - On-device install path: /opt/nebulaos/mcu-candidates/<name>.bin plus a
+    co-located provenance JSON - see 02-configure-buildroot.sh's overlay copy
+    step, which places overlay/ verbatim into the built rootfs. The
+    arm-none-eabi-readelf-dependent ELF/target validation
+    (creality_validator.py's validate_target()) already ran once, in
+    NebulaOS-klipper-mcu's own CI - that binutils dependency is exactly why
+    stage4_first_flash.py needed --skip-validator on-device; doing that
+    validation once at build time, not on every boot, is what removes the
+    on-device toolchain dependency entirely.
   - Runtime validation split:
       BUILD TIME (already done, once, in NebulaOS-klipper-mcu's CI):
         - creality_validator.validate_format() / validate_target()

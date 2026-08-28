@@ -189,7 +189,7 @@ MCU_RESTORE_RESULT=RESTORED_AND_VERIFIED|CANDIDATE_ARTIFACT_MISSING|CANDIDATE_HA
 | Candidate-001 application identity | v0.13.0-742-g01a9c2f92 |
 | Candidate-001 SHA256 | c2db4f34586c5df88b0d8d40e1d2d1c0f3bea90ab879c7c3a1ccc3a64f91db0c |
 | Known stock application identity | 38d96adc-dirty-20231016_135251-longer-virtual-machine |
-| Proposed on-device candidate path | /opt/nebulaos/mcu-candidates/candidate-001.bin (NEW - not yet wired into build.sh) |
+| On-device candidate path | /opt/nebulaos/mcu-candidates/candidate-001.bin (wired into the build overlay as of the Phase 1.8B integration candidate; SHA256-verified at 06-verify.sh time) |
 
 ## Test coverage
 
@@ -217,9 +217,11 @@ guard (including the restore path) can be trusted on a real device:
    `mcu_restore.restore()` actually flashes and post-verifies correctly
    from an init.d context (serial timing, no competing serial users) -
    this has only ever been exercised against mocks in this review.
-4. **Artifact deployment**: wire the proposed
-   `/opt/nebulaos/mcu-candidates/candidate-001.bin` path into the actual
-   OS image build pipeline - this does not exist yet.
+4. **Artifact deployment**: `/opt/nebulaos/mcu-candidates/candidate-001.bin`
+   is now wired into the build overlay and SHA256-verified by
+   `06-verify.sh` at build time - but this has only been exercised through
+   the build pipeline, never through an actual flash from a real device
+   boot.
 5. **Failure modes**: disconnect the MCU serial cable and boot; verify
    `MCU_UNREACHABLE` is reported and Klipper is still allowed to attempt
    its own connection.
