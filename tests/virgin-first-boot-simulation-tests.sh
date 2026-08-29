@@ -140,31 +140,45 @@ EOF
 	fi
 
 	# 6. The real proof: parse the ACTUALLY-PROVISIONED printer.cfg (not
-	# the source tree) and drive it through real production
-	# PRTouchV2/ZCompensate code, exactly as klippy_extras/
-	# test_printer_cfg_config_validation.py does against the source file -
-	# proving the seeding pipeline didn't corrupt/truncate/mangle
-	# anything on the way from source to a provisioned device.
-	# Phase 1.5 persistent-namespace mission: [prtouch_v2]/[z_compensate]
-	# moved out of printer.cfg into the immutable, image-owned
-	# /etc/nebulaos/klipper/prtouch.cfg, included by absolute path. They
-	# no longer travel through the virgin-seed pipeline at all (only
-	# printer.cfg does) - which is itself the point of this mission (an
-	# A/B slot switch restores them from the rootfs, not from anything
-	# seeded) - so the meaningful thing left to prove here is that the
-	# PROVISIONED printer.cfg, combined with the tracked immutable
-	# includes, resolves to values real PRTouchV2/ZCompensate code
+	# the source tree) and drive it through real production ZCompensate
+	# code, exactly as klippy_extras/test_printer_cfg_config_validation.py
+	# does against the source file - proving the seeding pipeline didn't
+	# corrupt/truncate/mangle anything on the way from source to a
+	# provisioned device.
+	# Phase 1.5 persistent-namespace mission: [z_compensate] lives outside
+	# printer.cfg's own virgin-seed pipeline (only printer.cfg itself
+	# travels through it - an A/B slot switch restores includes from the
+	# rootfs, not from anything seeded), so the meaningful thing left to
+	# prove here is that the PROVISIONED printer.cfg, combined with the
+	# tracked immutable includes, resolves to values real ZCompensate code
 	# accepts. Concatenated from the tracked overlay source rather than a
 	# real /etc/nebulaos/ (which needs root to stage - see
 	# tests/klipper-config-load-smoke-tests.py for that full, root-requiring
 	# proof); this offline test only needs the real section content, not a
 	# real absolute-include resolution.
+	# Phase 1.8B integration candidate: [prtouch_v2] is gone entirely (native
+	# nozzle-clear replaced PRTouch's runtime - see
+	# extras/PRTOUCH_REMOVAL_PLAN.md in NebulaOS-klipper-extensions). This
+	# test used to also instantiate a real PRTouchV2 object from
+	# prtouch.cfg's own [prtouch_v2] section; that module no longer exists,
+	# so only [z_compensate] is validated now. prtouch.cfg's include, which
+	# used to be commented out (a stale claim that "the native GD32 MCU does
+	# not ship HX711-capable firmware" - already contradicted by this
+	# project's own Phase 1.8A hardware qualification of Z_OFFSET_CALIBRATION
+	# via the native HX711 path), is now ACTIVE - without it, neither
+	# Z_OFFSET_CALIBRATION nor CRTENSE_NOZZLE_CLEAR would exist as a gcode
+	# command at all. [z_compensate] still lives inside prtouch.cfg itself
+	# (kept at that name/path rather than renamed, to avoid rippling the
+	# rename through every other overlay/test/doc reference to it). This
+	# test validates that [z_compensate]'s own section content, in its
+	# now-active location, still parses correctly against real ZCompensate
+	# code now that PRTouch has been removed from it.
 	provisioned_cfg="$NEBULAOS_ROOT/printer_data/config/printer.cfg"
 	if PYTHONPATH="$REPO_ROOT" python3 - "$provisioned_cfg" "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/prtouch.cfg" <<'PYEOF'
 import configparser, sys
 sys.path.insert(0, ".")
 from klippy_extras import prtouch_test_support as fake
-from klippy_extras import prtouch_v2, z_compensate
+from klippy_extras import z_compensate
 
 def real_section(text, section):
     parser = configparser.ConfigParser(interpolation=None, strict=False)
@@ -175,21 +189,20 @@ def real_section(text, section):
     return dict(parser[section])
 
 provisioned_text = open(sys.argv[1]).read()
-if "[include /etc/nebulaos/klipper/prtouch.cfg]" not in provisioned_text:
-    raise SystemExit("provisioned printer.cfg does not include prtouch.cfg - virgin seed produced an unexpected shape")
-text = provisioned_text + "\n" + open(sys.argv[2]).read()
-prtouch_values = real_section(text, "prtouch_v2")
-printer, mcu, pins, _ = fake.build_environment(prtouch_v2_values=prtouch_values)
-prtouch_config = fake.make_prtouch_v2_config(printer, pins, prtouch_values)
-pv2 = prtouch_v2.PRTouchV2(prtouch_config)
-printer.add_object("prtouch_v2", pv2)
+if not any(line.strip() == "[include /etc/nebulaos/klipper/prtouch.cfg]"
+           for line in provisioned_text.splitlines()):
+    raise SystemExit(
+        "provisioned printer.cfg does not actively include prtouch.cfg - "
+        "z_compensate.py (Z_OFFSET_CALIBRATION, CRTENSE_NOZZLE_CLEAR) would "
+        "never load at all")
 
+text = provisioned_text + "\n" + open(sys.argv[2]).read()
 zc_values = real_section(text, "z_compensate")
+printer, mcu, pins, _ = fake.build_environment()
 zc_config = fake.make_z_compensate_config(printer, zc_values)
 zc = z_compensate.ZCompensate(zc_config)
 
 fake.connect(printer, mcu)
-prtouch_config.assert_all_consumed()
 zc_config.assert_all_consumed()
 assert zc.bed_add_temp == 60.0, zc.bed_add_temp
 print("VALID")

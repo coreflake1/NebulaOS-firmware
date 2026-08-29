@@ -1,12 +1,9 @@
 #!/bin/sh
 #
-# Flips the ota marker forward again (FIRMWARE.md sec 21/22), confirming this
-# boot as good enough to keep booting on subsequent reboots too - but only
-# after actually checking the real app stack is up, not just because init
-# reached this point. Runs last (S99), well after klipper/moonraker/
-# guppyscreen/nginx have been started by their own S5x scripts - "started"
-# isn't "healthy" though, so this polls Moonraker's own HTTP API for real
-# confirmation rather than assuming.
+# Boot health check (FIRMWARE.md sec 21/22). Runs last (S99), well after
+# klipper/moonraker/guppyscreen/nginx have been started by their own S5x
+# scripts. Polls Moonraker's HTTP API for real Klipper readiness rather
+# than assuming "started" means "healthy."
 #
 # USB/webcam+MCU-recovery mission (2026-07-26): the original version of
 # this check only confirmed that /server/info returned *some* "result" -
@@ -22,19 +19,23 @@
 # strictly more correct version of the exact same intent this script
 # always had.
 #
-# If the retry loop below times out without Moonraker ever responding, this
-# script deliberately does NOT flip the marker forward - S00revert-safety's
-# "ota:kernel" (stock) stays in place, so the next reboot goes back to stock
-# rather than retrying a boot that never actually got healthy.
+# PHASE 1.8B CHANGE: this script NO LONGER writes the OTA marker on any
+# path (success or failure). The marker stays on "ota:kernel2" (NebulaOS)
+# regardless. The automatic stock fallback was removed because booting the
+# stock Creality slot auto-flashes the MCU with old Creality firmware,
+# destroying the qualified native GD32F303 MCU build. If Klipper fails to
+# reach "ready", the device stays on NebulaOS and requires MANUAL recovery
+# (see docs/DEVELOPER_RECOVERY.md).
+#
+# The health check is retained for its diagnostic value: the log messages
+# tell you whether Klipper came up healthy, which is critical information
+# for debugging a boot that "worked" but left the printer non-functional.
 #
 # wget here is BusyBox's applet (no full wget/curl in this rootfs) - confirmed
 # CONFIG_FEATURE_WGET_LONG_OPTIONS + CONFIG_FEATURE_WGET_TIMEOUT are both
 # enabled in this build, and this is plain local HTTP (no TLS involved), so
 # the HTTPS-support gap that bit an earlier fetch in this project doesn't
 # apply here.
-#
-# Byte format for the marker write: /etc/ota_marker.sh (shared with
-# S00revert-safety) - verified byte-for-byte before being trusted here.
 
 . /etc/ota_marker.sh
 
@@ -52,14 +53,13 @@ case "$1" in
 		i=0
 		while [ "$i" -lt "$RETRIES" ]; do
 			if check_moonraker; then
-				write_ota_marker "ota:kernel2"
-				echo "S99confirm-good: Moonraker confirmed healthy, ota marker flipped forward"
+				echo "S99confirm-good: Moonraker confirmed healthy (klippy_state=ready). OTA marker unchanged (stays on NebulaOS)."
 				exit 0
 			fi
 			i=$((i + 1))
 			sleep "$DELAY"
 		done
-		echo "S99confirm-good: Moonraker never confirmed healthy after $((RETRIES * DELAY))s - leaving ota marker on stock" 1>&2
+		echo "S99confirm-good: WARNING - Moonraker never confirmed healthy after $((RETRIES * DELAY))s. OTA marker unchanged (stays on NebulaOS). Manual recovery required if printer is non-functional. See docs/DEVELOPER_RECOVERY.md" 1>&2
 		exit 1
 		;;
 	*)

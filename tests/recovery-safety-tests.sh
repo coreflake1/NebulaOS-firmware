@@ -63,10 +63,18 @@ skip() { echo "SKIP: $1"; SKIP=$((SKIP + 1)); }
 . "$DEPS_MANIFEST"
 
 # The NebulaOS-accepted klippy/extras modules whose loss to a Recovery would
-# silently regress an accepted, safety-relevant feature. Deliberately the
-# same list the retired version of this file used, so the comparison across
-# architectures is like for like.
-ACCEPTED_FILES="z_compensate.py prtouch_v2.py prtouch_probe.py prtouch_mcu.py prtouch_nozzle.py prtouch_calibration.py"
+# silently regress an accepted, safety-relevant feature.
+#
+# Phase 1.8B integration candidate: PRTouch's own modules (prtouch_v2.py,
+# prtouch_probe.py, prtouch_mcu.py, prtouch_nozzle.py, prtouch_calibration.py)
+# are removed from this list - they were deliberately deleted from the
+# extensions repo entirely (extras/PRTOUCH_REMOVAL_PLAN.md), so their
+# "loss" is the intended outcome of this candidate, not a regression to
+# guard against. nozzle_clear.py and nebulaos_z_offset_probe.py are the
+# native replacements and belong in this safety-relevant list instead -
+# losing either would silently break CRTENSE_NOZZLE_CLEAR/
+# Z_OFFSET_CALIBRATION exactly the way losing a PRTouch module used to.
+ACCEPTED_FILES="z_compensate.py nozzle_clear.py nebulaos_z_offset_probe.py"
 
 OFFICIAL_KLIPPER="https://github.com/Klipper3d/klipper.git"
 

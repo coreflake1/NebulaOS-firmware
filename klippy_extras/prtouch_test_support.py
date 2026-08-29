@@ -1,16 +1,25 @@
-# Shared, offline test-only fakes for the prtouch_v2/z_compensate module set.
+# Shared, offline test-only fakes for the z_compensate/nebulaos_z_offset_probe module set.
 #
-# Built to exercise the REAL production code (PrtouchMCU, PrtouchProbe, PRTouchV2,
-# ZCompensate) against a deterministic fake MCU/config/printer, not to reimplement or
-# mirror that code's own logic. Every fake here models one real Klipper API surface
-# (ConfigWrapper, MCU/CommandWrapper, ppins, toolhead, reactor) closely enough that the
-# production modules can be instantiated and driven exactly as klippy.py would, with zero
-# physical hardware and zero real time elapsed (FakeReactor's clock is a plain float the
-# test controls directly - no time.sleep anywhere in this file).
+# Originally built to exercise the REAL production code of PRTouch (PrtouchMCU, PrtouchProbe,
+# PRTouchV2) alongside ZCompensate, against a deterministic fake MCU/config/printer, not to
+# reimplement or mirror that code's own logic. PRTouch itself has since been removed entirely
+# (Phase 1.8B - see extras/PRTOUCH_REMOVAL_PLAN.md); this file survives as generic offline
+# test infrastructure for the test files that remain (z_compensate.py,
+# nebulaos_z_offset_probe.py, and their own dedicated test modules), decoupled from any real
+# PRTouch runtime code. Every fake here models one real Klipper API surface (ConfigWrapper,
+# MCU/CommandWrapper, ppins, toolhead, reactor) closely enough that the production modules can
+# be instantiated and driven exactly as klippy.py would, with zero physical hardware and zero
+# real time elapsed (FakeReactor's clock is a plain float the test controls directly - no
+# time.sleep anywhere in this file).
 #
-# Deliberately NOT a full Klipper reimplementation: only the surface prtouch_v2/z_compensate
-# actually calls is modeled. Extend as new call sites are exercised, don't pre-build unused
-# surface.
+# Deliberately NOT a full Klipper reimplementation: only the surface these modules actually
+# call is modeled. Extend as new call sites are exercised, don't pre-build unused surface.
+#
+# A handful of prtouch_v2-shaped helpers below (make_prtouch_v2_config, REAL_PRTOUCH_V2_CONFIG,
+# make_step_result/make_pres_result/make_read_pres_result) are no longer called by any
+# surviving test after the Phase 1.8B PRTouch removal - kept in place rather than pulled out,
+# since removing them was out of scope for that removal (it only required decoupling this
+# file's own `prtouch_mcu` import below) and they don't import any deleted module.
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import re
@@ -246,6 +255,21 @@ class FakeQueryCommand:
         return provider
 
 
+class FakeAsyncResponse:
+    """What mainline MCU.register_serial_response() returns: an AsyncResponseWrapper. Only
+    .unregister() is part of the surface production code can use, so only that is modeled."""
+
+    def __init__(self, mcu, name, oid):
+        self.mcu = mcu
+        self.name = name
+        self.oid = oid
+        self.unregistered = False
+
+    def unregister(self):
+        self.mcu.response_handlers.get(self.name, {}).pop(self.oid, None)
+        self.unregistered = True
+
+
 class FakeMCU:
     """The 'chip' object returned by ppins.parse_pin()['chip'] - stands in for both
     step_mcu and pres_mcu. A single instance is normally shared for both (this printer has
@@ -261,6 +285,27 @@ class FakeMCU:
         self.on_send = {}
         self.query_responses = {}
         self.response_handlers = {}  # name -> {oid: handler}
+        self.registered_response_formats = {}  # name -> format actually registered
+        # Default fake MCU dictionary: literal copies of the first (best-evidence) candidate
+        # format for each of the now-deleted prtouch_mcu.py's three async subscriptions
+        # (RESULT_RUN_STEP_PRTOUCH / RESULT_RUN_PRES_PRTOUCH / RESULT_READ_PRES_PRTOUCH,
+        # each sub[1][0]) - inlined here, verified against that module's exact values before
+        # its removal (Phase 1.8B - see extras/PRTOUCH_REMOVAL_PLAN.md), rather than imported,
+        # so this file has no runtime dependency on real PRTouch code any more. Kept as a set
+        # of exact strings so it models mainline msgproto.lookup_command()'s exact-string
+        # match, not a fuzzy one.
+        self.valid_response_formats = {
+            'result_run_step_prtouch oid=%c index=%c tri_time=%u'
+            ' tick0=%u tick1=%u tick2=%u tick3=%u'
+            ' step0=%u step1=%u step2=%u step3=%u',
+            'result_run_pres_prtouch oid=%c index=%c tri_time=%u tri_chs=%c buf_cnt=%u'
+            ' tick_0=%u ch0_0=%i ch1_0=%i ch2_0=%i ch3_0=%i'
+            ' tick_1=%u ch0_1=%i ch1_1=%i ch2_1=%i ch3_1=%i',
+            'result_read_pres_prtouch oid=%c tick=%u ch0=%i ch1=%i ch2=%i ch3=%i',
+        }
+
+    def get_name(self):
+        return self.name
 
     def create_oid(self):
         oid = self._next_oid
@@ -284,8 +329,37 @@ class FakeMCU:
         cmd = FakeQueryCommand(self, fmt, resp_fmt, oid=oid)
         return cmd
 
-    def register_response(self, handler, name, oid):
+    def check_valid_response(self, msgformat):
+        """Mirror of mainline MCU.check_valid_response() (klippy/mcu.py). Returns whether the
+        MCU's dictionary declares this exact format string - a bool, never a raise.
+
+        The default fake dictionary accepts the FIRST candidate format prtouch_mcu.py offers
+        for each of its three async subscriptions, which is the shape derived from the
+        already-validated result_manual_get_steps / resault_manual_get_pres query responses.
+        Tests that want to model an MCU declaring a different (or no) format assign to
+        self.valid_response_formats directly."""
+        return msgformat in self.valid_response_formats
+
+    def register_serial_response(self, handler, msgformat, oid=None):
+        """Mirror of mainline MCU.register_serial_response() (renamed from register_response()
+        by mainline commit c89393cda, 2026-02-26).
+
+        Two real behaviours of the mainline wrapper are reproduced here, because the module
+        under test depends on both:
+          * the second argument is the full message FORMAT, and the subscription is keyed on
+            the message NAME taken off the front of it (msgformat.split()[0]), exactly as
+            AsyncResponseWrapper does - so push_response() still addresses handlers by name;
+          * the format is validated, and an undeclared format raises rather than silently
+            registering a callback that could never fire.
+        An AsyncResponseWrapper-shaped object with .unregister() is returned."""
+        if msgformat not in self.valid_response_formats:
+            raise AssertionError(
+                "FakeMCU: register_serial_response() with a format this MCU does not declare:"
+                " %r" % (msgformat,))
+        name = msgformat.split()[0]
         self.response_handlers.setdefault(name, {})[oid] = handler
+        self.registered_response_formats[name] = msgformat
+        return FakeAsyncResponse(self, name, oid)
 
     # -- scenario-facing API ---------------------------------------------------------
 
@@ -377,13 +451,22 @@ class FakeToolhead:
 
 
 class FakeBedMesh:
-    class _Bmc:
-        def __init__(self, mesh_min, mesh_max):
-            self.mesh_min = mesh_min
-            self.mesh_max = mesh_max
+    """Deliberately has NO `bmc` attribute.
+
+    z_compensate.py used to read `bed_mesh.bmc.mesh_min` / `.bmc.mesh_max` - three hops into
+    BedMesh's internals, none of them part of any interface Klipper offers. The official-
+    mainline migration replaced that with a read of the same `[bed_mesh]` config keys through
+    the public ConfigWrapper API. Omitting `bmc` from this fake is what keeps that decision
+    enforced: any future reintroduction of the private coupling fails here with an
+    AttributeError instead of quietly working until an upstream refactor breaks a printer.
+
+    `mesh_min`/`mesh_max` are still stored so make_z_compensate_config() can build a
+    `[bed_mesh]` config section whose values agree with this object.
+    """
 
     def __init__(self, mesh_min=(5., 10.), mesh_max=(215., 215.)):
-        self.bmc = self._Bmc(mesh_min, mesh_max)
+        self.mesh_min = mesh_min
+        self.mesh_max = mesh_max
         self._mesh = None
         self.set_mesh_calls = []
 
@@ -422,6 +505,25 @@ class FakeHeaterBed:
 class FakeExtruder:
     def __init__(self):
         self.heater = FakeHeater()
+
+
+class FakeZOffsetProbe:
+    """Stands in for nebulaos_z_offset_probe.ZOffsetProbe. Provides the touch_probe()
+    interface z_compensate.py expects, returning a configurable stub value or raising."""
+
+    def __init__(self, stub_measurement=0.0, stub_raises=None):
+        self._stub_measurement = stub_measurement
+        self._stub_raises = stub_raises
+        self.calls = []
+
+    def touch_probe(self, down_min_z, **kwargs):
+        self.calls.append({'down_min_z': down_min_z, 'kwargs': kwargs})
+        if self._stub_raises is not None:
+            raise self._stub_raises
+        return self._stub_measurement
+
+    def get_status(self, eventtime):
+        return {'last_trigger_time': 0., 'is_calibrated': True}
 
 
 class FakeBLTouchProbe:
@@ -581,6 +683,7 @@ def build_environment(prtouch_v2_values=None, mesh_min=(5., 10.), mesh_max=(215.
     printer.add_object('toolhead', FakeToolhead(step_dist=0.005))
     printer.add_object('bed_mesh', FakeBedMesh(mesh_min, mesh_max))
     printer.add_object('probe', FakeBLTouchProbe())
+    printer.add_object('nebulaos_z_offset_probe', FakeZOffsetProbe())
     printer.add_object('heater_bed', FakeHeaterBed())
     printer.add_object('extruder', FakeExtruder())
     printer.add_object('heaters', FakePHeaters())
@@ -598,8 +701,28 @@ def make_prtouch_v2_config(printer, pins, values, section='prtouch_v2'):
                                        'stepper_z': stepper_z_section})
 
 
-def make_z_compensate_config(printer, values, section='z_compensate'):
-    return FakeConfig(values, section=section, printer=printer)
+def make_z_compensate_config(printer, values, section='z_compensate', bed_mesh_values=None):
+    """A [z_compensate] config that can also see a [bed_mesh] SECTION, not just the bed_mesh
+    printer object.
+
+    Real Klipper always has both: the section in printer.cfg and the object it produces.
+    z_compensate.py now reads the configured mesh bounds from the section (public
+    ConfigWrapper API) instead of off BedMesh's internals, so the fake has to supply the
+    section too. By default the section's values are taken from the FakePrinter's own
+    FakeBedMesh, which keeps the two halves of the fake from disagreeing with each other.
+
+    Pass bed_mesh_values={} to model a printer with no [bed_mesh] section at all.
+    """
+    other_sections = {}
+    if bed_mesh_values is None:
+        bed_mesh = printer.lookup_object('bed_mesh', None)
+        if bed_mesh is not None:
+            bed_mesh_values = {'mesh_min': bed_mesh.mesh_min,
+                               'mesh_max': bed_mesh.mesh_max}
+    if bed_mesh_values:
+        other_sections['bed_mesh'] = FakeConfig(bed_mesh_values, section='bed_mesh')
+    return FakeConfig(values, section=section, printer=printer,
+                      other_sections=other_sections)
 
 
 def connect(printer, mcu):
@@ -610,6 +733,17 @@ def connect(printer, mcu):
     lookup_object('toolhead'))."""
     mcu.run_config_callbacks()
     printer.send_event("klippy:connect")
+
+
+def make_read_pres_result(pres_oid, samples):
+    """Build the params dicts for 'result_read_pres_prtouch' under its real, corrected format
+    (reference/prtouch_v2.c:766: `oid=%c tick=%u ch0=%i ch1=%i ch2=%i ch3=%i`) - one reading
+    per broadcast, no index/tri_time/tri_chs/buf_cnt on the wire (unlike result_run_pres_prtouch,
+    a genuinely different message). `samples` is a list of (tick_ticks, ch0, ch1, ch2, ch3)."""
+    return [
+        {'oid': pres_oid, 'tick': tick, 'ch0': ch0, 'ch1': ch1, 'ch2': ch2, 'ch3': ch3}
+        for (tick, ch0, ch1, ch2, ch3) in samples
+    ]
 
 
 def make_pres_result(pres_oid, tri_time_ticks, tri_chs, buf_cnt, samples):

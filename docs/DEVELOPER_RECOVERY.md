@@ -3,19 +3,20 @@
 If a development build goes sideways, don't jump straight to USB recovery — there are a few easier
 ways back, roughly in order of how bad things have to get before you need them.
 
-## 1. It just fixes itself
+## 1. Automatic stock fallback is DISABLED (Phase 1.8B)
 
-Most of the time, you don't need to do anything. This is covered in full in
-`docs/A_B_SLOT_MODEL.md`, but the short version: the moment a NebulaOS boot starts, it sets the
-boot marker back to stock. Only once Klipper and Moonraker are confirmed actually healthy does it
-flip the marker forward again. So if a boot crashes or hangs, the next reboot lands you back on
-stock on its own.
+**This section describes behavior that has been intentionally removed.** The old automatic stock
+fallback (S00revert-safety writing "ota:kernel" on every boot, S99confirm-good flipping it forward
+only on success) was removed in Phase 1.8B because booting the stock Creality slot causes it to
+auto-flash the MCU with old Creality firmware, destroying the qualified native GD32F303 MCU build.
+The risk of silently bricking the MCU outweighs the convenience of automatic rollback.
 
-The one thing to know: this safety net lives *inside* NebulaOS itself. If the kernel never gets far
-enough to start userspace, it never gets the chance to run, and you're in the "the device won't
-come up at all" case instead — that's when you'd reach for USB recovery below. We haven't
-specifically tested that exact failure case (deliberately flashing something broken enough to hit
-it), so treat it as the one real unknown here.
+**Current behavior:** if a NebulaOS boot fails (Klipper doesn't start, Moonraker is unreachable,
+etc.), the device stays on NebulaOS. The boot health check (S99confirm-good) still runs and logs
+whether Klipper reached "ready" state, but it no longer touches the OTA marker on any code path.
+Recovery from a failed boot requires manual intervention — see sections 2 and 3 below.
+
+The `write_ota_marker` function is still available in `/etc/ota_marker.sh` for manual use.
 
 ## 2. Switch slots over SSH
 

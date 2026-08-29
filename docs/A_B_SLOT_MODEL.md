@@ -86,37 +86,50 @@ reliably switches the boot target), not the internals of how it's read.
 
 ## What happens on first boot
 
+**Updated in Phase 1.8B (`phase1.8b/boot-safety`, commit 86a0c01) — the description below is the
+CURRENT behavior. It replaces an earlier design (kept here for history) that automatically flipped
+the marker back to stock on any Klipper/Moonraker failure.**
+
 ```
 reboot
   |
-S00revert-safety   -- unconditionally sets marker to "ota:kernel" (stock),
-  |                   the very first thing custom's own init runs
+S00revert-safety   -- Phase 1.8B: deliberate NO-OP. Logs that automatic stock
+  |                   fallback is disabled and why. Does NOT touch the marker.
 init sequence proceeds (S04 factory-seed/migrate, S5x services...)
   |
 S99confirm-good    -- polls Moonraker's /server/info for klippy_state=="ready"
-  |                   (up to 30 retries, 5s apart = 150s)
+  |                   (up to 30 retries, 5s apart = 150s), purely for diagnostic
+  |                   logging now
   |
-  +-- success --> write_ota_marker "ota:kernel2"  (marker flipped forward)
+  +-- success --> logs healthy, marker UNCHANGED
   |
-  +-- timeout ----> marker stays "ota:kernel" (stock)
-                     next reboot lands on stock automatically
+  +-- timeout ----> logs a WARNING, marker UNCHANGED (stays on NebulaOS)
 ```
 
-The idea is simple: the moment a NebulaOS boot starts, it assumes the worst and sets the marker
-back to stock. Only once Klipper and Moonraker are actually confirmed healthy does it flip the
-marker forward again. So if a NebulaOS boot ever crashes or hangs, the *next* reboot lands you back
-on stock automatically — you don't need to do anything. We've tested this on real hardware, both
-the marker-flip mechanics on a real warm reboot, and the equivalent logic for component-level
-updates (Klipper/Moonraker), which found and fixed two real bugs before it worked cleanly.
+**Why this changed:** booting the stock Creality slot auto-flashes the GD32F303 MCU with old
+Creality firmware, destroying whatever native MCU firmware was qualified and installed. The
+original design's automatic stock-fallback-on-failure was worse than the problem it solved — a
+transient Klipper/Moonraker failure inside NebulaOS could silently trigger an MCU-destroying
+reboot into stock. Phase 1.8B removes every automatic path that can flip the marker: a NebulaOS
+boot that crashes, hangs, has Klipper or Moonraker fail to start, or loses MCU connectivity now
+simply **stays on NebulaOS** and preserves diagnostics — it does not fall back to stock on its own.
+Manual recovery (SSH `write_ota_marker`, Creality's own tools, or USB mask-ROM recovery) is fully
+preserved for the cases where a human genuinely needs to switch back — see
+`docs/DEVELOPER_RECOVERY.md` and `docs/HOW_TO_SWITCH_STOCK_AND_CUSTOM.md`.
 
-**One thing to be aware of:** this safety net lives inside NebulaOS's own boot sequence. If the
-kernel never gets far enough to even start userspace — or the rootfs fails to mount before
-`/sbin/init` runs — `S00revert-safety` never gets the chance to run, and the marker just stays
-wherever it already was. If it was already pointed at `ota:kernel2`, a genuinely broken kernel or
-rootfs doesn't have a proven automatic way back through this mechanism — it'll just keep trying to
-boot the broken slot. We haven't actually tested this specific failure case (intentionally flashing
-something broken to see what happens), so treat it as the one real edge case here. If you do hit
-it, `docs/DEVELOPER_RECOVERY.md` covers the actual recovery options.
+`S00revert-safety` and `S99confirm-good` are kept as named, ordered init.d scripts rather than
+deleted outright: `S00`'s position (literal first script in boot order) is itself meaningful to
+preserve, and `S99`'s health poll remains useful diagnostic signal independent of the marker. Both
+carry extensive comments explaining why they're neutered, specifically so a future change doesn't
+accidentally reintroduce automatic MCU-destroying fallback.
+
+**One thing to be aware of:** this is all NebulaOS-side software behavior. If the kernel never gets
+far enough to even start userspace — or the rootfs fails to mount before `/sbin/init` runs — none
+of this repo's init scripts get a chance to run at all, and the marker just stays wherever it
+already was. There is no bootloader-level (pre-init) automatic fallback mechanism in this project;
+the marker is read by vendor bootloader code outside this repo, and no counter/watchdog-driven
+revert exists here. That gap is a known, currently-accepted limitation (see Phase 6/7 of the
+vNext roadmap), not something Phase 1.8B attempts to close.
 
 ## Related docs
 

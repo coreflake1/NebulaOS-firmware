@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""MCU lifecycle check + restore entry point for S50nebulaos-mcu-guard.
+
+Corrected in Phase 1.8B (offline pre-build review): the original version of
+this file only ever performed a bootloader-level hardware-ID check
+(creality_flash.identify()/check_identity()) and reported PASS whenever the
+bootloader answered with the expected hardware ID - regardless of which
+application firmware was actually running. That hardware ID has been
+observed identical whether candidate-001 or stock Creality firmware is
+installed, so it could never actually prove candidate-001 was running (see
+mcu_lifecycle.py's module docstring for the exact evidence).
+
+This entry point now delegates to mcu_lifecycle.decide() (which correctly
+separates application identity from hardware identity) and, only when that
+decision explicitly authorizes it, to mcu_restore.restore(). It never
+performs any bootloader or flash interaction directly - all of that lives
+in mcu_lifecycle.py/mcu_restore.py so it can be exercised by tests with
+injected mocks instead of real hardware.
+
+SAFETY CONTRACT (unchanged from the original file, still enforced):
+  - No erase/write occurs anywhere except inside mcu_restore.restore(),
+    and only when mcu_lifecycle.decide() returned RESTORE_AUTHORIZED.
+  - Every bootloader interaction always calls app_start() before this
+    process exits (enforced inside mcu_lifecycle._check_hardware_identity
+    and mcu_restore.restore()'s use of creality_flash.flash(), which itself
+    calls app_start() after a successful write).
+  - Never writes to /dev/mmcblk0p1 or any block device - this file and its
+    two collaborators only ever touch the MCU serial port and (in
+    mcu_restore.py only) the MCU's own flash via the existing, separately
+    hardware-identity-gated creality_flash.flash() function.
+"""
+
+import sys
+
+import mcu_lifecycle
+import mcu_restore
+
+
+def emit(fields):
+    for key, value in fields.items():
+        print(f"{key}={value}")
+
+
+def main():
+    decision = mcu_lifecycle.decide()
+    fields = decision.as_dict()
+
+    if decision.action == mcu_lifecycle.RESTORE_AUTHORIZED:
+        restore_result = mcu_restore.restore()
+        fields.update(restore_result.as_dict())
+        emit(fields)
+        if restore_result.state == mcu_restore.RESTORED_AND_VERIFIED:
+            print("MCU_GUARD_RESULT=PASS")
+            sys.exit(0)
+        else:
+            # CANDIDATE_ARTIFACT_MISSING / CANDIDATE_HASH_BAD / FLASH_FAILED:
+            # bounded failure, no stock fallback, preserve diagnostics, do
+            # not let Klipper start against a partially-restored/unknown MCU.
+            print("MCU_GUARD_RESULT=FAIL")
+            sys.exit(1)
+
+    emit(fields)
+
+    if decision.action == mcu_lifecycle.ALLOW_KLIPPER_START:
+        print("MCU_GUARD_RESULT=PASS")
+        sys.exit(0)
+    elif decision.action == mcu_lifecycle.ALLOW_KLIPPER_START_WARN:
+        print("MCU_GUARD_RESULT=WARN")
+        sys.exit(0)
+    else:  # BLOCK_KLIPPER_START
+        print("MCU_GUARD_RESULT=FAIL")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

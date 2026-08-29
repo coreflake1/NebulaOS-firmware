@@ -1,0 +1,11 @@
+{
+  "_comment": "Provenance sidecar for creality_flash.py and creality_validator.py, copied verbatim from NebulaOS-klipper-mcu/tools/. Added in Phase 1.8B live hardware qualification after Gate 1 discovered these files were never deployed to /opt/nebulaos/tools/ (the default CREALITY_FLASH_PATH mcu_lifecycle.py/mcu_restore.py import from) - the guard crashed with ModuleNotFoundError on the very first real boot, before ever classifying the MCU or attempting a restore. All prior offline tests passed because mcu_lifecycle.decide()/mcu_restore.restore() always received an injected mock creality_flash_module in tests/mcu-lifecycle-decision-tests.py, so the real dynamic `import creality_flash` fallback branch was never exercised until live hardware.",
+  "source_repo": "NebulaOS-klipper-mcu",
+  "source_path": "tools/creality_flash.py, tools/creality_validator.py",
+  "source_commit": "c793e774db3f25954563418668d4e57603e3515e",
+  "creality_flash_py_sha256": "57a9bf417a25b834520ba46c0b5681648292002c8377622e6e89bd07f07946ad",
+  "creality_validator_py_sha256": "f2aad3766253ea63f4513c55b62f19ffa070f52a6c30b25f330c42a1953bc79b",
+  "deploy_path": "/opt/nebulaos/tools/",
+  "consumed_by": ["/etc/nebulaos/mcu_lifecycle.py", "/etc/nebulaos/mcu_restore.py"],
+  "runtime_dependency": "pyserial (confirmed present on-device Python3, /usr/lib/python3.11/site-packages/serial); imported lazily only inside creality_flash.SerialTransport.__init__, not at module import time"
+}

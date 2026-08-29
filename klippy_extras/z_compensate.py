@@ -30,19 +30,22 @@
 # where their effect is genuinely unconfirmed (see "accepted but not wired" below) - pasting the
 # real section in without this would make Klipper refuse to even start.
 #
-# Because CRTENSE_NOZZLE_CLEAR must use *this* section's tuning and wipe-geometry keys (not
-# [prtouch_v2]'s), this module calls prtouch_nozzle.clear_nozzle() directly with its own `config`
-# object rather than delegating to PRTouchV2.clear_nozzle() (which is bound to [prtouch_v2]'s
-# config and has none of these keys) - matches DESIGN.md's original intent, not a new decision.
+# Because CRTENSE_NOZZLE_CLEAR must use *this* section's tuning and wipe-geometry keys, this
+# module calls nozzle_clear.clear_nozzle() directly with its own `config` object. Phase 1.8B
+# integration candidate: this used to delegate to prtouch_nozzle.clear_nozzle() (PRTouch's
+# own custom MCU commands); PRTouch has been removed from this module entirely - see
+# extras/PRTOUCH_REMOVAL_PLAN.md.
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import contextlib
 import logging
 import math
 
-from . import prtouch_mcu
-from . import prtouch_nozzle
-from . import prtouch_probe
+from . import nozzle_clear
+
+# Phase 1.8B: native nozzle-clear replacement (NOT YET QUALIFIED FOR HARDWARE USE).
+# When hardware-qualified, this import replaces the prtouch_nozzle dependency for
+# CRTENSE_NOZZLE_CLEAR. See extras/nozzle_clear.py and extras/PRTOUCH_REMOVAL_PLAN.md.
+# from . import nozzle_clear
 
 #: Structured status contract, version 1 - see docs/z_compensate_status_api.md. Consumed by
 #: GuppyScreen's recalibration wizard via printer.objects.subscribe, replacing its previous
@@ -79,15 +82,22 @@ class ZCompensate:
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object('gcode')
         self.config = config
-        # Must be built here, not lazily inside cmd_nozzle_clear() - see prtouch_nozzle.py's
-        # ClearNozzleConfig docstring (confirmed live 2026-08-05: a lazy config.get*() read
+        # Must be built here, not lazily inside cmd_nozzle_clear() - see nozzle_clear.py's
+        # NozzleClearConfig docstring (confirmed live 2026-08-05: a lazy config.get*() read
         # inside a gcode-command handler is too late, Klipper hard-errors at startup instead).
-        self.clear_nozzle_config = prtouch_nozzle.ClearNozzleConfig(config)
-        self.prtouch = None
+        #
+        # Phase 1.8B integration candidate: the native path is now the ONLY nozzle-clear
+        # backend. PRTouch's own clear_nozzle()/ClearNozzleConfig, and [prtouch_v2] itself,
+        # are no longer runtime dependencies of this command - see
+        # extras/PRTOUCH_REMOVAL_PLAN.md for the full removal accounting. NozzleClearConfig
+        # reads the same config keys with the same defaults as PRTouch's own
+        # ClearNozzleConfig did, so no printer.cfg changes are needed.
+        self.native_clear_nozzle_config = nozzle_clear.NozzleClearConfig(config)
         self.probe = None
         self.bed_mesh = None
         self.home_x = None
         self.home_y = None
+        self.mesh_min, self.mesh_max = self._read_configured_mesh_bounds(config)
 
         self.hot_start_temp = config.getfloat('hot_start_temp', default=140, minval=80, maxval=200)
         self.hot_rub_temp = config.getfloat('hot_rub_temp', default=180, minval=80, maxval=300)
@@ -119,10 +129,16 @@ class ZCompensate:
         # clear_nozzle() for its own two wipe-pad touches.
         self.hover_height = config.getfloat('vs_start_z_pos', default=5, minval=1, maxval=50)
 
-        # tri_min_hold/tri_max_hold/speed (real keys): this section's own probe-sensitivity
-        # tuning, applied as a temporary override of prtouch_v2's PrtouchProbe attributes for the
-        # duration of calls this module makes (see _probe_overrides below) - distinct from
-        # [prtouch_v2]'s own defaults, not a duplicate of them.
+        # tri_min_hold/tri_max_hold/speed (real keys): PRTouch-probe-sensitivity tuning that
+        # this module used to apply as a temporary override of prtouch_v2's PrtouchProbe
+        # attributes (the old _probe_overrides() context manager, removed in the Phase 1.8B
+        # PRTouch-removal integration - see extras/PRTOUCH_REMOVAL_PLAN.md). The native
+        # nebulaos_z_offset_probe backend has no equivalent per-caller sensitivity-override
+        # mechanism, and building one is explicitly out of scope for this integration (no
+        # trigger_force/contact_speed tuning). These three values are still read here, unused,
+        # purely because the real device's live [z_compensate] section sets all three
+        # (tri_min_hold: 1400, tri_max_hold: 2000, speed: 5) and Klipper's configfile hard-
+        # errors at startup on any section option that's never read via config.get*().
         self.tri_min_hold = config.getint('tri_min_hold', default=None)
         self.tri_max_hold = config.getint('tri_max_hold', default=None)
         self.probe_speed = config.getfloat('speed', default=None, minval=0.1)
@@ -187,10 +203,57 @@ class ZCompensate:
         # v1) - not registering unless something turns out to need it.
 
     def _handle_connect(self):
-        self.prtouch = self.printer.lookup_object('prtouch_v2')
+        self.z_offset_probe = self.printer.lookup_object('nebulaos_z_offset_probe')
         self.probe = self.printer.lookup_object('probe')
-        self.bed_mesh = self.printer.lookup_object('bed_mesh')
+        self.bed_mesh = self.printer.lookup_object('bed_mesh', None)
         self.home_x, self.home_y = self._resolve_z_home_xy()
+
+    @staticmethod
+    def _read_configured_mesh_bounds(config):
+        """The CONFIGURED [bed_mesh] area bounds, read from the config rather than off
+        BedMeshCalibrate's internals.
+
+        Official-mainline migration (2026-08-17). This used to be
+        `self.bed_mesh.bmc.mesh_min` / `.bmc.mesh_max` - reaching through BedMesh's public
+        object into `bmc`, a BedMeshCalibrate instance, and then into two of its instance
+        attributes. Nothing about that is part of any interface Klipper offers; all three hops
+        are internal, and upstream is free to rename or restructure any of them in a routine
+        refactor. It still resolves at the qualified pin, but "it happens to work today" is
+        not a compatibility contract.
+
+        The obvious-looking public replacement is WRONG and was rejected after reading
+        mainline's source. `bed_mesh.get_status()` does expose `mesh_min`/`mesh_max`, but
+        `BedMesh.update_status()` populates them from `self.z_mesh` - the mesh currently
+        LOADED - and leaves them at (0., 0.) when no mesh has been probed or loaded. The
+        configured bounds and the loaded-mesh bounds are different quantities. This call site
+        needs the configured ones, and runs at klippy:connect, before any mesh exists; taking
+        get_status() would have silently produced a (0., 0.) fallback target - a worse bug
+        than the coupling it replaced, and one no offline test of a probed printer would show.
+
+        So this reads the same config keys `BedMeshCalibrate._init_mesh_config()` itself reads,
+        through `config.getsection()` - the ordinary, documented ConfigWrapper API that this
+        module set already uses for `[printer]` and `[stepper_z]`. The
+        derivation mirrors upstream's own: a round bed (`mesh_radius`) yields
+        (-radius, -radius)..(radius, radius) with the same .1mm floor upstream applies; a
+        rectangular bed yields `mesh_min`..`mesh_max` verbatim. Both produce values identical
+        to what `bmc.mesh_min`/`bmc.mesh_max` held.
+
+        Returns (None, None) when `[bed_mesh]` is absent - this whole path is only a fallback
+        for printers without a `_HOMING_PARAMS` macro, and `_resolve_z_home_xy()` reports the
+        missing-section case itself rather than failing here at config time.
+        """
+        if not config.has_section('bed_mesh'):
+            return None, None
+        mesh_cfg = config.getsection('bed_mesh')
+        radius = mesh_cfg.getfloat('mesh_radius', None, above=0.)
+        if radius is not None:
+            # Mirrors bed_mesh.py's own "radius may have precision to .1mm" floor, and its
+            # own choice not to offset these bounds by mesh_origin.
+            radius = math.floor(radius * 10) / 10
+            return (-radius, -radius), (radius, radius)
+        min_x, min_y = mesh_cfg.getfloatlist('mesh_min', count=2)
+        max_x, max_y = mesh_cfg.getfloatlist('mesh_max', count=2)
+        return (min_x, min_y), (max_x, max_y)
 
     def _resolve_z_home_xy(self):
         """home_x/home_y must be the real toolhead XY the printer's own homing sequence sits
@@ -228,8 +291,16 @@ class ZCompensate:
                 "home_y - falling back to the [bed_mesh]-center approximation for the "
                 "Z-offset calibration target, which is NOT proven to match where this "
                 "printer's own homing sequence actually probes Z")
-        min_x, min_y = self.bed_mesh.bmc.mesh_min
-        max_x, max_y = self.bed_mesh.bmc.mesh_max
+        if self.mesh_min is None:
+            raise self.printer.config_error(
+                "z_compensate: cannot determine the Z-offset calibration XY target. Neither "
+                "[gcode_macro _HOMING_PARAMS] (with home_x/home_y) nor a [bed_mesh] section "
+                "is present, so there is no source for either the real Z-homing position or "
+                "the fallback bed-centre approximation. Add home_x/home_y to a "
+                "[gcode_macro _HOMING_PARAMS] section - the accurate option - or configure "
+                "[bed_mesh].")
+        min_x, min_y = self.mesh_min
+        max_x, max_y = self.mesh_max
         return min_x + (max_x - min_x) / 2., min_y + (max_y - min_y) / 2.
 
     def get_status(self, eventtime):
@@ -245,37 +316,19 @@ class ZCompensate:
             "calibration_error": self.calibration_error,
         }
 
-    @contextlib.contextmanager
-    def _probe_overrides(self):
-        """Temporarily apply this section's own tri_min_hold/tri_max_hold/speed onto
-        prtouch_v2's shared PrtouchProbe instance for the duration of one call, restoring
-        afterward - so this command's real, separately-tuned sensitivity doesn't leak into
-        [prtouch_v2]'s own NOZZLE_CLEAR/other future callers."""
-        probe = self.prtouch.probe
-        overrides = {
-            'tri_min_hold': self.tri_min_hold,
-            'tri_max_hold': self.tri_max_hold,
-            'tri_z_down_spd': self.probe_speed,
-        }
-        saved = {}
-        try:
-            for attr, val in overrides.items():
-                if val is None:
-                    continue
-                saved[attr] = getattr(probe, attr)
-                setattr(probe, attr, val)
-            yield probe
-        finally:
-            for attr, val in saved.items():
-                setattr(probe, attr, val)
-
     cmd_nozzle_clear_help = "Wipe the nozzle before Z-offset calibration"
 
     def cmd_nozzle_clear(self, gcmd):
         """Reads HOT_START_TEMP/HOT_RUB_TEMP/HOT_END_TEMP/BED_ADDTEMP params - matches the real
         call site in custom_macro.py's CX_PRINT_LEVELING_CALIBRATION exactly. Calls
-        prtouch_nozzle.clear_nozzle() directly with this section's own config (see module
-        docstring) - NOT PRTouchV2.clear_nozzle(), which is bound to [prtouch_v2]'s config."""
+        nozzle_clear.clear_nozzle() with this section's own config (see module docstring).
+
+        Phase 1.8B integration candidate: this is now the ONLY implementation of
+        CRTENSE_NOZZLE_CLEAR. It uses nebulaos_z_offset_probe.touch_probe() (upstream Klipper's
+        HX711/LoadCell/trigger_analog/LCBestFit) for Z positioning on the wipe pad, replacing
+        PRTouch's custom MCU commands entirely - [prtouch_v2] is no longer a dependency of this
+        command, or of this module at all. See extras/nozzle_clear.py and
+        extras/PRTOUCH_REMOVAL_PLAN.md for the full parity review and removal accounting."""
         hot_start_temp = gcmd.get_float('HOT_START_TEMP', self.hot_start_temp)
         hot_rub_temp = gcmd.get_float('HOT_RUB_TEMP', self.hot_rub_temp)
         hot_end_temp = gcmd.get_float('HOT_END_TEMP', self.hot_end_temp)
@@ -283,17 +336,11 @@ class ZCompensate:
         heater_bed = self.printer.lookup_object('heater_bed')
         bed_target = heater_bed.get_status(self.printer.get_reactor().monotonic())['target']
         toolhead = self.printer.lookup_object('toolhead')
-        with self._probe_overrides() as probe:
-            # See the except block in cmd_z_offset_calibration for why this can't just let
-            # PrtouchProbeSafetyError/PrtouchProtocolError propagate unconverted.
-            try:
-                prtouch_nozzle.clear_nozzle(
-                    probe, toolhead, self.gcode, self.prtouch.heaters, self.clear_nozzle_config,
-                    hot_start_temp, hot_rub_temp, bed_target + bed_add_temp,
-                    hot_end_temp=hot_end_temp)
-            except (prtouch_probe.PrtouchProbeSafetyError,
-                    prtouch_mcu.PrtouchProtocolError) as e:
-                raise self.printer.command_error(str(e))
+        nozzle_clear.clear_nozzle(
+            self.z_offset_probe, toolhead, self.gcode, self.printer,
+            self.native_clear_nozzle_config,
+            hot_start_temp, hot_rub_temp, bed_target + bed_add_temp,
+            hot_end_temp=hot_end_temp)
 
     cmd_z_offset_calibration_help = "Auto-tune Z offset via the load-cell nozzle touch"
 
@@ -301,8 +348,8 @@ class ZCompensate:
         """Touch-probe at the point BLTouch already homed (self.home_x/self.home_y - see
         _resolve_z_home_xy()'s own docstring for where that really comes from, as of
         2026-08-14 no longer a [bed_mesh]-center approximation - adjusted by bl_offset, the
-        nozzle-to-probe-tip distance) via prtouch_v2.touch_probe(), then apply the result as
-        a live Z gcode-offset for this print (see module docstring for why not a permanent
+        nozzle-to-probe-tip distance) via nebulaos_z_offset_probe.touch_probe(), then apply the
+        result as a live Z gcode-offset for this print (see module docstring for why not a permanent
         z_offset rewrite by default).
 
         The math: touch_probe() returns the toolhead Z position (in the current coordinate
@@ -320,12 +367,14 @@ class ZCompensate:
         # a live incident showed two Z_OFFSET_CALIBRATION invocations landing close together
         # while raw MCU step commands were in flight; that overlap was NOT proven to be the
         # incident's cause, but there is no legitimate reason to let a second calibration
-        # start or queue behind one already driving the raw prtouch step channel, so this
-        # closes that door regardless of root cause. This is a second, higher-level guard on
-        # top of prtouch_probe.py's own PrtouchProbe._own_raw_operation - that one protects
-        # every individual raw MCU dispatch across ALL callers (SAFE_MOVE_Z, NOZZLE_CLEAR,
-        # this command); this one protects the whole multi-step calibration sequence (the
-        # positioning move + touch_probe + SET_GCODE_OFFSET) as one logical unit. Checked and
+        # start or queue behind one already in flight, so this closes that door regardless of
+        # root cause. (Historical note: this used to be described as a second, higher-level
+        # guard layered on top of PRTouch's own PrtouchProbe._own_raw_operation, which
+        # protected every individual raw MCU dispatch across PRTouch's callers - PRTouch has
+        # since been removed from this module entirely, per the Phase 1.8B integration
+        # candidate, so this guard now stands on its own.) This protects the whole multi-step
+        # calibration sequence (the positioning move + touch_probe + SET_GCODE_OFFSET) as one
+        # logical unit. Checked and
         # set with no yield in between - Klipper's reactor is single-threaded/cooperative, so
         # this is race-free without needing a lock: whichever invocation's gcode handler is
         # entered first always sets "running" before it ever yields, so any second invocation
@@ -352,8 +401,8 @@ class ZCompensate:
                 'G1 F%d X%.3f Y%.3f Z%.3f' % (200 * 60, target[0], target[1], target[2]))
             toolhead.wait_moves()
 
-            with self._probe_overrides():
-                measured_z = self.prtouch.touch_probe(self.down_min_z, pro_cnt=self.pr_probe_cnt)
+            measured_z = self.z_offset_probe.touch_probe(
+                self.down_min_z, pro_cnt=self.pr_probe_cnt)
             measured_z += self.tri_expand_mm
 
             # A NaN/inf measurement can only mean a bug in the calibration math upstream
@@ -379,18 +428,6 @@ class ZCompensate:
             self.calibration_state = "error"
             self.calibration_z_offset = None
             self.calibration_error = _sanitize_calibration_error(e)
-            # 2026-08-12 (live incident, see prtouch_v2.py's _guarded() for the full story):
-            # PrtouchProbeSafetyError/PrtouchProtocolError are plain Exception subclasses, not
-            # self.printer.command_error - letting either escape this handler unconverted (the
-            # bare `raise` this replaces) reaches Klipper's gcode dispatcher as an unrecognized
-            # exception, which triggers a full emergency_stop of every MCU instead of a clean
-            # rejection of just this command. Confirmed live: touch_probe()'s own fail-closed
-            # sensor-trust guard doing exactly its job took the whole printer down. Anything
-            # else (a genuine unexpected bug) still re-raises as-is, so Klipper's own internal-
-            # error/shutdown fail-safe still applies to failure modes this doesn't recognize.
-            if isinstance(e, (prtouch_probe.PrtouchProbeSafetyError,
-                               prtouch_mcu.PrtouchProtocolError)):
-                raise self.printer.command_error(str(e))
             raise
 
         # The calibration itself has now genuinely succeeded - a real measurement was taken

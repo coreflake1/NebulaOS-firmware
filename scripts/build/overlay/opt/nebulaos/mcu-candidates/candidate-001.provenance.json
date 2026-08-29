@@ -1,0 +1,27 @@
+{
+  "_comment": "Provenance sidecar for candidate-001.bin, copied verbatim from the source build's own provenance record. Source of truth: NebulaOS-klipper-mcu. See _evidence/phase1.8-candidate/phase1.8-candidate-001.txt and .../nebulaos-klipper-mcu-ke-3aefd28602fe193cd5018a9acfbbf9fc3ac92bea/provenance.json in the NebulaOS workspace for the full record this was copied from.",
+  "artifacts": {
+    "elf_sha256": "e1c50d5f580dbdd598a3556886d1644a4d816d6ae4b7a15c79fae188e86202da",
+    "packaged_bin_sha256": "c2db4f34586c5df88b0d8d40e1d2d1c0f3bea90ab879c7c3a1ccc3a64f91db0c",
+    "packaged_bin_size": 40048,
+    "raw_bin_sha256": "add546c7dd626c70a86ec33283cccdf4ad7956916d736af6b96f989b1b4188bd",
+    "raw_bin_size": 40048
+  },
+  "build_config_sha256": "88441a2bad54cf239df47a87e33922d583789dd267c382eaf41bb05cc5da999a",
+  "mcu_repo": "https://github.com/coreflake1/NebulaOS-klipper-mcu",
+  "mcu_repo_commit": "3aefd28602fe193cd5018a9acfbbf9fc3ac92bea",
+  "github_action_run": "32591541420",
+  "mission": "NebulaOS Phase 1.7 - native GD32F303 MCU candidate",
+  "patch_commit": "01a9c2f925de8b8636caa0e61192ec6ff62ff9c9",
+  "patch_commit_subject": "src/stm32: add native GD32F303RET6 (Cortex-M4) target for Creality KE",
+  "patch_series_sha256": "e6531ea6a451a7aedb283bf9ce8502d6e28f5ebfd26c6e9066cc9f7332f4d757",
+  "toolchain": {
+    "binutils_ld": "GNU ld (Arm GNU Toolchain 15.2.Rel1 (Build arm-15.86)) 2.45.1.20251203",
+    "gcc": "arm-none-eabi-gcc (Arm GNU Toolchain 15.2.Rel1 (Build arm-15.86)) 15.2.1 20251203",
+    "python": "3.12.14"
+  },
+  "upstream_repo": "https://github.com/Klipper3d/klipper.git",
+  "upstream_sha": "58bd67db3ce1be1951c3e4a6d1156a79903d4edc",
+  "application_identity": "v0.13.0-742-g01a9c2f92",
+  "hardware_flash_performed_during_this_provenance_capture": false
+}
