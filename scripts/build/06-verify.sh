@@ -405,11 +405,11 @@ if [ -f "$DTB" ] && [ -x "$DTC" ]; then
 	EEPROM_BODY=$(awk '/eeprom@50 \{/,/^\t+\};/' "$DECOMPILED")
 	if echo "$EEPROM_BODY" | grep -q 'pagesize = <0x10>' \
 		&& echo "$EEPROM_BODY" | grep -q 'size = <0x800>' \
-		&& echo "$EEPROM_BODY" | grep -q 'address-width = <0x8>' \
-		&& echo "$EEPROM_BODY" | grep -q 'num-addresses = <0x8>'; then
+		&& echo "$EEPROM_BODY" | grep -qE 'address-width = <0x0?8>' \
+		&& echo "$EEPROM_BODY" | grep -qE 'num-addresses = <0x0?8>'; then
 		echo "OK   eeprom@50 geometry matches BL24C16F exactly (pagesize=16, size=2048, address-width=8, num-addresses=8)"
 	else
-		echo "MISS eeprom@50 geometry does not match the expected BL24C16F values - dtc prints decimal DT integers in hex, compared here as such"
+		echo "MISS eeprom@50 geometry does not match the expected BL24C16F values (dtc's own decompiled output, hex - actual body: $EEPROM_BODY)"
 	fi
 
 	rm -f "$DECOMPILED"
@@ -1223,10 +1223,14 @@ with open(eeprom_path, "r+b") as f:
 rc = tool.main(["--eeprom-path", eeprom_path])
 with open(eeprom_path, "r+b") as f:
 	recovery = journal.read_recovery_state(f)
-print("OK" if rc == 0 and recovery is None else "FAIL: rc=%r recovery=%r" % (rc, recovery))
+print("RESULT=OK" if rc == 0 and recovery is None else "RESULT=FAIL rc=%r recovery=%r" % (rc, recovery))
 PYEOF
 )
-	if [ "$PLR_SMOKE_RESULT" = "OK" ]; then
+	# tool.main() prints its own progress lines (e.g. "committed
+	# TOMBSTONE...") to stdout before this script's own RESULT= line, so
+	# match on that specific marker rather than the whole captured
+	# output.
+	if echo "$PLR_SMOKE_RESULT" | grep -q "^RESULT=OK$"; then
 		echo "OK   plr_tombstone.py real execution smoke test (extracted from built image, temp-file EEPROM)"
 	else
 		echo "MISS plr_tombstone.py smoke test failed: $PLR_SMOKE_RESULT"
