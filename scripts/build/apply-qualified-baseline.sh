@@ -48,6 +48,17 @@
 # message for the live-verification evidence
 # (/sys/module/brcmfmac/parameters/roamoff reads 1 on the deployed device).
 #
+# The 9th call (accelerometer-eeprom-bus-enable-variant.sh FIX1, added
+# during the Phase 1.9A Host MCU + ADXL345 + BL24C16F Hardware Restoration
+# mission and its follow-on Phase 1.9A SPI Polarity Fix Investigation)
+# enables the spi-gpio-backed ADXL345 bus and the i2c2-backed BL24C16F bus
+# in halley5_v30.dts, plus CONFIG_SPI_GPIO/CONFIG_I2C_CHARDEV in
+# halley5-nebulaos-fragment.config - see
+# accelerometer-eeprom-bus-enable-variant.sh's own header for the full
+# root-cause and polarity-fix history, live-verified on real hardware
+# (ACCELEROMETER_QUERY CHIP=adxl345 returns real motion data, no DEVID
+# mismatch; EEPROM_DEBUG_READ CHIP=bl24c16f unchanged).
+#
 # Explicitly NOT applied here (audited and excluded, not merely forgotten):
 #   - touch-qualification-variant.sh (QUAL0/QUAL1) - QUAL0 (off) is the
 #     accepted state (CONFIG_TOUCHSCREEN_NS2009_QUALIFICATION is absent from
@@ -73,7 +84,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 echo "== apply-qualified-baseline: applying every accepted baseline variant =="
 
-# No inter-script ordering dependency exists among these eight calls (each
+# No inter-script ordering dependency exists among these nine calls (each
 # owns disjoint kernel source files, or edits the shared DTS/fragment via
 # its own uniquely-marked, append-only region rather than a blanket
 # rewrite - verified per-script during the audit, see the doc referenced
@@ -87,5 +98,6 @@ sh "$SCRIPT_DIR/backlight-final-controller-variant.sh" FINAL1
 sh "$SCRIPT_DIR/pwm-state-readback-variant.sh" GETSTATE1
 sh "$SCRIPT_DIR/touch-final-qualification-variant.sh" FINALQUAL1
 sh "$SCRIPT_DIR/wifi-roamoff-disable-variant.sh" ROAMOFF1
+sh "$SCRIPT_DIR/accelerometer-eeprom-bus-enable-variant.sh" FIX1
 
-echo "== apply-qualified-baseline: all 8 accepted variants applied =="
+echo "== apply-qualified-baseline: all 9 accepted variants applied =="
