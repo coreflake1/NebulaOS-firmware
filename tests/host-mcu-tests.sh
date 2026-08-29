@@ -205,10 +205,23 @@ fi
 echo "--- S54nebulaos-host-mcu service behavior ---"
 
 if [ -f "$HOST_MCU_SERVICE" ]; then
-    if grep -qF -- '--exec "$KLIPPER_HOST_MCU" -- -r' "$HOST_MCU_SERVICE"; then
-        pass "S54nebulaos-host-mcu starts /usr/bin/klipper_mcu with -r"
+    if grep -qF -- '--exec "$KLIPPER_HOST_MCU" -- -r -I "$SOCKET"' "$HOST_MCU_SERVICE"; then
+        pass "S54nebulaos-host-mcu starts /usr/bin/klipper_mcu with -r -I \$SOCKET (explicit socket path)"
     else
-        fail "S54nebulaos-host-mcu does not start klipper_mcu with the expected arguments"
+        fail "S54nebulaos-host-mcu does not start klipper_mcu with an explicit -I socket path"
+    fi
+
+    # Architecture-review requirement: the service's socket path and
+    # [mcu rpi]'s serial: value must be the exact same string, not just
+    # "happen to agree" - klipper_mcu's own compiled-in default already
+    # matches /tmp/klipper_host_mcu, so a missing -I would not have failed
+    # any functional test, only silently relied on that coincidence.
+    SOCKET_IN_SERVICE=$(grep -oE '^SOCKET=.*' "$HOST_MCU_SERVICE" | cut -d= -f2)
+    if [ -n "$SOCKET_IN_SERVICE" ] && [ -f "$MACHINE_CFG" ] \
+        && grep -A1 "^\[mcu rpi\]$" "$MACHINE_CFG" | grep -qF "serial: $SOCKET_IN_SERVICE"; then
+        pass "S54nebulaos-host-mcu's \$SOCKET ($SOCKET_IN_SERVICE) exactly matches [mcu rpi]'s serial: in machine.cfg"
+    else
+        fail "S54nebulaos-host-mcu's \$SOCKET does not match [mcu rpi]'s serial: in machine.cfg"
     fi
 
     if grep -q "FORCE_SHUTDOWN" "$HOST_MCU_SERVICE"; then

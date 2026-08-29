@@ -500,10 +500,16 @@ if echo "$MACHINE_CFG_CONTENT" | grep -qE "^\[bl24c16f\]$"; then
 else
 	echo "MISS machine.cfg does not declare [bl24c16f]"
 fi
-if echo "$S54_CONTENT" | grep -qF -- '--exec "$KLIPPER_HOST_MCU" -- -r'; then
-	echo "OK   S54nebulaos-host-mcu starts /usr/bin/klipper_mcu with -r"
+if echo "$S54_CONTENT" | grep -qF -- '--exec "$KLIPPER_HOST_MCU" -- -r -I "$SOCKET"'; then
+	echo "OK   S54nebulaos-host-mcu starts /usr/bin/klipper_mcu with -r -I \$SOCKET (explicit socket path)"
 else
-	echo "MISS S54nebulaos-host-mcu does not start klipper_mcu as expected"
+	echo "MISS S54nebulaos-host-mcu does not start klipper_mcu with an explicit -I socket path"
+fi
+S54_SOCKET=$(echo "$S54_CONTENT" | grep -oE "^SOCKET=.*" | cut -d= -f2)
+if [ -n "$S54_SOCKET" ] && echo "$MACHINE_CFG_CONTENT" | grep -A1 "^\[mcu rpi\]$" | grep -qF "serial: $S54_SOCKET"; then
+	echo "OK   S54nebulaos-host-mcu's \$SOCKET ($S54_SOCKET) exactly matches [mcu rpi]'s serial: in machine.cfg"
+else
+	echo "MISS S54nebulaos-host-mcu's \$SOCKET does not match [mcu rpi]'s serial: in machine.cfg"
 fi
 
 echo "=== process launch arguments and config-path consistency (mainline print-controls mission addendum, 2026-07-29) ==="

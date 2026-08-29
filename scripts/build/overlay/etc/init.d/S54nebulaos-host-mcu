@@ -32,8 +32,15 @@ mcu_host_start() {
 		mcu_host_stop
 	fi
 	echo "Starting klipper_mcu (host MCU)"
+	# -I explicitly pins the socket path to $SOCKET, which must match
+	# [mcu rpi]'s serial: value in machine.cfg exactly. klipper_mcu's own
+	# compiled-in default (src/linux/main.c) already happens to be this
+	# same path, so this was never a functional bug - but stating it
+	# explicitly means a future change to either side (this script's
+	# $SOCKET, or machine.cfg's serial:) fails loudly instead of silently
+	# drifting apart from an upstream default nobody is actually pinning.
 	start-stop-daemon -S -q -b -m -p "$PID_FILE" \
-		--exec "$KLIPPER_HOST_MCU" -- -r
+		--exec "$KLIPPER_HOST_MCU" -- -r -I "$SOCKET"
 }
 
 mcu_host_stop() {
