@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# S54nebulaos-host-mcu - starts klipper_mcu, Klipper's own MACH_LINUX build
+# target compiled as a native MIPS Linux program.
+#
+# Phase 1.9A host-MCU restoration: this is the process that serves [mcu rpi]
+# over /tmp/klipper_host_mcu for the physical ADXL345 accelerometer and
+# BL24C16F EEPROM, both wired directly to the SoC. It has no interaction
+# with the separate GD32F303 stepper-driver MCU that S50nebulaos-mcu-guard
+# manages - different chip, different bus, different socket.
+#
+# Numbered S54, between S50nebulaos-mcu-guard and S55klipper: NebulaOS
+# prefers this MCU to already be available before Klippy starts, rather
+# than relying on Klippy's own connect_pipe() retry window (90s, 5s
+# intervals - klippy/serialhdl.py) the way stock's own S55-before-S57
+# ordering does. There is no correctness requirement forcing this order
+# (Klippy tolerates the socket not existing yet at startup either way -
+# see _project/missions/phase1.9-host-mcu-accelerometer-plr-analysis.md
+# section 2), but a deterministic "the MCU is already there" boot is
+# simpler to reason about than one relying on a retry loop succeeding in
+# time, so this script comes first.
+KLIPPER_HOST_MCU=/usr/bin/klipper_mcu
+SOCKET=/tmp/klipper_host_mcu
+PID_FILE=/var/run/klipper_mcu.pid
+
+mcu_host_start() {
+	[ -x "$KLIPPER_HOST_MCU" ] || {
+		echo "S54nebulaos-host-mcu: $KLIPPER_HOST_MCU not present, skipping"
+		return 0
+	}
+	if [ -c "$SOCKET" ]; then
+		mcu_host_stop
+	fi
+	echo "Starting klipper_mcu (host MCU)"
+	start-stop-daemon -S -q -b -m -p "$PID_FILE" \
+		--exec "$KLIPPER_HOST_MCU" -- -r
+}
+
+mcu_host_stop() {
+	# Same shutdown handshake as stock's own S57klipper_mcu: ask the
+	# running klipper_mcu to park its GPIOs via FORCE_SHUTDOWN before
+	# killing the process, rather than just signaling it directly.
+	if [ -c "$SOCKET" ]; then
+		set -e
+		( echo "FORCE_SHUTDOWN" > "$SOCKET" ) 2>/dev/null \
+			|| echo "S54nebulaos-host-mcu: host MCU busy, stopping anyway"
+		sleep 1
+		set +e
+	fi
+	start-stop-daemon -K -q -p "$PID_FILE"
+}
+
+case "$1" in
+	start)
+		mcu_host_start
+		;;
+	stop)
+		mcu_host_stop
+		;;
+	restart|reload)
+		mcu_host_stop
+		mcu_host_start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac
+
+exit 0

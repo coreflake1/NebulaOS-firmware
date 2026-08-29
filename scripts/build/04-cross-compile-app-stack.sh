@@ -152,6 +152,64 @@ cp "$VENDOR/klipper/klippy/chelper/c_helper.so" "$WORK/debug-symbols/c_helper.so
 	mipsel-buildroot-linux-gnu-strip --strip-unneeded c_helper.so
 )
 
+### 1a. klipper_mcu: upstream Klipper's own MACH_LINUX build target, compiled
+###    as a native MIPS Linux program (not cross-compiled embedded firmware
+###    in the flashing sense - it links and runs like any other userspace
+###    binary on the target, just built with the target's own cross
+###    toolchain instead of the host's). This is the Phase 1.9A host-MCU
+###    restoration: it serves [mcu rpi] over a Unix socket for the physical
+###    ADXL345 accelerometer and BL24C16F EEPROM, both wired directly to the
+###    SoC rather than to the GD32F303 stepper-driver MCU that
+###    S50nebulaos-mcu-guard/creality_flash.py manage - zero interaction
+###    with that subsystem.
+###
+### test/configs/linuxprocess.config is upstream's own reference Kconfig for
+### this target; CROSS_PREFIX is the only variable this Makefile needs to
+### produce a MIPS binary instead of a host-native one (CC/AS/LD/OBJCOPY all
+### derive from it - see vendor/klipper/Makefile). Phase 1.9A's own build-
+### blocker investigation (see docs/ and
+### _project/missions/phase1.9-host-mcu-accelerometer-plr-analysis.md)
+### directly demonstrated that Make's mtime-based staleness tracking cannot
+### detect a CROSS_PREFIX/toolchain change across two builds sharing the
+### same out/ directory - it silently keeps stale, wrong-architecture
+### objects instead of recompiling them. The rm -rf below is not
+### defensive-for-its-own-sake; it is the one proven fix for that exact
+### failure mode, and cheap enough to always pay for since this out/ is
+### local to a single build-work invocation.
+echo "== cross-compiling Klipper's host MCU (MACH_LINUX / klipper_mcu) =="
+(
+	cd "$VENDOR/klipper"
+	rm -rf out .config .config.old
+	cp test/configs/linuxprocess.config .config
+	export PATH="$BUILDROOT_DIR/output/host/bin:$PATH"
+	make olddefconfig
+	make CROSS_PREFIX=mipsel-buildroot-linux-gnu- || {
+		echo "FATAL: cross-compiling klipper_mcu (MACH_LINUX) failed" >&2
+		exit 1
+	}
+	[ -f out/klipper.elf ] || {
+		echo "FATAL: out/klipper.elf was not produced" >&2
+		exit 1
+	}
+) || exit 1
+
+# Debug-symbol preservation mirrors c_helper.so/ustreamer/v4l2-ctl above -
+# TARGET_FINALIZE's blanket strip pass never reaches this file since it is
+# copied into the overlay directly by this script, after that pass runs.
+cp "$VENDOR/klipper/out/klipper.elf" "$WORK/debug-symbols/klipper_mcu.debug"
+(
+	cd "$VENDOR/klipper"
+	export PATH="$BUILDROOT_DIR/output/host/bin:$PATH"
+	mipsel-buildroot-linux-gnu-strip --strip-unneeded out/klipper.elf
+)
+mkdir -p "$OVERLAY/usr/bin"
+cp "$VENDOR/klipper/out/klipper.elf" "$OVERLAY/usr/bin/klipper_mcu"
+chmod 755 "$OVERLAY/usr/bin/klipper_mcu"
+# Leave vendor/klipper's top-level tree exactly as it was before this step -
+# out/.config are build-local scratch state, not shipped inputs, and the
+# klippy/ copy below is taken from the source tree, not this build's out/.
+rm -rf "$VENDOR/klipper/out" "$VENDOR/klipper/.config" "$VENDOR/klipper/.config.old"
+
 mkdir -p "$OVERLAY/opt/klipper"
 rm -rf "$OVERLAY/opt/klipper/klippy"
 
