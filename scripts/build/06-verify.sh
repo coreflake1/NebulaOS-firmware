@@ -1194,6 +1194,48 @@ check /etc/init.d/S50nebulaos-mcu-guard
 check /opt/nebulaos/tools/creality_flash.py
 check /opt/nebulaos/tools/creality_validator.py
 
+# Phase 1.9B: plr_tombstone.py (stock-switch PLR journal tombstone, invoked
+# from ota_marker.sh's write_ota_marker()) - real execution smoke test
+# against a temp-file EEPROM standing in for the real device, extracting
+# both this tool and the composed nebulaos_plr_journal.py it imports at
+# runtime from the built image (not the source checkout) so this check
+# actually validates what will run on real hardware.
+check /opt/nebulaos/tools/plr_tombstone.py
+PLR_SMOKE_DIR="$(mktemp -d)"
+if debugfs -R "dump /opt/nebulaos/tools/plr_tombstone.py ${PLR_SMOKE_DIR}/plr_tombstone.py" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1 \
+	&& debugfs -R "dump /opt/klipper/klippy/extras/nebulaos_plr_journal.py ${PLR_SMOKE_DIR}/nebulaos_plr_journal.py" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1; then
+	PLR_SMOKE_RESULT=$(python3 - "$PLR_SMOKE_DIR" <<'PYEOF'
+import sys, os, importlib.util
+d = sys.argv[1]
+spec = importlib.util.spec_from_file_location("plr_tombstone", os.path.join(d, "plr_tombstone.py"))
+tool = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tool)
+tool._JOURNAL_MODULE_CANDIDATES = [os.path.join(d, "nebulaos_plr_journal.py")]
+journal = tool._load_journal_module()
+if journal is None:
+	print("FAIL: could not load composed nebulaos_plr_journal.py")
+	sys.exit(0)
+eeprom_path = os.path.join(d, "eeprom")
+with open(eeprom_path, "wb") as f:
+	f.write(bytes([0xFF]) * journal.EEPROM_TOTAL_SIZE)
+with open(eeprom_path, "r+b") as f:
+	journal.commit_checkpoint(f, 1)
+rc = tool.main(["--eeprom-path", eeprom_path])
+with open(eeprom_path, "r+b") as f:
+	recovery = journal.read_recovery_state(f)
+print("OK" if rc == 0 and recovery is None else "FAIL: rc=%r recovery=%r" % (rc, recovery))
+PYEOF
+)
+	if [ "$PLR_SMOKE_RESULT" = "OK" ]; then
+		echo "OK   plr_tombstone.py real execution smoke test (extracted from built image, temp-file EEPROM)"
+	else
+		echo "MISS plr_tombstone.py smoke test failed: $PLR_SMOKE_RESULT"
+	fi
+else
+	echo "MISS could not extract plr_tombstone.py / nebulaos_plr_journal.py from the built image for the smoke test"
+fi
+rm -rf "$PLR_SMOKE_DIR"
+
 echo "=== MCU lifecycle import-chain smoke test (extracted files, real import, no mocks) ==="
 MCU_SMOKE_DIR="$(mktemp -d)"
 MCU_SMOKE_OK=1

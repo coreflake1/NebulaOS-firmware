@@ -36,4 +36,21 @@ write_ota_marker() {
 	# Trailing global sync as belt-and-suspenders, matching the same
 	# pattern ndq_atomic_write() uses after its own durable write.
 	sync
+
+	# Phase 1.9B: PLR is deliberately OS-local (NebulaOS-klipper-extensions'
+	# nebulaos_plr_journal.py header) - a NebulaOS -> stock switch must
+	# tombstone the NebulaOS journal so a later switch back to custom never
+	# tries to resume state stock may have invalidated in the interim.
+	# Only fires when $1 selects stock ("ota:kernel") - switching to custom
+	# ("ota:kernel2") is not leaving custom, nothing to tombstone. Best-
+	# effort and NEVER gates the switch itself: a failure here must not
+	# block returning to stock (stock's own page 0 is untouched by
+	# NebulaOS regardless of this tool's outcome - see plr_tombstone.py's
+	# own header). /usr/bin/python3 deliberately, not the klipper venv -
+	# this must still work if that venv is missing/corrupted.
+	if [ "$1" = "ota:kernel" ] && [ -x /usr/bin/python3 ] \
+		&& [ -f /opt/nebulaos/tools/plr_tombstone.py ]; then
+		/usr/bin/python3 /opt/nebulaos/tools/plr_tombstone.py \
+			|| echo "write_ota_marker: plr_tombstone.py failed (non-fatal, continuing the stock switch)" >&2
+	fi
 }
