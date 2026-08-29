@@ -282,6 +282,17 @@ if [ -f "$KERNEL_CONFIG" ]; then
 	# with sqlite3.OperationalError: database is locked on its very first
 	# database open. Affects anything using file locks, not just sqlite.
 	check_builtin CONFIG_FILE_LOCKING
+	# Phase 1.9A/1.9B: ADXL345's bit-banged SPI bus and the physical
+	# BL24C16F EEPROM's real production driver (at24/nvmem, NOT
+	# [bl24c16f]/i2c-chardev - see accelerometer-eeprom-bus-enable-
+	# variant.sh and machine.cfg's own Phase 1.9B history).
+	check_builtin CONFIG_SPI_GPIO
+	check_builtin CONFIG_EEPROM_AT24
+	if grep -q "^CONFIG_I2C_CHARDEV=y$" "$KERNEL_CONFIG"; then
+		echo "MISS CONFIG_I2C_CHARDEV is set - Phase 1.9B retired its only consumer ([bl24c16f]/klipper_mcu i2c.c); it should no longer be needed"
+	else
+		echo "OK   CONFIG_I2C_CHARDEV not set (retired, Phase 1.9B - at24 is a real kernel driver, no /dev/i2c-* chardev needed)"
+	fi
 else
 	echo "MISS $KERNEL_CONFIG not found - run 03-build-kernel-and-rootfs.sh first"
 fi
@@ -368,11 +379,38 @@ if [ -f "$DTB" ] && [ -x "$DTC" ]; then
 	assert_status "uart1 (printer MCU link)" 'serial@10031000 {' enabled
 	assert_status "uart4 (console)"     'serial@10034000 {' enabled
 	assert_status "i2c4 (touchscreen)"  'i2c@10054000 {'    enabled
+	assert_status "i2c2 (BL24C16F EEPROM bus)" 'i2c@10052000 {' enabled
 	assert_status "dpu (display)"       'dpu@[0-9a-fx]+ {'  enabled
 	assert_status "pwm (beeper channel)" 'pwm@134c0000 {'   enabled
 	assert_status "otg (USB)"           'otg@13500000 {'    enabled
 	assert_status "rtc"                 'rtc@10003000 {'    enabled
 	assert_status "watchdog"            'watchdog@10002000 {' enabled
+
+	echo "--- Phase 1.9A/1.9B accelerometer/EEPROM node content ---"
+	if grep -q 'spi_gpio_adxl345 {' "$DECOMPILED" && grep -q 'spi2 = "/spi_gpio_adxl345"' "$DECOMPILED"; then
+		echo "OK   spi_gpio_adxl345 node and spi2 alias present"
+	else
+		echo "MISS spi_gpio_adxl345 node or spi2 alias missing"
+	fi
+	if grep -A8 'eeprom@50 {' "$DECOMPILED" | grep -q 'compatible = "atmel,24c16"'; then
+		echo "OK   eeprom@50 node present with compatible = \"atmel,24c16\""
+	else
+		echo "MISS eeprom@50 node missing or wrong compatible string"
+	fi
+	if grep -A8 'eeprom@50 {' "$DECOMPILED" | grep -q 'reg = <0x50>'; then
+		echo "OK   eeprom@50 reg = <0x50>"
+	else
+		echo "MISS eeprom@50 reg is not <0x50>"
+	fi
+	EEPROM_BODY=$(awk '/eeprom@50 \{/,/^\t+\};/' "$DECOMPILED")
+	if echo "$EEPROM_BODY" | grep -q 'pagesize = <0x10>' \
+		&& echo "$EEPROM_BODY" | grep -q 'size = <0x800>' \
+		&& echo "$EEPROM_BODY" | grep -q 'address-width = <0x8>' \
+		&& echo "$EEPROM_BODY" | grep -q 'num-addresses = <0x8>'; then
+		echo "OK   eeprom@50 geometry matches BL24C16F exactly (pagesize=16, size=2048, address-width=8, num-addresses=8)"
+	else
+		echo "MISS eeprom@50 geometry does not match the expected BL24C16F values - dtc prints decimal DT integers in hex, compared here as such"
+	fi
 
 	rm -f "$DECOMPILED"
 else
@@ -476,7 +514,12 @@ echo "=== Phase 1.9A: host MCU (klipper_mcu) / ADXL345 / BL24C16F ==="
 # the full architecture.
 check /usr/bin/klipper_mcu
 check /etc/init.d/S54nebulaos-host-mcu
+# bl24c16f.py stays composed for provenance (Phase 1.9A) but is retired from
+# production use as of Phase 1.9B - see the machine.cfg [bl24c16f]-absence
+# check and the [nebulaos_power_loss_recovery] presence check below.
 check /opt/klipper/klippy/extras/bl24c16f.py
+check /opt/klipper/klippy/extras/nebulaos_plr_journal.py
+check /opt/klipper/klippy/extras/nebulaos_power_loss_recovery.py
 
 MACHINE_CFG_CONTENT=$(debugfs -R "cat /etc/nebulaos/klipper/machine.cfg" ${IMAGES}/rootfs.ext2 2>/dev/null)
 S54_CONTENT=$(debugfs -R "cat /etc/init.d/S54nebulaos-host-mcu" ${IMAGES}/rootfs.ext2 2>/dev/null)
@@ -496,9 +539,19 @@ else
 	echo "MISS machine.cfg does not declare [resonance_tester]"
 fi
 if echo "$MACHINE_CFG_CONTENT" | grep -qE "^\[bl24c16f\]$"; then
-	echo "OK   machine.cfg declares [bl24c16f]"
+	echo "MISS machine.cfg declares [bl24c16f] - Phase 1.9B retired this as the production EEPROM owner (should be [nebulaos_power_loss_recovery] over at24 instead)"
 else
-	echo "MISS machine.cfg does not declare [bl24c16f]"
+	echo "OK   machine.cfg does not declare [bl24c16f] (retired, Phase 1.9B)"
+fi
+if echo "$MACHINE_CFG_CONTENT" | grep -qE "^\[nebulaos_power_loss_recovery\]$"; then
+	echo "OK   machine.cfg declares [nebulaos_power_loss_recovery]"
+else
+	echo "MISS machine.cfg does not declare [nebulaos_power_loss_recovery]"
+fi
+if echo "$MACHINE_CFG_CONTENT" | grep -A2 "^\[nebulaos_power_loss_recovery\]$" | grep -qF "eeprom_path: /sys/bus/i2c/devices/2-0050/eeprom"; then
+	echo "OK   [nebulaos_power_loss_recovery]'s eeprom_path matches the at24 eeprom@50 DT node's sysfs path"
+else
+	echo "MISS [nebulaos_power_loss_recovery]'s eeprom_path does not match the expected at24 sysfs path"
 fi
 if echo "$S54_CONTENT" | grep -qF -- '--exec "$KLIPPER_HOST_MCU" -- -r -I "$SOCKET"'; then
 	echo "OK   S54nebulaos-host-mcu starts /usr/bin/klipper_mcu with -r -I \$SOCKET (explicit socket path)"

@@ -1,11 +1,12 @@
 #!/bin/sh
 # Applies the host-MCU accelerometer/EEPROM bus enablement fix (Phase 1.9A
-# Host MCU + ADXL345 + BL24C16F Hardware Restoration, and the follow-on
-# Phase 1.9A SPI Polarity Fix Investigation) to the vendor kernel checkout
-# and its Kconfig fragment.
+# Host MCU + ADXL345 + BL24C16F Hardware Restoration, the follow-on
+# Phase 1.9A SPI Polarity Fix Investigation, and Phase 1.9B's at24/nvmem
+# production EEPROM ownership change) to the vendor kernel checkout and its
+# Kconfig fragment.
 #
 # No new kernel driver source is involved here (CONFIG_SPI_GPIO and
-# CONFIG_I2C_CHARDEV are existing upstream options, not NebulaOS code), so
+# CONFIG_EEPROM_AT24 are existing upstream options, not NebulaOS code), so
 # unlike backlight-final-controller-variant.sh/pwm-state-readback-variant.sh
 # there is no scripts/build/patches/*.patch for this variant - the DTS and
 # Kconfig fragment content are appended directly by this script, using the
@@ -49,12 +50,19 @@
 #     would silently merge with instead of creating a separate node
 #     (found live: our first attempt at this had its pin numbers and
 #     status overwritten by that node).
-#   - BL24C16F EEPROM (i2c_bus: i2c.2 in printer.cfg) needs &i2c2 enabled
-#     with the already-defined-but-unused i2c2_pb pinmux group (mirroring
-#     the existing i2c4/i2c4_pc touch fix already in this same file).
-#     Requires CONFIG_I2C_CHARDEV=y - klipper_mcu's own i2c.c opens
-#     /dev/i2c-<bus> directly (userspace ioctl access), and this kernel
-#     had no /dev/i2c-* character devices at all for any bus.
+#   - The physical BL24C16F EEPROM needs &i2c2 enabled with the
+#     already-defined-but-unused i2c2_pb pinmux group (mirroring the
+#     existing i2c4/i2c4_pc touch fix already in this same file). Phase
+#     1.9A originally reached this chip via [bl24c16f] (a NebulaOS Klipper
+#     extra running on klipper_mcu's virtual "rpi" MCU, needing
+#     CONFIG_I2C_CHARDEV=y so its own i2c.c could open /dev/i2c-<bus>
+#     directly). Phase 1.9B retires that production ownership in favor of
+#     the generic in-tree at24/nvmem driver (CONFIG_EEPROM_AT24=y) binding
+#     directly to a real eeprom@50 child node below - see that node's own
+#     comment for the full driver-compatibility rationale. CONFIG_I2C_
+#     CHARDEV is dropped accordingly (see the Kconfig fragment append
+#     below) - nothing else on this board needs a userspace i2c-chardev
+#     consumer.
 #
 # Polarity fix (Phase 1.9A SPI Polarity Fix Investigation): the first
 # working revision of this variant copied stock's raw flags=0x01
@@ -80,9 +88,10 @@
 #       unmodified - no spi2/i2c2 bus for either chip, matching the
 #       original Phase 1.9A hardware-qualification failure (mcu.error:
 #       Unable to open spi device).
-#   FIX1: appends the DTS fragments above plus CONFIG_SPI_GPIO=y/
-#       CONFIG_I2C_CHARDEV=y to the Kconfig fragment (the corrected,
-#       GPIO_ACTIVE_HIGH-on-clock/data-lines revision).
+#   FIX1: appends the DTS fragments above (including the at24 eeprom@50
+#       child node) plus CONFIG_SPI_GPIO=y/CONFIG_EEPROM_AT24=y to the
+#       Kconfig fragment (the corrected, GPIO_ACTIVE_HIGH-on-clock/data-
+#       lines, at24-owned-EEPROM revision).
 #
 # Same "always reset to the real git-committed baseline first" pattern as
 # the sibling variant scripts for the files each one exclusively owns.
@@ -162,17 +171,56 @@ if [ "$VARIANT" = "FIX1" ]; then
 		echo "/* $DTS_MARK_BEGIN */"
 		echo "&i2c2 {"
 		echo "	/* Phase 1.9A host-MCU accelerometer/EEPROM bus enablement:"
-		echo "	 * BL24C16F EEPROM (i2c_bus: i2c.2 in printer.cfg) is wired here on the"
-		echo "	 * real Ender 3 V3 KE, physically identical hardware to i2c4/touch"
-		echo "	 * above. Pulled and decoded the real stock device's own live"
-		echo "	 * /sys/firmware/fdt - stock's own i2c2 node is disabled with no"
-		echo "	 * pinctrl (it evidently reaches this bus through a different,"
-		echo "	 * proprietary path, not this standard in-tree driver), but the"
-		echo "	 * i2c2-pb pinmux group already exists unused in our own"
-		echo "	 * x2000-pinctrl.dtsi, exactly mirroring the i2c4-pc fix below. */"
+		echo "	 * the physical BL24C16F EEPROM is wired here on the real Ender 3 V3"
+		echo "	 * KE, physically identical hardware to i2c4/touch above. Pulled and"
+		echo "	 * decoded the real stock device's own live /sys/firmware/fdt -"
+		echo "	 * stock's own i2c2 node is disabled with no pinctrl (it evidently"
+		echo "	 * reaches this bus through a different, proprietary path, not this"
+		echo "	 * standard in-tree driver), but the i2c2-pb pinmux group already"
+		echo "	 * exists unused in our own x2000-pinctrl.dtsi, exactly mirroring the"
+		echo "	 * i2c4-pc fix below."
+		echo "	 *"
+		echo "	 * Phase 1.9B production EEPROM owner change: the eeprom@50 child"
+		echo "	 * node below is the Linux 6.6 in-tree at24/nvmem driver, NOT"
+		echo "	 * [bl24c16f] (which owned this same chip directly over"
+		echo "	 * i2c_mcu:rpi/i2c-chardev in Phase 1.9A and is retired from"
+		echo "	 * production use as of Phase 1.9B - see machine.cfg and"
+		echo "	 * nebulaos_power_loss_recovery.py). The BL24C16F is electrically"
+		echo "	 * and functionally an Atmel 24C16 - same 2048 bytes, same 16-byte"
+		echo "	 * write page, same 8-bit internal address split across 8 I2C slave"
+		echo "	 * addresses (0x50..0x57) - so the exact, unmodified upstream"
+		echo "	 * \"atmel,24c16\" compatible string and binding apply verbatim; no"
+		echo "	 * newer \"belling,bl24c16f\" compatible name or kernel upgrade is"
+		echo "	 * needed. Source-verified against this exact kernel's own"
+		echo "	 * drivers/misc/eeprom/at24.c: CONFIG_EEPROM_AT24 depends on I2C &&"
+		echo "	 * SYSFS (both already satisfied) and selects NVMEM/NVMEM_SYSFS/"
+		echo "	 * REGMAP/REGMAP_I2C automatically; \"pagesize\"/\"address-width\"/"
+		echo "	 * \"size\"/\"num-addresses\" are exactly the device_property_read_u32()"
+		echo "	 * names this driver's own at24_probe() parses. Resulting userspace"
+		echo "	 * interface: /sys/bus/i2c/devices/2-0050/eeprom (the reg = <0x50>"
+		echo "	 * address below, on i2c bus 2). CONFIG_I2C_CHARDEV is dropped from"
+		echo "	 * the Kconfig fragment below in this same Phase 1.9B change - at24"
+		echo "	 * is a real kernel driver (binds to the i2c_client directly, no"
+		echo "	 * /dev/i2c-* character device involved), and with [bl24c16f]"
+		echo "	 * retired, nothing else on this board's i2c_mcu:rpi bus needs"
+		echo "	 * /dev/i2c-* chardev access any more (ADXL345 is SPI, not I2C). */"
 		echo "	status = \"okay\";"
 		echo "	pinctrl-names = \"default\";"
 		echo "	pinctrl-0 = <&i2c2_pb>;"
+		echo ""
+		echo "	eeprom@50 {"
+		echo "		/* Physical page 0 (bytes 0..15) is reserved for stock"
+		echo "		 * Creality's own PLR checkpoint-slot-pointer/enabled-state"
+		echo "		 * bytes - nebulaos_plr_journal.py (NebulaOS-klipper-extensions)"
+		echo "		 * never reads or writes that page, only pages 1..127. */"
+		echo "		compatible = \"atmel,24c16\";"
+		echo "		reg = <0x50>;"
+		echo "		pagesize = <16>;"
+		echo "		size = <2048>;"
+		echo "		address-width = <8>;"
+		echo "		num-addresses = <8>;"
+		echo "		label = \"nebulaos-plr\";"
+		echo "	};"
 		echo "};"
 		echo
 		echo "/* Phase 1.9A host-MCU accelerometer/EEPROM bus enablement:"
@@ -274,13 +322,24 @@ if [ "$VARIANT" = "FIX1" ]; then
 
 	{
 		echo "$BEGIN_MARK"
-		echo "# Phase 1.9A host-MCU accelerometer/EEPROM bus enablement variant."
-		echo "# ADXL345/BL24C16F need a bit-banged SPI bus (spi-gpio, matching"
+		echo "# Phase 1.9A/1.9B host-MCU accelerometer/EEPROM bus enablement"
+		echo "# variant. ADXL345 needs a bit-banged SPI bus (spi-gpio, matching"
 		echo "# stock's own real wiring) that this kernel never enabled the"
-		echo "# driver for, and /dev/i2c-* character devices for klipper_mcu's"
-		echo "# own i2c.c to open directly."
+		echo "# driver for. The physical EEPROM (BL24C16F, electrically an Atmel"
+		echo "# 24C16) needs the generic in-tree at24/nvmem driver - depends on"
+		echo "# I2C && SYSFS only (both already satisfied), and itself selects"
+		echo "# NVMEM/NVMEM_SYSFS/REGMAP/REGMAP_I2C automatically."
 		echo "CONFIG_SPI_GPIO=y"
-		echo "CONFIG_I2C_CHARDEV=y"
+		echo "CONFIG_EEPROM_AT24=y"
+		echo "# CONFIG_I2C_CHARDEV deliberately NOT selected (Phase 1.9B): it was"
+		echo "# needed in Phase 1.9A only for klipper_mcu's own i2c.c to open"
+		echo "# /dev/i2c-* directly on behalf of [bl24c16f] (i2c_mcu:rpi). With"
+		echo "# [bl24c16f] retired as the production EEPROM owner in favor of the"
+		echo "# real kernel at24 driver above (which binds its i2c_client"
+		echo "# directly, no /dev/i2c-* chardev involved), nothing else on this"
+		echo "# board uses a userspace i2c-chardev consumer any more - confirmed"
+		echo "# by inspecting machine.cfg: [adxl345] is SPI, not I2C, and no"
+		echo "# other [xxx] section declares an i2c_mcu/i2c_bus option."
 		echo "$END_MARK"
 	} >> "$FRAGMENT"
 fi

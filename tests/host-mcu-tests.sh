@@ -1,14 +1,17 @@
 #!/bin/sh
 #
-# Offline tests for Phase 1.9A (host MCU / ADXL345 / BL24C16F restoration).
+# Offline tests for Phase 1.9A (host MCU / ADXL345 / BL24C16F restoration)
+# and Phase 1.9B (power-loss recovery: at24/nvmem production EEPROM
+# ownership, [nebulaos_power_loss_recovery]).
 #
 # Validates the klipper_mcu (MACH_LINUX) build step, the S54nebulaos-host-mcu
-# service, and the new machine.cfg config sections - all static analysis of
+# service, and the machine.cfg config sections - all static analysis of
 # script/config text and repo state. Does NOT require the Buildroot
 # toolchain, a real build, or hardware - see 06-verify.sh for the
 # rootfs-content checks that do need a real built image, and
 # tests/recovery-safety-tests.sh for the "zero core patches" collision
-# guard this phase extends with bl24c16f.py.
+# guard this phase extends with bl24c16f.py/nebulaos_plr_journal.py/
+# nebulaos_power_loss_recovery.py.
 #
 # Usage: sh tests/host-mcu-tests.sh
 
@@ -21,6 +24,8 @@ HOST_MCU_SERVICE="$REPO_ROOT/scripts/build/overlay/etc/init.d/S54nebulaos-host-m
 KLIPPER_SERVICE="$REPO_ROOT/scripts/build/overlay/etc/init.d/S55klipper"
 MACHINE_CFG="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/machine.cfg"
 EXT_BL24C16F="$REPO_ROOT/vendor/nebulaos-klipper-extensions/extras/bl24c16f.py"
+EXT_PLR_JOURNAL="$REPO_ROOT/vendor/nebulaos-klipper-extensions/extras/nebulaos_plr_journal.py"
+EXT_PLR="$REPO_ROOT/vendor/nebulaos-klipper-extensions/extras/nebulaos_power_loss_recovery.py"
 
 PASS=0
 FAIL=0
@@ -169,13 +174,16 @@ else
 fi
 
 # =========================================================================
-# 5. Config sections - [mcu rpi], [adxl345], [resonance_tester], [bl24c16f]
+# 5. Config sections - [mcu rpi], [adxl345], [resonance_tester],
+#    [nebulaos_power_loss_recovery] (Phase 1.9B - NOT [bl24c16f], retired
+#    as the production EEPROM owner in favor of the at24/nvmem kernel
+#    driver - see accelerometer-eeprom-bus-enable-variant.sh)
 # =========================================================================
 
 echo "--- machine.cfg config sections ---"
 
 if [ -f "$MACHINE_CFG" ]; then
-    for section in "\[mcu rpi\]" "\[adxl345\]" "\[resonance_tester\]" "\[bl24c16f\]"; do
+    for section in "\[mcu rpi\]" "\[adxl345\]" "\[resonance_tester\]" "\[nebulaos_power_loss_recovery\]"; do
         if grep -q "^${section}$" "$MACHINE_CFG"; then
             pass "machine.cfg declares $section"
         else
@@ -183,16 +191,22 @@ if [ -f "$MACHINE_CFG" ]; then
         fi
     done
 
+    if grep -q "^\[bl24c16f\]$" "$MACHINE_CFG"; then
+        fail "machine.cfg still declares [bl24c16f] - Phase 1.9B retired this as the production EEPROM owner"
+    else
+        pass "machine.cfg does not declare [bl24c16f] (retired, Phase 1.9B)"
+    fi
+
     if grep -A3 "^\[mcu rpi\]$" "$MACHINE_CFG" | grep -q "serial: /tmp/klipper_host_mcu"; then
         pass "[mcu rpi] points at /tmp/klipper_host_mcu, matching S54nebulaos-host-mcu's socket"
     else
         fail "[mcu rpi] does not reference /tmp/klipper_host_mcu"
     fi
 
-    if grep -A5 "^\[bl24c16f\]$" "$MACHINE_CFG" | grep -q "i2c_mcu: rpi"; then
-        pass "[bl24c16f] is wired through [mcu rpi] (i2c_mcu: rpi), matching stock's real wiring"
+    if grep -A2 "^\[nebulaos_power_loss_recovery\]$" "$MACHINE_CFG" | grep -q "eeprom_path: /sys/bus/i2c/devices/2-0050/eeprom"; then
+        pass "[nebulaos_power_loss_recovery] eeprom_path matches the at24 eeprom@50 DT node's sysfs path"
     else
-        fail "[bl24c16f] does not reference i2c_mcu: rpi"
+        fail "[nebulaos_power_loss_recovery] eeprom_path does not match the expected at24 sysfs path"
     fi
 else
     fail "cannot check config sections - machine.cfg missing"
@@ -251,7 +265,14 @@ fi
 # =========================================================================
 # 7. bl24c16f.py vendored correctly (extensions repo, when checked out
 #    alongside this one - e.g. inside vendor/ after 00-fetch-vendor-
-#    sources.sh, or as a sibling worktree during local development)
+#    sources.sh, or as a sibling worktree during local development).
+#
+#    Phase 1.9B note: this file stays vendored for provenance only - it is
+#    NOT the production EEPROM owner any more (see section 5 above and
+#    accelerometer-eeprom-bus-enable-variant.sh; the at24/nvmem kernel
+#    driver owns the physical chip now). This section only verifies the
+#    vendored source file itself hasn't drifted from upstream, which
+#    remains meaningful regardless of whether it's actively configured.
 # =========================================================================
 
 echo "--- bl24c16f.py extension ---"
@@ -286,6 +307,58 @@ if [ -n "$BL24C16F_CANDIDATE" ]; then
     done
 else
     echo "SKIP: NebulaOS-klipper-extensions not found alongside this checkout - cannot verify bl24c16f.py directly (checked in that repo's own tree, see VENDORED.md)"
+fi
+
+# =========================================================================
+# 8. nebulaos_power_loss_recovery.py / nebulaos_plr_journal.py vendored
+#    correctly (Phase 1.9B), same sibling-checkout resolution as bl24c16f.py
+#    above
+# =========================================================================
+
+echo "--- nebulaos_power_loss_recovery.py / nebulaos_plr_journal.py extension ---"
+
+PLR_CANDIDATE=""
+for cand in "$EXT_PLR" \
+            "$REPO_ROOT/../../NebulaOS-klipper-extensions/$BRANCH_DIR/extras/nebulaos_power_loss_recovery.py" \
+            "$REPO_ROOT/../../../NebulaOS-klipper-extensions/extras/nebulaos_power_loss_recovery.py"; do
+    [ -f "$cand" ] && { PLR_CANDIDATE="$cand"; break; }
+done
+JOURNAL_CANDIDATE=""
+for cand in "$EXT_PLR_JOURNAL" \
+            "$REPO_ROOT/../../NebulaOS-klipper-extensions/$BRANCH_DIR/extras/nebulaos_plr_journal.py" \
+            "$REPO_ROOT/../../../NebulaOS-klipper-extensions/extras/nebulaos_plr_journal.py"; do
+    [ -f "$cand" ] && { JOURNAL_CANDIDATE="$cand"; break; }
+done
+
+if [ -n "$PLR_CANDIDATE" ] && [ -n "$JOURNAL_CANDIDATE" ]; then
+    for cmd in NEBULAOS_PLR_STATUS NEBULAOS_PLR_RESUME NEBULAOS_PLR_DISCARD; do
+        if grep -q "\"$cmd\"" "$PLR_CANDIDATE"; then
+            pass "nebulaos_power_loss_recovery.py registers $cmd"
+        else
+            fail "nebulaos_power_loss_recovery.py does not register $cmd"
+        fi
+    done
+
+    if grep -q "JOURNAL_FIRST_PAGE = 1" "$JOURNAL_CANDIDATE" && grep -q "STOCK_PAGE = 0" "$JOURNAL_CANDIDATE"; then
+        pass "nebulaos_plr_journal.py reserves physical page 0 for stock, journal starts at page 1"
+    else
+        fail "nebulaos_plr_journal.py's page layout constants do not match the expected stock-compatible layout"
+    fi
+
+    # A blunt grep for the substring "M24" would also match this file's own
+    # comments explaining why M24 is never emitted - check specifically for
+    # an actual emitted gcode line instead (the real functional guarantee
+    # is test_nebulaos_power_loss_recovery.py's own
+    # test_never_emits_m24_or_motion, which inspects build_resume_gcode_
+    # lines()'s real return value; this is a lightweight source-level
+    # backstop, not a replacement for that test).
+    if grep -qE '(lines\.append|run_script_from_command)\("M24' "$PLR_CANDIDATE"; then
+        fail "nebulaos_power_loss_recovery.py emits an M24 gcode line - this mission's resume path must never issue it automatically"
+    else
+        pass "nebulaos_power_loss_recovery.py never emits an M24 gcode line (no automatic motion/print resume)"
+    fi
+else
+    echo "SKIP: NebulaOS-klipper-extensions not found alongside this checkout - cannot verify the PLR extension directly (checked in that repo's own tree)"
 fi
 
 # =========================================================================

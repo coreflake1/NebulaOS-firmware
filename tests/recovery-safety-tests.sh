@@ -74,7 +74,7 @@ skip() { echo "SKIP: $1"; SKIP=$((SKIP + 1)); }
 # native replacements and belong in this safety-relevant list instead -
 # losing either would silently break CRTENSE_NOZZLE_CLEAR/
 # Z_OFFSET_CALIBRATION exactly the way losing a PRTouch module used to.
-ACCEPTED_FILES="z_compensate.py nozzle_clear.py nebulaos_z_offset_probe.py bl24c16f.py"
+ACCEPTED_FILES="z_compensate.py nozzle_clear.py nebulaos_z_offset_probe.py bl24c16f.py nebulaos_plr_journal.py nebulaos_power_loss_recovery.py"
 
 OFFICIAL_KLIPPER="https://github.com/Klipper3d/klipper.git"
 
