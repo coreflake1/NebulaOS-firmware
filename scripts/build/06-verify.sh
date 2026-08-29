@@ -132,9 +132,28 @@ fi
 # v4l-utils: pinned to the exact commit v4l-utils-1.20.0 resolves to (not the
 # tag name) as of the 2026-07-31 pin audit; messages.mo is a harmless
 # untracked compiled gettext artifact.
+#
+# Phase 1 overnight closure mission (2026-08-30): the remaining five paths
+# below were a REAL gap in this allowlist, found live by running a
+# genuinely fresh (from-network, not reused) build and seeing them appear
+# even there - proving they are not stale/reused-checkout drift but a
+# deterministic, always-reproducible side effect of 04-cross-compile-
+# app-stack.sh's own v4l2-ctl build step, which deliberately runs
+# `autoreconf -fiv` plus a manual autopoint workaround on this exact
+# checkout every single build (see that script's own "USB/webcam
+# stock-parity mission, FIRMWARE.md sec 60" comment for why: the pinned
+# v4l-utils-1.20.0 release uses two non-default-named gettext catalogs,
+# and this build image's autoreconf can't regenerate their Makefile.in.in
+# files without it). `configure.ac` itself is touched by autoreconf's own
+# timestamp/regeneration bookkeeping, not a real content change.
 check_vendor_pin v4l-utils "$V4L_UTILS_PIN" \
 	"$V4L_UTILS_REPO" 0 \
-	messages.mo
+	messages.mo \
+	configure.ac \
+	po/Makefile.in.in \
+	po/Makevars.template \
+	libdvbv5-/po/Makefile.in.in \
+	v4l-utils-/po/Makefile.in.in
 # x2000_kernel_6.6: same pin source as 00-fetch-vendor-sources.sh's own
 # KERNEL_PIN and 01-apply-kernel-patches.sh's independent check - all three
 # now read manifests/dependencies.conf directly rather than keeping
