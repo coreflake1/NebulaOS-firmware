@@ -7,17 +7,42 @@
 # resulting *build* actually contains what it's supposed to. This script
 # checks the real, resolved artifacts instead.
 #
-# Two modes:
+# Three modes:
 #   sh scripts/build/assert-baseline-config.sh pre-build
 #     Run AFTER apply-qualified-baseline.sh, BEFORE 02/03/05 - checks the
 #     vendor kernel tree's source-level state (Kconfig symbols exist, DTS
 #     nodes present) so a missing patch is caught before spending build time.
+#     This is what "SOURCE_VERIFIED" means (see Phase 1 overnight closure
+#     mission, Mission H): every accepted variant's source-level change is
+#     actually present, nothing about whether it compiled or matches any
+#     prior hardware-qualified state.
 #   sh scripts/build/assert-baseline-config.sh post-build
-#     Run AFTER 05-final-build.sh - checks the actual resolved
-#     kernel.config/halley5_v30.dts that got baked into the real image,
-#     which is the only real proof anything actually compiled in.
+#     Run AFTER 05-final-build.sh to REPRODUCE an ALREADY hardware-qualified
+#     baseline byte/semantically-exactly (used by build-qualified-
+#     baseline.sh's own wrapper, and for regression-testing a change against
+#     a frozen, already-qualified reference). Any difference from
+#     QUALIFIED_BASELINE_TAG is a FAILURE here, by design - this mode's
+#     entire purpose is proving nothing drifted from what was already
+#     qualified. Do NOT use this mode to evaluate a candidate that
+#     legitimately contains new, not-yet-hardware-qualified source changes -
+#     it will always and correctly report FAIL for those, since "identical
+#     to the last qualified baseline" is precisely what a real candidate is
+#     not yet.
+#   sh scripts/build/assert-baseline-config.sh candidate-post-build
+#     Added by the Phase 1 overnight closure mission (Mission H): the same
+#     resolved-artifact Kconfig/DTS assertions as post-build (so a real
+#     candidate is still proven to actually contain everything every
+#     accepted variant is supposed to produce - this is "BUILD_VERIFIED"),
+#     but the QUALIFIED_BASELINE_TAG comparison is reported as an
+#     INFORMATIONAL diff, never a gate - a legitimate candidate is EXPECTED
+#     to differ from the last hardware-qualified baseline (that's what
+#     makes it a candidate). Nothing in this repository calls a build
+#     "hardware-qualified" merely because this mode passes; promoting
+#     QUALIFIED_BASELINE_TAG to a new value remains a separate, deliberate,
+#     manually-reviewed edit to manifests/dependencies.conf made only after
+#     real hardware qualification - this mode never touches that file.
 #
-# Usage: sh scripts/build/assert-baseline-config.sh <pre-build|post-build>
+# Usage: sh scripts/build/assert-baseline-config.sh <pre-build|post-build|candidate-post-build>
 
 set -eu
 
@@ -89,10 +114,35 @@ pre-build)
 	grep -qF "static int brcmf_roamoff = 1;" \
 		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null
 	check "wifi-roamoff-disable (ROAMOFF1) patch applied to brcmfmac common.c" $?
+
+	# 9th accepted variant (Phase 1.9A/1.9B, accelerometer-eeprom-bus-
+	# enable-variant.sh) - this script never checked for it at all before
+	# the Phase 1 overnight closure mission, a real gap: apply-qualified-
+	# baseline.sh's own exit status was the only thing standing between a
+	# silently-dropped 9th variant and a "PASSED" report here.
+	FRAGMENT="$ARTIFACT_DIR/halley5-nebulaos-fragment.config"
+	grep -q "CONFIG_SPI_GPIO=y" "$FRAGMENT" 2>/dev/null
+	check "CONFIG_SPI_GPIO=y present in tracked fragment (accelerometer-eeprom-bus-enable)" $?
+	grep -q "CONFIG_EEPROM_AT24=y" "$FRAGMENT" 2>/dev/null
+	check "CONFIG_EEPROM_AT24=y present in tracked fragment (accelerometer-eeprom-bus-enable)" $?
+	if grep -q "^CONFIG_I2C_CHARDEV=y$" "$FRAGMENT" 2>/dev/null; then
+		echo "  FAIL: CONFIG_I2C_CHARDEV=y present in tracked fragment - Phase 1.9B retired this (no consumer remains, see machine.cfg)"
+		FAILED=1
+	else
+		echo "  PASS: CONFIG_I2C_CHARDEV not set in tracked fragment (retired, Phase 1.9B)"
+	fi
+	grep -q 'eeprom@50 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null
+	check "eeprom@50 (at24) DT node present" $?
+	grep -q 'spi_gpio_adxl345 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null
+	check "spi_gpio_adxl345 DT node present" $?
 	;;
 
-post-build)
-	echo "== Phase 2 post-build assertions (resolved artifacts) =="
+post-build|candidate-post-build)
+	if [ "$MODE" = "post-build" ]; then
+		echo "== Phase 2 post-build assertions (resolved artifacts, strict baseline-reproduction gate) =="
+	else
+		echo "== Phase 2 candidate-post-build assertions (resolved artifacts, BUILD_VERIFIED - no baseline-reproduction gate) =="
+	fi
 	KCONFIG="$ARTIFACT_DIR/kernel.config"
 	DTS="$ARTIFACT_DIR/halley5_v30.dts"
 
@@ -148,7 +198,61 @@ post-build)
 		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null
 	check "wifi-roamoff-disable (ROAMOFF1) patch present in source tree used for this build" $?
 
-	# Byte-for-byte proof against the pinned baseline tag's own tracked
+	# 9th accepted variant (Phase 1.9A/1.9B) - resolved-artifact equivalents
+	# of the pre-build checks above.
+	grep -q "^CONFIG_SPI_GPIO=y$" "$KCONFIG"
+	check "CONFIG_SPI_GPIO=y (resolved kernel.config)" $?
+	grep -q "^CONFIG_EEPROM_AT24=y$" "$KCONFIG"
+	check "CONFIG_EEPROM_AT24=y (resolved kernel.config)" $?
+	if grep -q "^CONFIG_I2C_CHARDEV=y$" "$KCONFIG" 2>/dev/null; then
+		echo "  FAIL: CONFIG_I2C_CHARDEV=y present in resolved kernel.config - Phase 1.9B retired this"
+		FAILED=1
+	else
+		echo "  PASS: CONFIG_I2C_CHARDEV not set in resolved kernel.config (retired, Phase 1.9B)"
+	fi
+	grep -q 'eeprom@50 {' "$DTS"
+	check "eeprom@50 (at24) DT node present in resolved DTS" $?
+	grep -q 'spi_gpio_adxl345 {' "$DTS"
+	check "spi_gpio_adxl345 DT node present in resolved DTS" $?
+
+	if [ "$MODE" = "candidate-post-build" ]; then
+		# BUILD_VERIFIED stops here - every accepted variant (1-9) is proven
+		# present in the actual resolved artifact. Deliberately does NOT run
+		# the strict baseline-tag reproduction gate below: a legitimate
+		# candidate differing from the last hardware-qualified baseline is
+		# expected, not a defect. That comparison is still run, but only as
+		# an informational report (see below), never as part of $FAILED.
+		BASELINE_REF="${QUALIFIED_BASELINE_TAG:-}"
+		if [ -z "$BASELINE_REF" ] || ! git -C "$REPO_ROOT" rev-parse --verify -q "$BASELINE_REF" >/dev/null 2>&1; then
+			echo "  == candidate-vs-last-qualified-baseline diff: SKIPPED (QUALIFIED_BASELINE_TAG unset or unresolvable) =="
+		else
+			echo "  == candidate differences vs last hardware-qualified baseline $BASELINE_REF (informational only - NOT a gate) =="
+			. "$SCRIPT_DIR/lib/baseline-config-compare.sh"
+			for f in kernel.config halley5_v30.dts buildroot.config; do
+				artifact_path="$ARTIFACT_DIR/$f"
+				[ -f "$artifact_path" ] || continue
+				diff_rc=0
+				diff_output=$(baseline_config_semantic_diff "$f" "$artifact_path" "$BASELINE_REF" "$REPO_ROOT" 2>&1) || diff_rc=$?
+				if [ "$diff_rc" -eq 0 ]; then
+					echo "     $f: identical to $BASELINE_REF"
+				elif [ "$diff_rc" -eq 1 ]; then
+					echo "     $f: differs from $BASELINE_REF (expected for a real candidate - review, do not silence):"
+					echo "$diff_output" | sed "s/^/       /"
+				else
+					echo "     $f: could not compare against $BASELINE_REF: $diff_output"
+				fi
+			done
+		fi
+		if [ "$FAILED" = "1" ]; then
+			echo "== candidate-post-build assertions: FAILED - a required accepted-variant check did not pass =="
+			exit 1
+		fi
+		echo "== candidate-post-build assertions: BUILD_VERIFIED (every accepted variant present in the resolved artifact; see the informational diff above for exactly how this candidate differs from the last hardware-qualified baseline) =="
+		exit 0
+	fi
+
+	# post-build only, from here on: strict, byte/semantic-identical proof
+	# against the pinned baseline tag's own tracked
 	# copies - the strongest assertion available: not "does it look right",
 	# but "is it identical to what was actually qualified".
 	#
@@ -239,7 +343,7 @@ post-build)
 	fi
 	;;
 *)
-	echo "unknown mode '$MODE' - must be pre-build or post-build" >&2
+	echo "unknown mode '$MODE' - must be pre-build, post-build, or candidate-post-build" >&2
 	exit 1
 	;;
 esac
