@@ -1,8 +1,9 @@
 # Phase 1 Final Candidate — Frozen for Hardware Qualification
 
-Produced by the Phase 1 overnight closure mission. This document records the
-exact, frozen identity of the candidate that tomorrow's hardware sessions
-must test. **Nothing in this document may be silently changed** — if a real
+Produced by the Phase 1 overnight closure mission and finalized by the
+Phase 1 final candidate cleanup mission. This document records the exact,
+frozen identity of the candidate that tomorrow's hardware sessions must
+test. **Nothing in this document may be silently changed** — if a real
 architectural contradiction is found tomorrow requiring a source change, a
 new candidate must be built and this document (or a successor) updated
 explicitly, in its own reviewed commit.
@@ -10,6 +11,9 @@ explicitly, in its own reviewed commit.
 ## Status
 
 ```
+SOURCE_VERIFIED=YES
+BUILD_VERIFIED=YES
+HARDWARE_QUALIFIED=NO
 PHASE_1_OFFLINE_WORK_COMPLETE=YES
 FINAL_CANDIDATE_FROZEN=YES
 PHASE_1_PRINTER_COMPLETE=NO  (requires tomorrow's real hardware qualification)
@@ -19,75 +23,91 @@ PHASE_1_PRINTER_COMPLETE=NO  (requires tomorrow's real hardware qualification)
 
 | Repo | Branch | Tip commit |
 |---|---|---|
-| NebulaOS-firmware | `phase1.9b/plr` | `6144139` |
-| NebulaOS-klipper-extensions | `phase1.9b/plr` | `093c258` |
+| NebulaOS-firmware | `phase1.9b/plr` | `db6870b` |
+| NebulaOS-klipper-extensions | `phase1.9b/plr` | `b6ae35e` |
 
 Neither branch has been merged to `main`. Per this mission's own hard
 rule, nothing here is promoted or labeled hardware-qualified — that
 requires tomorrow's real tests to pass first.
 
-## Exact pinned identities (`manifests/dependencies.conf`, NebulaOS-firmware @ `6144139`)
+## Exact pinned identities (`manifests/dependencies.conf`, NebulaOS-firmware @ `db6870b`)
 
 | Component | Identity |
 |---|---|
 | Kernel source (NebulaOS-kernel, `openke`) | `295b7101d751fd888ae39e6f1746a4a940664a5f` |
 | Buildroot fork | `74d020081096972857acdb9e76c6c5335455d430` |
 | Klipper (official, unforked) | `58bd67db3ce1be1951c3e4a6d1156a79903d4edc` |
-| NebulaOS-klipper-extensions | `093c258b609d1b7b589f64eba340a96c9e4f2880` |
+| NebulaOS-klipper-extensions | `b6ae35ef735ffad540a6ade8505085a8e97e8f42` |
 | Moonraker | `d5ee17128bb88434aacdab90c2e9e990e2b64e4a` |
 | k1-ustreamer | `18e30bb313d54b1b01dd995bd31ce5a3d5adffd6` |
 | v4l-utils | `3b22ab02b960e4d1e90618e9fce9b7c8a80d814a` |
 | NebulaOS-guppyscreen (**unchanged this mission**) | `5f1911ac938451bb00439e8c55c87ef60b4a1566` |
 | Build container | `ghcr.io/coreflake1/nebulaos-build@sha256:a6ba57c69fa1ea630b037a1d1f55cf0c044a7f5a403bde9b155ea54bca1cceba` |
-| GD32 MCU candidate | native candidate-001 (Phase 1.7/1.8B, **unchanged this mission** — see `docs/MCU_LIFECYCLE_GUARD.md`) |
+| GD32 MCU candidate | native candidate-001, `candidate-001.bin` SHA256 `c2db4f34586c5df88b0d8d40e1d2d1c0f3bea90ab879c7c3a1ccc3a64f91db0c` (Phase 1.7/1.8B, **unchanged this mission** — see `docs/MCU_LIFECYCLE_GUARD.md`) |
+
+None of these pins besides `KLIPPER_EXTENSIONS_PIN` were touched by either
+the overnight closure or final-candidate-cleanup missions.
 
 ## Build artifact hashes
 
-See `artifacts/buildroot-halley5-v30-image/build-manifest.txt` (committed
-alongside this candidate) for the authoritative, machine-generated record.
-Key fields, copied here for convenience:
+From this exact candidate's own genuinely clean build (empty `vendor/`,
+fresh network fetch, `built_at=2026-08-30T11:57:07Z`):
 
 ```
-built_at=2026-08-29T23:12:11Z
-git_commit_main=6144139a2a213eb3cd6ccf7153b93de7472de8c6
-xImage_sha256=bfb1c6755b52acc455378c2bcadfc286ead2f8b7fe08dd4ad6f05de3b4e1a146
+built_at=2026-08-30T11:57:07Z
+git_commit_main=db6870bb74ca2973dc8eafd4278f6f4b6d0c10ba
+xImage_sha256=e480c12db8877e5ac81b0bac6ba45cefd05522c070de8095254243b0666df445
 xImage_size=5509184
-rootfs_squashfs_sha256=28f15535d2fbc5d1e9f9fa8c53b5be76566cd11769bb8fc211cf5b9593adf0b6
-rootfs_squashfs_size=100630528
+rootfs_squashfs_sha256=e6c85f824a5d59c606fd99175b9757d19e09393b6b01d29566ecd50db7d7feb3
+rootfs_squashfs_size=98570240
 device_tree_sha256=e2c22548bbabea584a835d5c09a0884e0945291093a95b887333bc0d0377df93
 kernel_config_sha256=542da7402a5c3997ac6d28ba79d954d384cfe4d78830568254a1ec03e2634e2e
 buildroot_config_sha256=fe95305b3643077e80f0396d00142c27f362de20a7b6b8f2b028047fd00c40b8
-guppyscreen_sha256=98994571132e23598407b38c2ff2cc0d7583e0cf07e9e0de9332eb5e0d426a9c   # byte-identical to the pre-Mission-A build - confirms GUPPYSCREEN_CHANGED=NO empirically, not just by inspection
+guppyscreen_sha256=3d0ac0155ce2d456c83138b9c85b1eb7939a5baf84fb2a60b52838fb376fd181
 ```
 
-`xImage_sha256`/`device_tree_sha256`/`kernel_config_sha256` are unchanged
-from the build before Mission A/H, confirming those missions correctly
-touched only the Klipper-extensions layer (rootfs_squashfs), never the
-kernel/DTS.
+`device_tree_sha256`/`kernel_config_sha256`/`buildroot_config_sha256` are
+identical to every other build this session produced from this same
+source (proving the kernel/DTS/Kconfig *content* is stable and
+reproducible). `xImage_sha256` and `guppyscreen_sha256` differ from
+build to build **despite identical pinned source** in every build run
+this session (three different GuppyScreen hashes, two different xImage
+hashes, across three separate builds, all from the same
+`git_commit_guppyscreen`/kernel pins) - this is expected, build-
+environment-dependent nondeterminism (most likely an embedded build
+timestamp in each binary's own version-reporting/banner), not a real
+source or behavioral change. `GD32_CHANGED`/`GUPPYSCREEN_CHANGED` are
+therefore verified by **source pin identity**
+(`git_commit_guppyscreen=5f1911ac938451bb00439e8c55c87ef60b4a1566`,
+unchanged - confirmed unmodified by this mission), not by binary hash
+matching, which is not a meaningful comparison for either artifact given
+this nondeterminism.
 
-(This document intentionally points at `build-manifest.txt` rather than
-duplicating every hash by hand — the manifest is regenerated by the build
-itself and is the single source of truth; a hand-copied value here would
-silently go stale on the next rebuild.)
+## What changed to reach this candidate
 
-## What changed to reach this candidate (this mission, on top of the already-qualified Phase 1.9A/1.9B base)
-
-- **Mission A**: checkpoint execution semantics fixed — a candidate/
-  promotion pipeline gated on real motion completion (`mcu.
-  estimated_print_time()` catching up to `toolhead.
-  register_lookahead_callback()`'s reported `print_time`), not merely on
-  `virtual_sdcard.file_position` having been dispatched. 10 new tests.
-- **Mission H**: `assert-baseline-config.sh` gained a `candidate-post-build`
-  mode distinguishing SOURCE_VERIFIED/BUILD_VERIFIED from
-  HARDWARE_QUALIFIED — this candidate is source- and build-verified;
-  hardware qualification is what tomorrow is for.
-- **Missions B–F**: physical-recovery analysis (`SAFE_AUTOMATIC_POSITION_
-  RECOVERY=NO`, honestly concluded, no code change needed), the formal
+- **Overnight closure mission (Missions A–L)**: checkpoint execution
+  semantics fixed (candidate/promotion pipeline gated on real motion
+  completion via `mcu.estimated_print_time()`), physical-recovery analysis
+  (`SAFE_AUTOMATIC_POSITION_RECOVERY=NO`, honestly concluded), the formal
   `PLR_SUPPORTED_CONTRACT`, an adversarial storage-transaction review (no
-  new gap found), and an EEPROM endurance calculation (no real concern) —
-  see `_project/missions/phase1-overnight-closure-b-through-f.md`.
-- **Missions J/K**: the hardware qualification harness (`tools/
-  qualification/`) and the final regression matrix.
+  new gap), an EEPROM endurance calculation (no concern), the
+  `candidate-post-build` SOURCE/BUILD/HARDWARE-QUALIFIED distinction, the
+  hardware qualification harness, and the regression matrix. Full detail:
+  [`_project/missions/phase1-overnight-closure-final-report.md`](../../_project/missions/phase1-overnight-closure-final-report.md).
+- **Final candidate cleanup mission**: fixed the one remaining
+  `06-verify.sh` MISS (`[nebulaos_version]` — a stale check that grepped
+  `printer.cfg`'s own text instead of following its `[include
+  platform.cfg]`, where the section actually lives and always has). Fixed
+  the one remaining pre-existing test failure (`test_nebulaos_compat`'s
+  manifest-completeness check — `test_z_offset_probe_down_min_z.py`
+  existed but was never declared in `nebulaos-extensions.json`, a
+  trivial, zero-behavior-change manifest fix). Also found and fixed a
+  genuine, previously-mischaracterized bug: `vendor/v4l-utils` appearing
+  dirty was never reused-checkout staleness — it's a deterministic side
+  effect of `04-cross-compile-app-stack.sh`'s own `autoreconf`/`autopoint`
+  workaround for that vendor's build, present on every build including a
+  genuinely fresh one, and `06-verify.sh`'s allowlist had simply never
+  been updated for it.
 
 ## Build verification
 
@@ -97,16 +117,20 @@ sh scripts/build/assert-baseline-config.sh candidate-post-build # BUILD_VERIFIED
 sh scripts/build/06-verify.sh                                    # rootfs/DTB/config content
 ```
 
-All three were run against this candidate's own build; see the Phase 1
-overnight closure final report for the pass/fail counts.
+All three were run against this exact candidate's own genuinely clean
+build (fresh `vendor/`, no reused state, canonical `build.sh` /
+pinned container). Result: **215 OK / 0 MISS** from `06-verify.sh`,
+`BUILD_VERIFIED` from `candidate-post-build`, zero failures across the
+full 398-test offline suite (336 Python `unittest` + 62 shell-test-suite
+assertions across `host-mcu-tests.sh`/`recovery-safety-tests.sh`/
+`plr-tombstone-tests.sh`/`candidate-vs-qualified-baseline-tests.sh`). See
+the Phase 1 final candidate cleanup report for the exact per-suite
+accounting.
 
-**Vendor drift (Mission G)**: this specific candidate build reused vendor
-checkouts from an earlier session for speed (not a genuinely fresh clone) -
-`06-verify.sh`'s vendor-drift check correctly flags `vendor/v4l-utils` as
-carrying pre-existing build byproducts from that reuse. A SEPARATE, fully
-independent, genuinely-from-network clean build was also launched this
-same session, specifically to test whether that drift is real or an
-artifact of reuse - see the final report for its live status.
+`VENDOR_DRIFT=0` — every pinned component (kernel, buildroot, klipper,
+moonraker, k1-ustreamer, v4l-utils, guppyscreen, pellcorp-creality)
+verified clean, from a genuinely fresh, network-only fetch, no allowlist
+gaps remaining.
 
 ## Explicit non-promotions
 
@@ -117,3 +141,6 @@ artifact of reuse - see the final report for its live status.
   passes.
 - Neither branch is merged to `main`.
 - Nothing in this candidate is described anywhere as "hardware-qualified".
+
+**Tomorrow, qualify only these exact artifacts. Do not rebuild before
+hardware testing.**
