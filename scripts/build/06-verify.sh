@@ -938,10 +938,34 @@ fi
 # printer.cfg actually loads the new version-truth printer object, not
 # just that nebulaos_version.py exists on disk (checked separately above)
 # - a missing config section would leave the file shipped but inert.
-if [ -s /tmp/printerdata-check/printer.cfg ] && grep -q "^\[nebulaos_version\]$" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
-	echo "OK   packaged printer.cfg seed includes [nebulaos_version]"
+#
+# Phase 1 final candidate cleanup mission (2026-08-30): this used to grep
+# for the literal "[nebulaos_version]" text inside printer.cfg ITSELF and
+# reported MISS on every build, always - a false positive, not a real
+# regression. [nebulaos_version] has never lived directly in printer.cfg;
+# the Phase 1.5 persistent-namespace mission split the old monolithic
+# printer.cfg into a small, stable printer.cfg entrypoint plus the SLOT/
+# IMAGE-OWNED platform.cfg/machine.cfg it [include]s (see printer.cfg's
+# own header) - [nebulaos_version] is declared in platform.cfg, and always
+# has been (see docs/NEBULAOS_PERSISTENT_LIFECYCLE.md's own Phase 6
+# section). The old check was simply never updated for that split, and
+# nothing before this mission had actually verified platform.cfg's own
+# packaged content at all. Fixed to follow the real include chain instead
+# of assuming a flat file: printer.cfg must include platform.cfg, and the
+# actual packaged platform.cfg (extracted from the built image, not the
+# source tree) must itself declare the section - together these prove
+# [nebulaos_version] genuinely loads at boot, which is the check's own
+# stated purpose.
+if [ -s /tmp/printerdata-check/printer.cfg ] && grep -qF "[include /etc/nebulaos/klipper/platform.cfg]" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
+	echo "OK   packaged printer.cfg seed includes platform.cfg"
 else
-	echo "MISS packaged printer.cfg seed does not include [nebulaos_version]"
+	echo "MISS packaged printer.cfg seed does not include platform.cfg"
+fi
+PLATFORM_CFG_CONTENT=$(debugfs -R "cat /etc/nebulaos/klipper/platform.cfg" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if echo "$PLATFORM_CFG_CONTENT" | grep -q "^\[nebulaos_version\]$"; then
+	echo "OK   packaged platform.cfg declares [nebulaos_version] (loads at boot via printer.cfg's include)"
+else
+	echo "MISS packaged platform.cfg does not declare [nebulaos_version]"
 fi
 # A bare "key:" is only actually blank if nothing indented follows on the
 # next line - moonraker.confs own trusted_clients/cors_domains use this
