@@ -88,6 +88,14 @@ GENERATION_FILE="$SYSTEM/app-generation.json"
 # other path here.
 PRINTER_DATA_CONFIG="${PRINTER_DATA_CONFIG:-/usr/data/nebulaos/printer_data/config}"
 BACKUP_ROOT="$SYSTEM/migration-backups"
+# Phase 2 calibration-framework mission - see migrate_config_ownership()
+# below. Bare /usr/bin/python3 by design: this tool has zero third-party
+# dependencies (stdlib only) and must not depend on Klipper's or
+# Moonraker's own venvs, which this same boot may not have provisioned
+# yet - same convention S04nebulaos-factory-seed already uses for its own
+# early python3 -m venv call.
+PYTHON3="${PYTHON3:-/usr/bin/python3}"
+MIGRATE_CONFIG_OWNERSHIP_TOOL="${MIGRATE_CONFIG_OWNERSHIP_TOOL:-/opt/nebulaos/tools/migrate_config_ownership.py}"
 # Overridable for tests (points fixtures at the same real, tracked shared
 # gate this script actually ships - see that file's own header).
 GATE_LIB="${GATE_LIB:-/etc/nebulaos-maintenance-gate.sh}"
@@ -560,6 +568,39 @@ migrate_printer_cfg() {
 	return 0
 }
 
+# Phase 2 calibration-framework mission: BLTouch z_offset, extruder
+# rotation_distance, and extruder/bed PID used to have literal factory-
+# default values in the immutable machine.cfg, which made
+# _disallow_include_conflicts (klippy/configfile.py) refuse SAVE_CONFIG for
+# any of them forever - see docs/NEBULAOS_CALIBRATION_CONFIG_OWNERSHIP.md.
+# machine.cfg no longer defines them at all; the tracked printer.cfg seed
+# now ships a pre-baked SAVE_CONFIG autosave block with the same factory
+# values instead. A genuinely fresh device gets this for free from the
+# seed. A device provisioned by an OLDER image still has a printer.cfg
+# that relies on the now-removed machine.cfg literals and has none of
+# these 4 sections/options in its OWN autosave block yet - this one-time,
+# idempotent step closes that gap by delegating to the dedicated,
+# independently-tested tool (see that file's own docstring for the full
+# safety reasoning: never touches a section that already has real user
+# data, refuses-and-backs-up rather than guessing on anything it cannot
+# confidently parse).
+migrate_config_ownership() {
+	f="$PRINTER_DATA_CONFIG/printer.cfg"
+	[ -f "$f" ] || return 0
+	if [ ! -x "$PYTHON3" ] && ! command -v "$PYTHON3" >/dev/null 2>&1; then
+		log "ERROR: $PYTHON3 not available - cannot run migrate_config_ownership, leaving printer.cfg untouched (will retry next boot)"
+		return 1
+	fi
+	if [ ! -f "$MIGRATE_CONFIG_OWNERSHIP_TOOL" ]; then
+		log "ERROR: $MIGRATE_CONFIG_OWNERSHIP_TOOL missing - cannot run migrate_config_ownership, leaving printer.cfg untouched (will retry next boot)"
+		return 1
+	fi
+	out=$("$PYTHON3" "$MIGRATE_CONFIG_OWNERSHIP_TOOL" "$f" "$BACKUP_ROOT" 2>&1)
+	rc=$?
+	log "migrate_config_ownership: $out"
+	return $rc
+}
+
 start() {
 	_diag_init
 	_expected_version=""
@@ -592,6 +633,7 @@ start() {
 	# rather than only when a generation happens to change.
 	migrate_moonraker_pin_include
 	migrate_printer_cfg
+	migrate_config_ownership
 
 	if [ ! -f "$SEEDS/seed-manifest.json" ]; then
 		_migration_action="skipped:no_manifest"
