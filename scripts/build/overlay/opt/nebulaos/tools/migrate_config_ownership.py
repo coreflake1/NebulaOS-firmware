@@ -203,6 +203,57 @@ def render_missing_sections(existing_sections):
     return "\n#*#\n".join(blocks)
 
 
+def verify_factory_seed(printer_cfg_path):
+    """Returns None if printer.cfg's SAVE_CONFIG autosave block (if any)
+    contains ONLY the known, tracked FACTORY_DEFAULTS content - safe to
+    ship as an immutable build-time seed for every unit - or a human-
+    readable string describing why it looks like real, non-factory
+    calibration data if not.
+
+    Before this mission, the build's own factory-seed guard
+    (04-cross-compile-app-stack.sh) rejected ANY SAVE_CONFIG block at all
+    in the tracked printer.cfg, on the theory that the only way one could
+    get there is a developer's real device calibration accidentally
+    committed. Task 1 of this mission (see this module's own docstring)
+    deliberately ships a real, pre-baked, factory-default SAVE_CONFIG
+    block for exactly this file, to fix the config-ownership problem - so
+    that blanket check is now a guaranteed false positive, found by
+    actually running the real pinned build (not by static review). This
+    function replaces it with the narrower, still-real check: not "is
+    there a SAVE_CONFIG block", but "is its content exactly the known
+    factory defaults, byte for byte, nothing more" - still refuses a
+    developer's carried-over real calibration data (any extra section, any
+    differing value), just no longer refuses the legitimate seed content
+    this mission's own fix produces.
+    """
+    with open(printer_cfg_path, "r") as f:
+        data = f.read()
+    if data.find(AUTOSAVE_HEADER) < 0:
+        return None
+    _, autosave_data = find_autosave_data(data)
+    if not autosave_data.strip():
+        return ("printer.cfg has a SAVE_CONFIG header but its autosave "
+                 "block does not parse cleanly (see find_autosave_data) - "
+                 "refusing to ship an unparseable factory seed")
+    actual = parse_autosave_sections(autosave_data)
+    expected = {
+        section.lower(): {
+            opt.lower(): "%s = %s" % (opt, val)
+            for opt, val in FACTORY_DEFAULTS[section].items()
+        }
+        for section in TARGET_SECTIONS
+    }
+    if actual != expected:
+        return (
+            "printer.cfg's SAVE_CONFIG autosave block does not match the "
+            "known factory-default content exactly - this looks like "
+            "real, non-factory calibration data (a developer's own device "
+            "drift, or a genuine calibration run) carried into the "
+            "tracked seed. Refusing to ship it as the factory default for "
+            "every unit.\nfound:    %r\nexpected: %r" % (actual, expected))
+    return None
+
+
 def _backup(printer_cfg_path, backup_dir, tag):
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     os.makedirs(backup_dir, exist_ok=True)
@@ -283,10 +334,21 @@ def migrate(printer_cfg_path, backup_dir):
 
 
 def main(argv):
+    if len(argv) == 3 and argv[1] == "--verify-factory-seed":
+        error = verify_factory_seed(argv[2])
+        if error:
+            sys.stderr.write("migrate_config_ownership: %s\n" % error)
+            return 1
+        print("migrate_config_ownership: %s is a valid factory seed "
+              "(no SAVE_CONFIG block, or exactly the known factory "
+              "defaults)" % argv[2])
+        return 0
     if len(argv) not in (2, 3):
         sys.stderr.write(
             "usage: migrate_config_ownership.py <printer.cfg path> "
-            "[<backup dir>]\n")
+            "[<backup dir>]\n"
+            "       migrate_config_ownership.py --verify-factory-seed "
+            "<printer.cfg path>\n")
         return 2
     printer_cfg_path = argv[1]
     backup_dir = argv[2] if len(argv) == 3 else os.path.join(

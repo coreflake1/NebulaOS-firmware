@@ -216,5 +216,66 @@ class MigrateEndToEnd(unittest.TestCase):
         self.assertEqual(autosave_fileconfig.get("extruder", "rotation_distance"), "7.530")
 
 
+class VerifyFactorySeed(unittest.TestCase):
+    """04-cross-compile-app-stack.sh's factory-seed guard (Phase 2
+    calibration-framework mission, build-bug fix found by the real pinned
+    build): the old form of this check refused ANY SAVE_CONFIG block in
+    the tracked printer.cfg seed at all, which is now a guaranteed false
+    positive against Task 1's own deliberately-shipped factory-default
+    block. verify_factory_seed() must still refuse real, non-factory
+    calibration data, just no longer refuse the legitimate seed content."""
+
+    def _write(self, text):
+        d = tempfile.mkdtemp(prefix="mco-verify-test-")
+        path = os.path.join(d, "printer.cfg")
+        with open(path, "w") as f:
+            f.write(text)
+        return path
+
+    def test_no_autosave_block_at_all_is_valid(self):
+        self.assertIsNone(mco.verify_factory_seed(self._write(VIRGIN_PRINTER_CFG)))
+
+    def test_exact_known_factory_defaults_is_valid(self):
+        self.assertIsNone(
+            mco.verify_factory_seed(self._write(ALREADY_MIGRATED_PRINTER_CFG)))
+
+    def test_real_tracked_seed_file_is_valid(self):
+        # The actual tracked seed this guard protects in production -
+        # not a synthetic fixture. If this ever fails, the tracked seed
+        # itself has drifted from FACTORY_DEFAULTS (or vice versa).
+        seed_path = os.path.join(
+            REPO_ROOT, "scripts/build/overlay/opt/printer_data/config/printer.cfg")
+        self.assertIsNone(mco.verify_factory_seed(seed_path))
+
+    def test_extra_non_factory_section_is_rejected(self):
+        error = mco.verify_factory_seed(self._write(UNRELATED_AUTOSAVE_PRINTER_CFG))
+        self.assertIsNotNone(error)
+        self.assertIn("factory-default", error)
+
+    def test_real_user_calibration_value_is_rejected(self):
+        # PARTIALLY_OWNED_PRINTER_CFG's bltouch.z_offset (-0.842) differs
+        # from the known factory default (0.000) - exactly the "developer's
+        # real device drift accidentally committed" case this guard exists
+        # to catch.
+        error = mco.verify_factory_seed(self._write(PARTIALLY_OWNED_PRINTER_CFG))
+        self.assertIsNotNone(error)
+
+    def test_corrupted_autosave_block_is_rejected(self):
+        error = mco.verify_factory_seed(self._write(CORRUPTED_PRINTER_CFG))
+        self.assertIsNotNone(error)
+
+    def test_cli_mode_exit_codes(self):
+        import subprocess
+        ok_path = self._write(ALREADY_MIGRATED_PRINTER_CFG)
+        rc = subprocess.run(
+            [sys.executable, TOOL_PATH, "--verify-factory-seed", ok_path]).returncode
+        self.assertEqual(rc, 0)
+        bad_path = self._write(PARTIALLY_OWNED_PRINTER_CFG)
+        rc = subprocess.run(
+            [sys.executable, TOOL_PATH, "--verify-factory-seed", bad_path],
+            stderr=subprocess.DEVNULL).returncode
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

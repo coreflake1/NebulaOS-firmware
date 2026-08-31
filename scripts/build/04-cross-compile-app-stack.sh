@@ -1085,8 +1085,20 @@ fi
 # and a required option left syntactically blank (confirmed live to hard-
 # fail Klipper's config parser outright, see printer.cfg's own z_offset
 # history).
-if grep -q '^#\*# <---------------------- SAVE_CONFIG' "$PRINTER_DATA_CONFIG_SRC/printer.cfg"; then
-	echo "FATAL: $PRINTER_DATA_CONFIG_SRC/printer.cfg contains a real SAVE_CONFIG block - refusing to ship development-machine calibration data as the factory default" >&2
+#
+# Phase 2 calibration-framework mission, Task 1 (config-ownership fix):
+# printer.cfg's tracked seed now deliberately ships a real, pre-baked
+# SAVE_CONFIG autosave block carrying known factory-default values (see
+# docs/NEBULAOS_CALIBRATION_CONFIG_OWNERSHIP.md and
+# migrate_config_ownership.py's own module docstring) - a blanket "any
+# SAVE_CONFIG block at all is forbidden" check (the old form of this
+# guard) would reject that legitimate content as a false positive. This
+# calls the same tool's --verify-factory-seed mode instead, which still
+# refuses a real, non-factory SAVE_CONFIG block (any section/value outside
+# the known factory defaults), just no longer refuses the seed's own
+# tracked content.
+MIGRATE_CONFIG_OWNERSHIP_TOOL="$SCRIPT_DIR/overlay/opt/nebulaos/tools/migrate_config_ownership.py"
+if ! python3 "$MIGRATE_CONFIG_OWNERSHIP_TOOL" --verify-factory-seed "$PRINTER_DATA_CONFIG_SRC/printer.cfg"; then
 	exit 1
 fi
 # A bare "key:" is only actually blank if nothing indented follows it on
