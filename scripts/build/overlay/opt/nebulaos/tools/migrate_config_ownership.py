@@ -186,21 +186,114 @@ def parse_autosave_sections(autosave_data):
 
 def render_missing_sections(existing_sections):
     """Returns the '#*# [section]\\n#*# key = value' text for every target
-    section that is not ALREADY present (by section+option, not by value -
-    presence of even one already-known option under a target section is
-    treated as "this section is already user-owned, do not touch any of
-    it", the conservative choice). Empty string if nothing is missing."""
+    section that is not ALREADY present. "Present" means the section
+    HEADER already appears in the existing autosave block, full stop - not
+    "does it already have any of the specific options this tool would
+    write". Section existence is not the same as options truthiness.
+
+    Real device bug (Phase 2 contact-safety mission, found live on a
+    qualification device, 2026-08-31): an earlier version of this function
+    checked `any(opt in existing_opts for opt in target_opts)`, which is
+    False for a section that is present but has ZERO options yet (a real,
+    observed on-disk state - Klipper itself can write a bare "#*#
+    [bltouch]" header with no options under it in some partial-save
+    states). That made this tool treat an already-existing-but-empty
+    [bltouch] section as "missing" and append a SECOND "#*# [bltouch]"
+    header with the factory z_offset - a duplicate section in the autosave
+    block. Klipper's own SAVE_CONFIG writer reconciles duplicate sections
+    on its own next real write (confirmed live), so this was not silently
+    destructive, but it is a real defect this tool must not produce: this
+    migration's whole job is to be a conservative, idempotent, byte-
+    conservative patch, not something that relies on Klipper's own writer
+    to clean up after it.
+
+    The fix: skip a target section the moment its HEADER is found in
+    existing_sections, regardless of whether it has any options recorded
+    yet. This is still fully conservative (never touches a section that
+    already exists in any form, empty or not) and still leaves a
+    genuinely-empty existing section's real default value to be filled in
+    by Klipper's own next real SAVE_CONFIG - exactly as before this fix,
+    just without ever emitting a second header for it.
+    """
     blocks = []
     for section in TARGET_SECTIONS:
-        existing_opts = existing_sections.get(section.lower(), {})
+        if section.lower() in existing_sections:
+            continue  # section header already present - hands off, even if empty
         target_opts = FACTORY_DEFAULTS[section]
-        if any(opt in existing_opts for opt in target_opts):
-            continue  # already has real data for this section - hands off
         lines = ["#*# [%s]" % section]
         for opt, val in target_opts.items():
             lines.append("#*# %s = %s" % (opt, val))
         blocks.append("\n".join(lines))
     return "\n#*#\n".join(blocks)
+
+
+CALIBRATION_INCLUDE_LINE = "[include /etc/nebulaos/klipper/calibration.cfg]"
+
+# The four [include /etc/nebulaos/klipper/*.cfg] lines a device already on
+# the SPLIT config layout (see git history: 7b4a2ec "split immutable
+# Klipper machine/PRTouch/platform configuration into /etc/nebulaos/
+# klipper") carries, in this exact order, in every generation since that
+# split - CALIBRATION_INCLUDE_LINE itself was added later (see git history
+# around the Phase 2 calibration-framework mission) and is the one line a
+# device provisioned in that gap is missing. Anchored on whichever of
+# these appears LAST in the file, so the new line lands with its siblings
+# regardless of which of them a given generation happens to have.
+_KLIPPER_INCLUDE_LINES = (
+    "[include /etc/nebulaos/klipper/platform.cfg]",
+    "[include /etc/nebulaos/klipper/machine.cfg]",
+    "[include /etc/nebulaos/klipper/prtouch.cfg]",
+    "[include /etc/nebulaos/klipper/z_offset_probe.cfg]",
+)
+
+
+def ensure_calibration_include(regular_data):
+    """Phase 2 contact-safety mission (§19): the tracked printer.cfg SEED
+    has always included calibration.cfg since the commit that introduced
+    it, so a genuinely fresh device gets this for free. A device
+    provisioned by an image BETWEEN the machine.cfg split (7b4a2ec) and
+    that later commit has none of these 4 sections/options - sorry, has
+    the split-config includes but not this one - and never gets it
+    automatically from an image update alone (printer.cfg is user-owned,
+    persistent storage; an image update only changes the read-only
+    /etc/nebulaos/klipper/ tree it points at).
+
+    machine.cfg is NOT a safe anchor for this fix (verified against git
+    history, not assumed): machine.cfg itself did not exist, and was not
+    included by ANY printer.cfg, before 7b4a2ec - routing calibration.cfg's
+    activation through "machine.cfg includes calibration.cfg" would never
+    reach a device from before that split at all. This function is
+    therefore the "smallest idempotent migration" fallback the mission
+    calls for instead: a narrow, idempotent text check directly on
+    printer.cfg's own regular (non-autosave) content.
+
+    Returns `regular_data` unchanged if CALIBRATION_INCLUDE_LINE is
+    already present anywhere in it (true no-op, including for a
+    genuinely fresh seed). Otherwise inserts it as a new line immediately
+    after the LAST already-present line from _KLIPPER_INCLUDE_LINES,
+    preserving every other line's exact position - and returns
+    `regular_data` UNCHANGED (not appended anywhere) if NONE of those
+    anchor lines are present, since that means this device is still on
+    the pre-split monolithic printer.cfg shape entirely, which is
+    S04nebulaos-migrate's separate migrate_printer_cfg() shell function's
+    job to convert first (its own replacement template already carries
+    this include) - guessing at an insertion point in an unrecognized,
+    pre-split file would risk breaking include ordering that migration
+    explicitly promises to preserve elsewhere.
+    """
+    if any(CALIBRATION_INCLUDE_LINE == line.strip()
+           for line in regular_data.split("\n")):
+        return regular_data
+
+    lines = regular_data.split("\n")
+    anchor_idx = None
+    for i, line in enumerate(lines):
+        if line.strip() in _KLIPPER_INCLUDE_LINES:
+            anchor_idx = i  # keep scanning - we want the LAST match
+    if anchor_idx is None:
+        return regular_data
+
+    lines.insert(anchor_idx + 1, CALIBRATION_INCLUDE_LINE)
+    return "\n".join(lines)
 
 
 def verify_factory_seed(printer_cfg_path):
@@ -288,10 +381,21 @@ def migrate(printer_cfg_path, backup_dir):
 
     existing_sections = parse_autosave_sections(autosave_data) if autosave_data.strip() else {}
     missing_block = render_missing_sections(existing_sections)
-    if not missing_block:
+
+    # §19: independent of the autosave-ownership gap above - a device can
+    # have every autosave section already, or none, and STILL be missing
+    # the plain [include .../calibration.cfg] line in its regular config
+    # text (see ensure_calibration_include()'s own docstring for exactly
+    # which devices this affects and why machine.cfg is not a safe anchor
+    # for this fix). Computed here, before the "nothing to do" check,
+    # since either gap alone must trigger a migration pass.
+    updated_regular_data = ensure_calibration_include(regular_data)
+    include_added = updated_regular_data != regular_data
+
+    if not missing_block and not include_added:
         print("migrate_config_ownership: nothing to do - bltouch/extruder/"
               "heater_bed calibration ownership already present or already "
-              "user-owned")
+              "user-owned, and the calibration.cfg include is present")
         return 0
 
     backup = _backup(printer_cfg_path, backup_dir,
@@ -299,37 +403,55 @@ def migrate(printer_cfg_path, backup_dir):
 
     if has_header:
         # A real autosave block already exists (e.g. from a prior
-        # LOAD_CELL_CALIBRATE) - append the missing sections onto the SAME
+        # LOAD_CELL_CALIBRATE) - append any missing sections onto the SAME
         # block, preserving its EXACT existing on-disk bytes untouched
         # (never re-derived from the parsed/unprefixed representation, to
         # avoid any risk of subtly reformatting real user data). Klipper's
         # own writer separates sections with a bare "#*#" line; match that
         # so the result is indistinguishable from something Klipper itself
-        # wrote.
-        new_data = (regular_data.rstrip("\n") + "\n" + AUTOSAVE_HEADER
-                    + raw_autosave_slice(data).rstrip("\n")
-                    + "\n#*#\n" + missing_block + "\n")
+        # wrote. missing_block may legitimately be empty here (only the
+        # include was missing) - no "#*#\n" separator is added in that case.
+        new_data = updated_regular_data.rstrip("\n") + "\n" + AUTOSAVE_HEADER \
+            + raw_autosave_slice(data).rstrip("\n")
+        if missing_block:
+            new_data += "\n#*#\n" + missing_block
+        new_data += "\n"
     else:
-        new_data = (data.rstrip("\n") + "\n" + AUTOSAVE_HEADER + "\n"
-                    + missing_block + "\n")
+        new_data = updated_regular_data.rstrip("\n") + "\n"
+        if missing_block:
+            new_data += AUTOSAVE_HEADER + "\n" + missing_block + "\n"
 
     # Re-validate the result with the SAME parser before committing -
     # refuse rather than write something even this tool cannot read back.
-    _, reparsed_autosave = find_autosave_data(new_data)
-    if not reparsed_autosave.strip():
+    if missing_block:
+        _, reparsed_autosave = find_autosave_data(new_data)
+        if not reparsed_autosave.strip():
+            sys.stderr.write(
+                "migrate_config_ownership: INTERNAL ERROR - the autosave "
+                "block this tool just built does not parse cleanly. "
+                "Refusing to write; original left untouched (backup at "
+                "%s)\n" % backup)
+            return 1
+    if include_added and CALIBRATION_INCLUDE_LINE not in new_data:
         sys.stderr.write(
-            "migrate_config_ownership: INTERNAL ERROR - the autosave block "
-            "this tool just built does not parse cleanly. Refusing to "
-            "write; original left untouched (backup at %s)\n" % backup)
+            "migrate_config_ownership: INTERNAL ERROR - the calibration.cfg "
+            "include this tool just added is missing from its own output. "
+            "Refusing to write; original left untouched (backup at %s)\n"
+            % backup)
         return 1
 
     tmp = printer_cfg_path + ".config-ownership-migrate-tmp"
     with open(tmp, "w") as f:
         f.write(new_data)
     os.rename(tmp, printer_cfg_path)
-    print("migrate_config_ownership: added missing calibration-ownership "
-          "section(s) to printer.cfg's SAVE_CONFIG block (original backed "
-          "up at %s)" % backup)
+    actions = []
+    if missing_block:
+        actions.append("added missing calibration-ownership section(s) to "
+                        "printer.cfg's SAVE_CONFIG block")
+    if include_added:
+        actions.append("added the missing calibration.cfg include")
+    print("migrate_config_ownership: %s (original backed up at %s)"
+          % ("; ".join(actions), backup))
     return 0
 
 

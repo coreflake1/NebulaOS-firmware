@@ -63,6 +63,24 @@ class FakePrinterForConfigfile:
 VIRGIN_PRINTER_CFG = """[include /etc/nebulaos/klipper/platform.cfg]
 [include /etc/nebulaos/klipper/machine.cfg]
 [include /etc/nebulaos/klipper/prtouch.cfg]
+[include /etc/nebulaos/klipper/z_offset_probe.cfg]
+[include /etc/nebulaos/klipper/calibration.cfg]
+
+# Your own additional includes/macros go below this line.
+"""
+
+# §19 regression fixture: the REAL gap population - a device already on
+# the split-config layout (has platform/machine/prtouch/z_offset_probe
+# includes, from an image built after 7b4a2ec) but provisioned by an
+# image that predates the commit that added the calibration.cfg include
+# to the tracked seed. machine.cfg's own include IS present here (proving
+# machine.cfg is not a safe anchor to fix this through - see
+# ensure_calibration_include()'s own docstring for why routing through it
+# would still miss an EVEN OLDER, pre-split device instead).
+MISSING_CALIBRATION_INCLUDE_PRINTER_CFG = """[include /etc/nebulaos/klipper/platform.cfg]
+[include /etc/nebulaos/klipper/machine.cfg]
+[include /etc/nebulaos/klipper/prtouch.cfg]
+[include /etc/nebulaos/klipper/z_offset_probe.cfg]
 
 # Your own additional includes/macros go below this line.
 """
@@ -90,6 +108,22 @@ CORRUPTED_PRINTER_CFG = (
     VIRGIN_PRINTER_CFG + mco.AUTOSAVE_HEADER +
     "#*# [bltouch]\n"
     "not a hash-star-hash line at all\n"
+)
+
+# Regression fixture (Phase 2 contact-safety mission, §18): the REAL,
+# captured on-device state that exposed the duplicate-[bltouch]-section
+# bug - a [bltouch] header present in the autosave block with ZERO
+# options under it (a real state Klipper's own writer can leave behind,
+# not a synthetic corner case). An earlier version of render_missing_
+# sections() treated "no options recorded yet" the same as "section
+# absent" and appended a second "#*# [bltouch]" header.
+EMPTY_BLTOUCH_PRINTER_CFG = (
+    VIRGIN_PRINTER_CFG + mco.AUTOSAVE_HEADER +
+    "#*# [bltouch]\n"
+    "#*#\n"
+    "#*# [nebulaos_z_offset_probe]\n"
+    "#*# counts_per_gram = 85.72084\n"
+    "#*# reference_tare_counts = -249399\n"
 )
 
 
@@ -182,6 +216,131 @@ class MigrateEndToEnd(unittest.TestCase):
         # ...but extruder/heater_bed, which had nothing, still get seeded.
         self.assertIn("[extruder]", result)
         self.assertIn("[heater_bed]", result)
+
+    def test_empty_bltouch_section_gets_no_duplicate_header(self):
+        # §18 regression: the real captured device state - [bltouch]
+        # present with zero options. Must NOT produce a second "[bltouch]"
+        # header.
+        rc, result, _ = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        self.assertEqual(rc, 0)
+        self.assertEqual(result.count("[bltouch]"), 1)
+
+    def test_empty_bltouch_section_left_exactly_as_is(self):
+        # The existing (empty) section is left untouched - Klipper's own
+        # next real SAVE_CONFIG fills it in, this tool does not fabricate
+        # a default value over an existing header.
+        rc, result, _ = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        self.assertNotIn("z_offset = 0.000", result)
+
+    def test_empty_bltouch_section_other_targets_still_seeded(self):
+        # extruder/heater_bed are genuinely absent in this fixture and
+        # must still be added, exactly as for any other partial-ownership
+        # case.
+        rc, result, _ = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        self.assertIn("[extruder]", result)
+        self.assertIn("[heater_bed]", result)
+        self.assertIn("rotation_distance = 7.530", result)
+
+    def test_empty_bltouch_section_unrelated_config_untouched(self):
+        rc, result, _ = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        self.assertIn("[nebulaos_z_offset_probe]", result)
+        self.assertIn("counts_per_gram = 85.72084", result)
+        self.assertIn("reference_tare_counts = -249399", result)
+
+    def test_empty_bltouch_section_backup_created(self):
+        rc, result, backup_dir = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        self.assertTrue(os.path.isdir(backup_dir) and os.listdir(backup_dir))
+        with open(os.path.join(backup_dir, os.listdir(backup_dir)[0])) as f:
+            backup_content = f.read()
+        self.assertEqual(backup_content, EMPTY_BLTOUCH_PRINTER_CFG)
+
+    def test_empty_bltouch_migration_is_idempotent_byte_identical_second_run(self):
+        d = tempfile.mkdtemp(prefix="mco-test-")
+        path = os.path.join(d, "printer.cfg")
+        with open(path, "w") as f:
+            f.write(EMPTY_BLTOUCH_PRINTER_CFG)
+        backup_dir = os.path.join(d, "backups")
+        rc1 = mco.migrate(path, backup_dir)
+        with open(path) as f:
+            after_first = f.read()
+        rc2 = mco.migrate(path, backup_dir)
+        with open(path) as f:
+            after_second = f.read()
+        self.assertEqual(rc1, 0)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(after_first, after_second)
+        self.assertEqual(after_second.count("[bltouch]"), 1)
+
+    def test_empty_bltouch_section_save_config_remains_legal(self):
+        if not _configfile:
+            self.skipTest("no pinned Klipper checkout found (set KLIPPER_SRC)")
+        rc, result, _ = self._run(EMPTY_BLTOUCH_PRINTER_CFG)
+        text_no_includes = "\n".join(
+            line for line in result.split("\n")
+            if not line.strip().startswith("[include"))
+        cfgrdr = _configfile.ConfigFileReader()
+        fake_autosave = _configfile.ConfigAutoSave.__new__(_configfile.ConfigAutoSave)
+        fake_autosave.printer = FakePrinterForConfigfile()
+        regular_data, autosave_data = fake_autosave._find_autosave_data(text_no_includes)
+        # A duplicate section header would make Klipper's own real parser
+        # (or this migration's own re-parse guard) choke or silently keep
+        # only the last one - proving a clean single-value parse here is
+        # the strongest possible confirmation the duplicate bug is gone.
+        regular_fileconfig = cfgrdr.build_fileconfig(regular_data, "printer.cfg")
+        for section, opts in mco.FACTORY_DEFAULTS.items():
+            for opt in opts:
+                self.assertFalse(regular_fileconfig.has_option(section, opt))
+        autosave_fileconfig = cfgrdr.build_fileconfig(autosave_data, "printer.cfg")
+        self.assertEqual(autosave_fileconfig.get("extruder", "rotation_distance"),
+                          "7.530")
+
+    def test_missing_calibration_include_is_added_after_the_last_klipper_include(self):
+        rc, result, _ = self._run(MISSING_CALIBRATION_INCLUDE_PRINTER_CFG)
+        self.assertEqual(rc, 0)
+        lines = [l for l in result.split("\n") if l.strip()]
+        idx_z_offset = lines.index("[include /etc/nebulaos/klipper/z_offset_probe.cfg]")
+        idx_calibration = lines.index(mco.CALIBRATION_INCLUDE_LINE)
+        self.assertEqual(idx_calibration, idx_z_offset + 1)
+        self.assertEqual(result.count(mco.CALIBRATION_INCLUDE_LINE), 1)
+
+    def test_missing_calibration_include_alone_still_triggers_a_backup_and_write(self):
+        # No autosave-ownership gap at all in this fixture (no autosave
+        # block whatsoever) - only the include is missing. Must still be
+        # treated as real work, not a no-op.
+        rc, result, backup_dir = self._run(MISSING_CALIBRATION_INCLUDE_PRINTER_CFG)
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isdir(backup_dir) and os.listdir(backup_dir))
+        self.assertIn(mco.CALIBRATION_INCLUDE_LINE, result)
+
+    def test_already_present_calibration_include_is_a_true_noop_for_that_gap(self):
+        # VIRGIN_PRINTER_CFG already carries the include (matches the real
+        # current tracked seed) - ensure_calibration_include() must not
+        # touch it, verified directly rather than only through migrate().
+        self.assertEqual(
+            mco.ensure_calibration_include(VIRGIN_PRINTER_CFG), VIRGIN_PRINTER_CFG)
+
+    def test_ensure_calibration_include_is_idempotent(self):
+        once = mco.ensure_calibration_include(MISSING_CALIBRATION_INCLUDE_PRINTER_CFG)
+        twice = mco.ensure_calibration_include(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(once.count(mco.CALIBRATION_INCLUDE_LINE), 1)
+
+    def test_ensure_calibration_include_leaves_pre_split_config_untouched(self):
+        # A device with NONE of the split-config anchor includes (still
+        # fully monolithic) is migrate_printer_cfg()'s job, not this
+        # function's - it must not guess an insertion point here.
+        pre_split = "[nebulaos_compat]\nsome_option: 1\n"
+        self.assertEqual(mco.ensure_calibration_include(pre_split), pre_split)
+
+    def test_missing_calibration_include_combines_with_ownership_migration(self):
+        # A fixture missing BOTH the include AND the autosave ownership
+        # sections gets both fixed in the same pass.
+        both_missing = MISSING_CALIBRATION_INCLUDE_PRINTER_CFG
+        rc, result, _ = self._run(both_missing)
+        self.assertEqual(rc, 0)
+        self.assertIn(mco.CALIBRATION_INCLUDE_LINE, result)
+        for section in mco.TARGET_SECTIONS:
+            self.assertIn("[%s]" % section, result)
 
     def test_corrupted_file_is_refused_and_backed_up(self):
         rc, result, backup_dir = self._run(CORRUPTED_PRINTER_CFG)
