@@ -7,9 +7,16 @@ ways back, roughly in order of how bad things have to get before you need them.
 
 **This section describes behavior that has been intentionally removed.** The old automatic stock
 fallback (S00revert-safety writing "ota:kernel" on every boot, S99confirm-good flipping it forward
-only on success) was removed in Phase 1.8B because booting the stock Creality slot causes it to
-auto-flash the MCU with old Creality firmware, destroying the qualified native GD32F303 MCU build.
-The risk of silently bricking the MCU outweighs the convenience of automatic rollback.
+only on success) was removed in Phase 1.8B because a genuine power cycle while booted into the
+stock Creality slot lets it auto-flash the MCU with old Creality firmware, destroying the qualified
+native GD32F303 MCU build. The risk of silently bricking the MCU outweighs the convenience of
+automatic rollback. (Hardware evidence gathered after this decision - 2026-08-28 and 2026-08-31,
+see `_project/missions/phase1.8b-candidate-002-rebuild-hardware-qualification-report.md` and
+`_evidence/phase2-axis-twist-qualification-20260831-203913/stock-baseline/` - shows a plain soft
+`reboot` into stock does NOT actually trigger the auto-flash on its own, since stock's flasher can't
+reset the still-running MCU without a real power cycle; this doesn't change the decision here, since
+S00revert-safety's own fallback path was never verified to guarantee no power cycle occurs, but it
+is worth knowing before anyone considers re-enabling automatic fallback in the future.)
 
 **Current behavior:** if a NebulaOS boot fails (Klipper doesn't start, Moonraker is unreachable,
 etc.), the device stays on NebulaOS. The boot health check (S99confirm-good) still runs and logs

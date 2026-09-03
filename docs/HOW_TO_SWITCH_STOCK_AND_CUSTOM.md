@@ -73,13 +73,25 @@ that flips a switch, then reboot the printer. Two minutes, no tools, no opening 
 That's the whole thing. If you ever want to switch back, repeat the same steps with the other
 command.
 
+**Switching to stock while native MCU firmware is installed:** a plain `reboot` does **not** reset
+the separate GD32F303 motor/heater-controller chip - only a real, physical power cycle (unplug and
+replug, or the power switch) does. Stock's own automatic MCU flasher (`S13mcu_update`) can only
+catch that chip during a genuine cold power-on; against a chip that's still running NebulaOS's
+native application (as it will be right after a plain `reboot`), its handshake simply fails
+(`"identify fail"` in `/tmp/mcu_update.log`) and it does nothing - confirmed live on hardware twice
+(2026-08-28 and 2026-08-31). So a plain `reboot` into stock is safe with respect to the MCU. A
+**hard power cycle** right after switching to stock is a different story - see the warning just
+below.
+
 ### What happens if custom firmware fails to start?
 
 **Important change (Phase 1.8B):** custom firmware no longer automatically falls back to stock on
-failure. The automatic stock fallback was removed because booting into stock Creality firmware
-causes it to auto-flash the printer's MCU (motor/heater controller) with old firmware, which
-destroys the qualified MCU build and can leave the printer in a worse state than the original
-problem.
+failure. The automatic stock fallback was removed because a genuine power cycle while booted into
+stock Creality firmware lets it auto-flash the printer's MCU (motor/heater controller) with old
+firmware, which destroys the qualified MCU build and can leave the printer in a worse state than
+the original problem. (A plain `reboot` into stock does not trigger this - see the note above - but
+the automatic fallback path could not guarantee a power cycle wouldn't happen in between, so it was
+removed rather than relying on that.)
 
 If a custom boot fails (Klipper doesn't start, screen is unresponsive, etc.), the printer stays on
 custom firmware. You'll need to recover manually — usually by SSHing in and either fixing the
