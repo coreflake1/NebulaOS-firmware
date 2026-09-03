@@ -12,8 +12,8 @@ same backend.
 | Command | Notes |
 |---|---|
 | `NEBULAOS_Z_OFFSET_CALIBRATE [METHOD=LOAD_CELL\|MANUAL] [X=.. Y=..]` | `METHOD=LOAD_CELL` (default): a fresh automatic BLTouch probe paired with a validated HX711 nozzle-contact reading at the same point (`extras/nebulaos_probe_pair.py`), applied live to the registered probe's own `z_offset` and staged via `configfile.set()`. `METHOD=MANUAL`: starts stock `PROBE_CALIBRATE` (continue with `TESTZ`/`ACCEPT`/`ABORT`) - no duplicate paper-test logic. |
-| `NEBULAOS_PID_CALIBRATE_BED [TARGET=..]` | Thin wrapper over stock `PID_CALIBRATE HEATER=heater_bed`, default target 65C. |
-| `NEBULAOS_PID_CALIBRATE_HOTEND [TARGET=..]` | Thin wrapper over stock `PID_CALIBRATE HEATER=extruder`, default target 230C. |
+| `PID_CALIBRATE_BED [BED_TEMP=..]` | SimpleAF-vendored (`simpleaf/useful_macros.cfg`), not NebulaOS code: stock `PID_CALIBRATE HEATER=heater_bed`, default `BED_TEMP=65`, refuses while printing. `NEBULAOS_PID_CALIBRATE_BED` (a separate, NebulaOS-authored, functionally-duplicate wrapper with no such guard) was removed 2026-09-04 in favor of this one - see `NEBULAOS_CALIBRATION_CONFIG_OWNERSHIP.md`. |
+| `PID_CALIBRATE_HOTEND [HOTEND_TEMP=..]` | SimpleAF-vendored, same file: stock `PID_CALIBRATE HEATER=extruder`, default `HOTEND_TEMP=230`, refuses while printing. `NEBULAOS_PID_CALIBRATE_HOTEND` removed 2026-09-04, same reason. |
 | `NEBULAOS_BED_MESH_CALIBRATE [PROFILE=..]` | Stock `BED_MESH_CALIBRATE` + `BED_MESH_PROFILE SAVE`, default profile name `nebulaos_calibration`. |
 | `NEBULAOS_CALIBRATION_STATUS` | Reports the coordinator's current Z-offset calibration state; also available via `printer.objects.query`/`subscribe` on `nebulaos_calibration` (`get_status()`). |
 | `NEBULAOS_NOZZLE_CLEAN` | Canonical name for the existing native load-cell nozzle-wipe sequence (registered by `[z_compensate]`, same handler as `CRTENSE_NOZZLE_CLEAR`). |
@@ -36,7 +36,15 @@ same backend.
 - `NEBULAOS_E_STEPS_CALIBRATE` (guided workflow) and its GuppyScreen
   compatibility macros (`CALIBRATE_ESTEPS` etc.).
 - `NEBULAOS_CALIBRATION_CONTINUE` / `NEBULAOS_CALIBRATION_CANCEL`.
-- Rewiring `Z_OFFSET_CALIBRATION`/`PID_CALIBRATE_BED`/`PID_CALIBRATE_HOTEND`
-  to become thin aliases of the new canonical commands (they currently
-  remain their own, pre-existing, separately-tested implementations).
+- Rewiring `Z_OFFSET_CALIBRATION` to become a thin alias of the new
+  canonical command (currently its own, pre-existing, separately-tested
+  implementation). The former `NEBULAOS_PID_CALIBRATE_BED`/`_HOTEND` were
+  removed entirely 2026-09-04, not rewired - see the table above.
+- NOTE (2026-09-04): this whole document predates several since-completed
+  slices (`NEBULAOS_AUTO_CALIBRATE`, `NEBULAOS_INPUT_SHAPER_CALIBRATE`,
+  `NEBULAOS_ESTEPS_CALIBRATE`, and the removal of automatic Axis Twist -
+  `NEBULAOS_AXIS_TWIST_CALIBRATE` does not exist, by final product
+  decision, not as unfinished work) and needs a full refresh, not just
+  this one line - flagged, not done here, to avoid an unrelated rewrite
+  inside a narrowly-scoped macro-rename change.
 - Legacy/belt-pluck command removal.

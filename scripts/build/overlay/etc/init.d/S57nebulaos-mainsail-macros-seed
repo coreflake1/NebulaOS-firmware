@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+# NebulaOS Phase 2 macro-cleanup/Mainsail-grouping mission (2026-09-04).
+# Runs /usr/libexec/nebulaos-seed-mainsail-macros in the background, same
+# never-block-boot convention as S57nebulaos-camera-seed - the script
+# itself already retries with a bounded backoff while waiting for
+# Moonraker to answer its own database API, so backgrounding here is
+# what keeps that wait from ever delaying the rest of boot.
+#
+# Shares the S57 number with S57nebulaos-camera-seed on purpose (both
+# need to run after S56moonraker, neither actually depends on strict
+# relative ordering between the two of them since each polls Moonraker's
+# own real API rather than assuming any particular timing) - the "-c"
+# vs "-m" alphabetical tail keeps them both deterministically ordered
+# without needing a free integer slot (S58/S59 are already taken).
+
+if [ "$1" = "start" ]; then
+	/usr/bin/python3 /usr/libexec/nebulaos-seed-mainsail-macros >> /usr/data/nebulaos/maintenance/logs/mainsail-macros-seed.log 2>&1 &
+fi
+exit 0

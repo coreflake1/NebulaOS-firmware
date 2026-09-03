@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+#
+# NebulaOS Phase 2 macro-cleanup/Mainsail-grouping mission (2026-09-04).
+# Seeds NebulaOS's own default Mainsail macro groups (Moonraker database
+# namespace "mainsail", key "macros.macrogroups.<id>") the first time
+# Moonraker is confirmed reachable - same never-block-boot,
+# never-trust-HTTP-2xx-alone, verify-after-write, atomic-marker
+# conventions as nebulaos-seed-camera (see that script's own header for
+# the fuller rationale; this one is deliberately structured identically).
+#
+# Why database keys, not Mainsail's own ".../default.json" fresh-install
+# mechanism: that mechanism is real (Mainsail's own `gui/initDb` fetches
+# GET /server/files/config/<X>/default.json on a genuinely fresh
+# install), but (a) it only ever runs once, on an install where the
+# `mainsail` namespace does not exist AT ALL yet - it cannot add a new
+# NebulaOS group to an ALREADY-INITIALIZED existing install, which is
+# exactly the safe-migration case this mission also requires, and
+# (b) the exact config-subdirectory path segment Mainsail's own minified
+# bundle uses for <X> could not be confirmed with confidence from static
+# analysis of the vendored dist (see the Phase 2 overnight research
+# report). Posting directly to Moonraker's own, already-documented
+# `/server/database/item` API - the same mechanism Mainsail's own code
+# uses internally for every group edit a user makes by hand - works
+# identically for a genuinely fresh install and an existing one, with no
+# unconfirmed path dependency, and is exactly the same pattern this
+# project already uses for the default webcam (nebulaos-seed-camera).
+#
+# Scope deliberately does NOT include dashboard-layout seeding
+# (dashboard.desktopLayout1/mobileLayout/etc.) - those are large, shared
+# arrays holding EVERY enabled panel a user may have already customized
+# (position, other panels, drag-and-drop order), and the full object
+# shape Mainsail expects for a new panel entry beyond `{name:
+# "macrogroup_<id>"}` could not be confirmed with confidence either. Per
+# this mission's own explicit instruction ("if the pinned Mainsail schema
+# makes safe migration impractical, seed only fresh installs and report
+# the limitation rather than overwriting user settings"), this script
+# seeds macro GROUPS ONLY (safe on both fresh and existing installs, one
+# independent DB key per group, additive-only) and leaves dashboard
+# layout untouched - the new groups are still fully visible and usable
+# from Mainsail's own dedicated Macros page regardless of dashboard
+# panel placement, they just are not auto-pinned to a dashboard panel.
+#
+# Testable in full offline: see tests/nebulaos-seed-mainsail-macros-tests.py.
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+
+MOONRAKER_BASE = os.environ.get("NEBULAOS_MOONRAKER_BASE", "http://127.0.0.1:7125")
+NEBULAOS_ROOT = os.environ.get("NEBULAOS_ROOT", "/usr/data/nebulaos")
+MARKER_PATH = os.environ.get(
+    "NEBULAOS_MAINSAIL_MACRO_MARKER",
+    os.path.join(NEBULAOS_ROOT, "system", "default-mainsail-macros-seeded.json"),
+)
+
+RETRY_ATTEMPTS = int(os.environ.get("NEBULAOS_MAINSAIL_SEED_RETRIES", "30"))
+RETRY_DELAY_S = float(os.environ.get("NEBULAOS_MAINSAIL_SEED_RETRY_DELAY", "2"))
+
+# NebulaOS-owned macro groups (mission Phase 2, macro cleanup + Mainsail
+# grouping, 2026-09-04). Stable IDs (the DB key suffix) are owned by
+# NebulaOS and must never change once shipped - a later firmware version
+# adding/editing a group's own CONTENTS re-seeds nothing for a group that
+# already exists (never overwrite a user-modified group), but a brand
+# new stable ID from a later version will still seed correctly into an
+# existing install on next boot, which is exactly the "add only when
+# missing" behavior this mission asks for.
+#
+# Macro `name` values below are real button targets - RUN_* names are
+# the thin dashboard-button wrappers in calibration.cfg (Mainsail's own
+# macro-group UI only lists real [gcode_macro] objects, not arbitrary
+# Python-registered gcode commands - see that file's own header comment
+# for why a wrapper, and why RUN_* rather than colliding with the real
+# backend command name). AXIS_TWIST_X/Y and PID_CALIBRATE_BED/HOTEND are
+# real, already-existing macro names (the latter vendored from
+# SimpleAF), not wrappers.
+def _macro(pos, name, show_in_standby=True, show_in_printing=False, show_in_pause=False):
+    return {
+        "pos": pos,
+        "name": name,
+        "color": "",
+        "showInStandby": show_in_standby,
+        "showInPrinting": show_in_printing,
+        "showInPause": show_in_pause,
+    }
+
+
+DEFAULT_GROUPS = {
+    "nebulaos_calibration": {
+        "name": "Calibration",
+        "macros": [
+            _macro(0, "RUN_AUTO_CALIBRATE"),
+            _macro(1, "RUN_AUTO_CALIBRATE_CANCEL"),
+            _macro(2, "RUN_Z_OFFSET_CALIBRATE"),
+            _macro(3, "AXIS_TWIST_X"),
+            _macro(4, "AXIS_TWIST_Y"),
+            _macro(5, "PID_CALIBRATE_BED"),
+            _macro(6, "PID_CALIBRATE_HOTEND"),
+        ],
+    },
+    "nebulaos_input_shaper": {
+        "name": "Input Shaper",
+        "macros": [
+            _macro(0, "RUN_INPUT_SHAPER_START"),
+            _macro(1, "RUN_INPUT_SHAPER_CONTINUE"),
+        ],
+    },
+    "nebulaos_extruder": {
+        "name": "Extruder",
+        "macros": [
+            _macro(0, "RUN_ESTEPS_START"),
+            _macro(1, "RUN_ESTEPS_CONTINUE"),
+            _macro(2, "LOAD_FILAMENT", show_in_printing=True),
+            _macro(3, "UNLOAD_FILAMENT", show_in_printing=True),
+        ],
+    },
+    "nebulaos_maintenance": {
+        "name": "Maintenance",
+        "macros": [
+            _macro(0, "RUN_NOZZLE_CLEAN"),
+        ],
+    },
+}
+
+
+class TransportError(Exception):
+    """Raised for any failure to reach Moonraker or parse its response -
+    callers must always treat this as "unknown," never "safe to
+    proceed." Deliberately does NOT distinguish "key not found" as a
+    TransportError - see get_group(), which treats a 404 as a normal,
+    expected "not seeded yet" result."""
+
+
+def real_http_get(path: str) -> str:
+    with urllib.request.urlopen(MOONRAKER_BASE + path, timeout=5) as resp:
+        return resp.read().decode("utf-8")
+
+
+def real_http_get_status(path: str):
+    """Like real_http_get, but returns (status_or_None, body) instead of
+    raising on a 404 - callers need to tell "key genuinely absent" apart
+    from "transport failure," which a bare exception can't do cleanly
+    across the fake/real boundary this module tests against."""
+    try:
+        with urllib.request.urlopen(MOONRAKER_BASE + path, timeout=5) as resp:
+            return resp.status, resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return 404, None
+        raise
+
+
+def real_http_post_json(path: str, payload: dict) -> str:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        MOONRAKER_BASE + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=8) as resp:
+        return resp.read().decode("utf-8")
+
+
+def wait_for_moonraker(get_status, log, retry_attempts=RETRY_ATTEMPTS,
+                        retry_delay=RETRY_DELAY_S, sleep=time.sleep) -> bool:
+    """Polls a cheap, always-present database key (this project's own
+    calibration-journal path is arbitrary; any namespace works, we only
+    need "does Moonraker answer database requests at all") - bounded
+    backoff, never raises."""
+    last_err = None
+    for attempt in range(1, retry_attempts + 1):
+        try:
+            get_status("/server/database/list")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+            log(f"attempt {attempt}/{retry_attempts}: Moonraker database API "
+                f"unavailable ({exc}) - retrying")
+            if attempt < retry_attempts:
+                sleep(retry_delay)
+    log(f"Moonraker database API never became available after "
+        f"{retry_attempts} attempts ({last_err})")
+    return False
+
+
+def get_group(get_status, group_id: str):
+    """Returns the existing group's stored value (a dict), or None if
+    the key genuinely does not exist yet. Raises TransportError for any
+    other failure - a caller must never treat an ambiguous failure as
+    "safe to create," since that could silently clobber something a
+    real transport error merely hid from view."""
+    path = f"/server/database/item?namespace=mainsail&key=macros.macrogroups.{group_id}"
+    try:
+        status, body = get_status(path)
+    except Exception as exc:  # noqa: BLE001
+        raise TransportError(str(exc)) from exc
+    if status == 404:
+        return None
+    if body is None:
+        raise TransportError("no response")
+    try:
+        parsed = json.loads(body)
+    except Exception as exc:  # noqa: BLE001
+        raise TransportError(f"malformed JSON: {exc}") from exc
+    return parsed.get("result", {}).get("value")
+
+
+def read_marker(path: str):
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def write_marker_atomic(path: str, data: dict) -> None:
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    tmp = path + ".partial"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def run(
+    get_status=real_http_get_status,
+    post=real_http_post_json,
+    marker_path: str | None = None,
+    log=print,
+    groups: dict | None = None,
+    retry_attempts: int = RETRY_ATTEMPTS,
+    retry_delay: float = RETRY_DELAY_S,
+    sleep=time.sleep,
+) -> int:
+    """Returns 0 on success (including "nothing new to do") or 1 on a
+    safe, logged, non-fatal failure. Never raises. Idempotent by
+    construction: every group is independently checked via its own
+    stable DB key before any write, and an existing key (whether
+    NebulaOS-seeded before or user-edited) is NEVER overwritten - a
+    second run makes no changes once every group already exists."""
+    marker_path = marker_path or MARKER_PATH
+    groups = groups if groups is not None else DEFAULT_GROUPS
+
+    if not wait_for_moonraker(get_status, log, retry_attempts, retry_delay, sleep):
+        return 1
+
+    created = []
+    already_present = []
+    failed = []
+
+    for group_id, definition in groups.items():
+        try:
+            existing = get_group(get_status, group_id)
+        except TransportError as exc:
+            log(f"could not check group {group_id!r} ({exc}) - skipping this "
+                "group this run, not writing marker for it")
+            failed.append(group_id)
+            continue
+
+        if existing is not None:
+            log(f"group {group_id!r} already present in the mainsail namespace "
+                "- leaving it untouched")
+            already_present.append(group_id)
+            continue
+
+        log(f"group {group_id!r} not present - seeding default "
+            f"({definition['name']!r}, {len(definition['macros'])} macros)")
+        try:
+            post("/server/database/item", {
+                "namespace": "mainsail",
+                "key": f"macros.macrogroups.{group_id}",
+                "value": definition,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log(f"seeding group {group_id!r} failed ({exc}) - not marking it seeded")
+            failed.append(group_id)
+            continue
+
+        try:
+            verify = get_group(get_status, group_id)
+        except TransportError as exc:
+            log(f"could not re-verify group {group_id!r} after seeding ({exc}) - "
+                "not marking it seeded (creation may or may not have actually "
+                "succeeded; never trust HTTP status alone)")
+            failed.append(group_id)
+            continue
+
+        if verify != definition:
+            log(f"group {group_id!r} seeding POST reported success but "
+                "verification found different content afterward - not "
+                "marking it seeded")
+            failed.append(group_id)
+            continue
+
+        log(f"group {group_id!r} created and verified")
+        created.append(group_id)
+
+    write_marker_atomic(marker_path, {
+        "checked_at": _now(),
+        "created": created,
+        "already_present": already_present,
+        "failed": failed,
+    })
+    log(f"marker written ({marker_path}): created={created} "
+        f"already_present={already_present} failed={failed}")
+
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(run())

@@ -15,7 +15,10 @@ literal factory-default values in the immutable, image-owned `machine.cfg`.
 This made it architecturally impossible for any of the following to ever
 persist a result via `SAVE_CONFIG`:
 
-- stock `PID_CALIBRATE` / `NEBULAOS_PID_CALIBRATE_BED` / `_HOTEND`
+- stock `PID_CALIBRATE` / SimpleAF's `PID_CALIBRATE_BED` / `PID_CALIBRATE_HOTEND`
+  (the former `NEBULAOS_PID_CALIBRATE_BED`/`_HOTEND` were removed 2026-09-04
+  as pure duplication of these already-vendored macros - see
+  `NEBULAOS_CALIBRATION_PUBLIC_API.md`)
 - stock `PROBE_CALIBRATE` / `NEBULAOS_Z_OFFSET_CALIBRATE METHOD=MANUAL`
 - `NEBULAOS_E_STEPS_CALIBRATE`
 
