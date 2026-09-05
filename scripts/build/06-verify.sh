@@ -1008,7 +1008,7 @@ AWKPROG2
 	fi
 	# Phase 2 RC architecture checks against the built config closure.
 	fan_count=$(grep -c -i -E "^\[[[:space:]]*fan[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
-	output_pin_fan0=$(grep -c -i -E "^\[[[:space:]]*output_pin[[:space:]]+fan0[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	output_pin_fan0=$(grep -c -i -E "^\[[[:space:]]*output_pin[[:space:]]+fan0[[:space:]]*\]" /tmp/printerdata-check/closure.txt || true)
 	if [ "$fan_count" = "1" ] && [ "$output_pin_fan0" = "0" ]; then
 		echo "OK   upstream [fan] section present, no [output_pin fan0]"
 	else
@@ -1020,8 +1020,8 @@ AWKPROG2
 	else
 		echo "MISS Input Shaper envelope 80/50 not found in config closure"
 	fi
-	custom_m109=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m109[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
-	custom_m190=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m190[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	custom_m109=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m109[[:space:]]*\]" /tmp/printerdata-check/closure.txt || true)
+	custom_m190=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m190[[:space:]]*\]" /tmp/printerdata-check/closure.txt || true)
 	if [ "$custom_m109" = "0" ] && [ "$custom_m190" = "0" ]; then
 		echo "OK   no custom M109/M190 gcode_macro overrides"
 	else
