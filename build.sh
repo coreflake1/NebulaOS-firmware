@@ -160,6 +160,9 @@ set -- "$ENGINE" run --rm \
 if [ -n "${NEBULAOS_REQUIRE_CLEAN_TREE:-}" ]; then
 	set -- "$@" -e "NEBULAOS_REQUIRE_CLEAN_TREE=$NEBULAOS_REQUIRE_CLEAN_TREE"
 fi
+if [ "${NEBULAOS_CANDIDATE_BUILD:-}" = "1" ]; then
+	set -- "$@" -e "NEBULAOS_CANDIDATE_BUILD=1"
+fi
 if [ -n "$HOST_GIT_COMMON_DIR" ]; then
 	set -- "$@" -v "$HOST_GIT_COMMON_DIR:$HOST_GIT_COMMON_DIR:ro"
 fi

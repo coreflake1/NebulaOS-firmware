@@ -55,7 +55,11 @@ sh "$SCRIPT_DIR/05-final-build.sh"
 sh "$SCRIPT_DIR/06-verify.sh"
 
 echo "=== build-qualified-baseline: post-build assertions (resolved artifacts) ==="
-sh "$SCRIPT_DIR/assert-baseline-config.sh" post-build
+if [ "${NEBULAOS_CANDIDATE_BUILD:-}" = "1" ]; then
+	sh "$SCRIPT_DIR/assert-baseline-config.sh" candidate-post-build
+else
+	sh "$SCRIPT_DIR/assert-baseline-config.sh" post-build
+fi
 
 echo "=== build-qualified-baseline: complete and composition-verified ==="
 echo "Package it with: sh scripts/build/package-deployment.sh"
