@@ -1,0 +1,177 @@
+NebulaOS RC2 overnight closure — ADXL345 / host-MCU investigation
+Generated: 2026-09-06 (offline, printer powered off — no hardware access this run)
+Scope: mission items §22-24
+
+SYMPTOM (RC1, 2026-09-05)
+----------------------------
+"ADXL345 config present, SPI communication non-functional (6 queries, 0
+responses)" — _evidence/phase2-final-hardware-acceptance-20260905-230404/
+final-report.md:36,71 (RC1's own report labels this "pre-existing, not a
+regression" — that label is itself contradicted by Finding 1 below, since
+this exact lineage was independently confirmed working multiple times in
+the two weeks immediately before RC1).
+
+TIMELINE (LAST_KNOWN_GOOD / FIRST_KNOWN_BAD)
+------------------------------------------------
+- 2026-08-29, before the polarity fix: real failure,
+  "Unable to open spi device" (MCU shuts down) — a DIFFERENT failure
+  signature than RC1's. (_evidence/qualification-logs/phase1.9a-candidate-daaf887-2026-08-29/klippy-log-tail.txt:126-148)
+- Phase 1.9A SPI polarity fix (~95f770a): live hardware fix (sck/mosi/miso
+  GPIO_ACTIVE_HIGH, cs GPIO_ACTIVE_LOW), live-verified ACCELEROMETER_QUERY
+  returning real motion data.
+  (_project/missions/phase1.9a-spi-polarity-fix-investigation.md:76-81)
+- 2026-08-31: ACCELEROMETER_QUERY returns real values (x=3064.38,
+  y=444.12, z=8438.35).
+  (_evidence/phase2-axis-twist-qualification-20260831-203913/custom-boot/adxl-query.json:1)
+- 2026-09-02: live SHAPER_CALIBRATE referenced as part of Input Shaper work.
+  (_evidence/phase2-live-full-stack-closure-20260902-180602/REPORT.md)
+- 2026-09-03 (LAST_KNOWN_GOOD): "Host MCU + ADXL345: reconfirmed live
+  (ACCELEROMETER_QUERY -> real x/y/z values)"; full SHAPER_CALIBRATE X and Y
+  both QUALIFIED.
+  (_evidence/phase2-mostly-autonomous-closure-20260903-173300/REPORT.md:83,117-142)
+- 2026-09-05, RC1 build (firmware 5bc61af7a9 / extensions 7f627672c9):
+  06-verify.sh independently confirms, from the ACTUAL DECOMPILED
+  PRODUCTION DTB and resolved kernel .config (not source alone):
+  CONFIG_SPI_GPIO=y built-in, spi_gpio_adxl345 node + spi2 alias present.
+  (_evidence/phase2-release-candidate-20260905-172624/build3-output.txt:13002,13020,13034,13230,13234)
+- 2026-09-05/06 (FIRST_KNOWN_BAD): hardware acceptance test, "6 queries, 0
+  responses". No raw klippy.log or gcode-store capture of this specific
+  failure exists anywhere in evidence — asserted only in prose, unlike
+  every other test result in the same report.
+
+FINDING 1 — SOURCE IS BYTE-IDENTICAL BETWEEN LAST-KNOWN-GOOD AND RC1
+(PROVEN — this is the central finding of tonight's investigation)
+------------------------------------------------------------------------
+The live [mcu rpi] / [adxl345] config in the current worktree
+(scripts/build/overlay/etc/nebulaos/klipper/machine.cfg:53-60):
+
+    [mcu rpi]
+    serial: /tmp/klipper_host_mcu
+    [adxl345]
+    cs_pin: rpi:None
+    spi_speed: 2000000
+    spi_bus: spidev2.0
+    axes_map: z,y,x
+
+is IDENTICAL to the values recorded as working in
+phase1.9-host-mcu-accelerometer-plr-analysis.md:39-43 and the polarity-fix
+mission's own live-verified config. `git show 8889ef0 -- machine.cfg` (the
+one large config refactor between last-known-good and RC1) touches only
+[resonance_tester]'s accel_per_hz/max_freq tuning and unrelated
+macro/fan sections — cs_pin/spi_speed/spi_bus/axes_map and the [mcu rpi]
+block are untouched context lines.
+
+Kernel DTS/Kconfig: the accelerometer-eeprom-bus-enable-variant.sh applied
+at build time is unchanged in intent from the polarity-fix mission's
+committed fix, and RC1's OWN build logs (not just source) prove it was
+actually applied to the real artifact — CONFIG_SPI_GPIO=y and the
+spi_gpio_adxl345 DTB node were read from the real decompiled production
+DTB and resolved kernel .config, not the layered .dts source. Kernel pin is
+identical between the pre-polarity-fix daaf887 candidate and RC1.
+
+Init script (S54nebulaos-host-mcu) starts klipper_mcu -r -I
+/tmp/klipper_host_mcu, ordered before S55klipper, matching the Phase 1.9A
+design, and RC1's own platform-identity table shows MCU 'rpi' connected and
+healthy with Klippy reaching `ready` — a materially different, HEALTHIER
+starting point than daaf887's outright shutdown-on-connect failure.
+
+CONCLUSION: nothing in source control — config values, kernel Kconfig/DTS,
+init-script ordering — differs between 2026-09-03 (hardware-qualified,
+working) and RC1 (0 responses). The regression, whatever it is, does not
+exist as a source diff.
+
+FINDING 2 — A REAL EVIDENCE GAP, NOT JUST AN ANALYSIS GAP
+--------------------------------------------------------------
+The RC1 "0 responses" claim has no supporting raw artifact anywhere —
+no klippy.log tail, no gcode response dump, nothing — unlike every other
+test result in the same hardware-acceptance report, each of which has a
+matching .txt/.json capture. This specific diagnostic capture was simply
+never taken. It is not possible from what is on disk to fully rule out an
+operator/procedural issue (querying before klipper_mcu settled, wrong
+chip name typed, etc.) versus a genuine hardware/electrical fault.
+
+RANKED HYPOTHESES
+--------------------
+1. PLAUSIBLE (best-supported): a hardware/electrical/runtime bit-bang SPI
+   timing fault, or an intermittent electrical issue, not visible in any
+   static check. 06-verify.sh's checks only confirm the DT node, Kconfig
+   option, and [adxl345] section EXIST in the built artifact — none of
+   them exercise an actual SPI transaction, which requires live hardware.
+   The RC1 symptom (klipper_mcu running, mcu rpi connected, Klippy ready,
+   but 6/6 queries return nothing) is a THIRD, previously unseen failure
+   signature — distinct from both daaf887's "unable to open spi device"
+   (bus never opened) and the original pre-polarity-fix "wrong DEVID" bug
+   (bus opened, corrupted data). Zero responses with an otherwise-healthy
+   MCU is consistent with a CS/clock line not actually toggling, or a
+   timing issue, that source review alone cannot rule in or out.
+2. UNKNOWN (an evidence gap, not a hypothesis about the machine): see
+   Finding 2 above — impossible to fully exclude a procedural/operator
+   issue given what was actually captured.
+3. DISPROVEN: wrong cs_pin/spi_bus/software_spi config — byte-identical to
+   known-good in source, cross-checked against the polarity-fix mission's
+   own live-verified values (Finding 1).
+4. DISPROVEN: kernel DTS pinmux/Kconfig regression — verified present and
+   correct in RC1's OWN decompiled production DTB and resolved .config,
+   not merely in source (Finding 1).
+5. DISPROVEN: host MCU binary not running / init-script ordering or
+   permissions failure — RC1's own platform table shows mcu rpi connected
+   and Klippy reaching ready; a dead/absent klipper_mcu would reproduce
+   daaf887's shutdown-on-connect failure, which did not occur here.
+6. PLAUSIBLE but unconfirmed and weaker fit: a service-startup race between
+   kernel device-node creation (mdev/udev for /dev/spidev2.0) and
+   klipper_mcu's SPI open. S54 is deliberately placed very early in boot
+   specifically to avoid this, and this failure mode would be expected to
+   reproduce daaf887's "unable to open spi device" shutdown, not a silent
+   zero-response state with a healthy MCU — so it fits the observed
+   symptom less well than hypothesis 1.
+7. UNKNOWN: wrong /dev node. /dev/spidev2.0 exists with plausible
+   permissions in a pre-flash capture, but that capture predates the RC
+   flash and does not prove the node existed correctly at the moment of
+   the failed test.
+
+POLICY APPLIED (mission §24: if multiple hardware-only hypotheses remain,
+make no speculative pin changes; prepare ranked morning experiments)
+------------------------------------------------------------------------
+No config/pin/kernel change was made tonight. Config is proven correct and
+unchanged from the last confirmed-working hardware state (Finding 1) —
+there is nothing in source to fix, and changing a proven-correct value on
+the strength of one under-documented failure report would be exactly the
+kind of speculative, unvalidated change this mission explicitly forbids.
+
+SOURCE-BACKED MORNING EXPERIMENT (added to
+docs/qualification/rc2-morning-hardware-acceptance.md)
+------------------------------------------------------------------------------
+1. Boot RC2. Run ACCELEROMETER_QUERY. This time, capture the FULL
+   klippy.log (not a tail) spanning the entire query, plus the exact
+   Mainsail/console gcode response text, and save both to the evidence
+   directory — the single missing artifact from RC1's test.
+2. If it fails again identically: immediately re-run it 2-3 more times in
+   direct succession (rules out a one-off timing/startup race per
+   hypothesis 6 without needing any code change).
+3. If it fails consistently: physically re-seat/inspect the ADXL345
+   module's SPI wiring (cheapest real-hardware check for hypothesis 1) and
+   re-test once.
+4. Only if all of the above still fail: this becomes a genuine, better-
+   evidenced hardware investigation for a dedicated follow-up session —
+   config/kernel/build are not the cause (Finding 1), so further
+   source-side changes should not be attempted speculatively.
+
+SUMMARY FOR THE FINAL REPORT
+--------------------------------
+ADXL_LAST_KNOWN_GOOD = 2026-09-03
+  (_evidence/phase2-mostly-autonomous-closure-20260903-173300/REPORT.md:83,117-142)
+ADXL_FIRST_KNOWN_BAD = RC1 hardware acceptance, 2026-09-05/06
+  (_evidence/phase2-final-hardware-acceptance-20260905-230404/final-report.md:36,71
+   — note: this report itself incorrectly labels the gap "pre-existing,
+   not a regression"; the timeline above shows it was working multiple
+   times in the two weeks immediately prior)
+ADXL_ROOT_CAUSE = unresolved (no source-level regression exists; most
+  plausible explanation is a hardware/electrical/runtime issue not
+  visible to static build verification, compounded by a real evidence gap
+  — the failing test was never logged in enough detail to diagnose)
+ADXL_SOURCE_FIX = BLOCKED (nothing in source, config, or build to fix —
+  config/kernel/init-script are proven correct and unchanged from the last
+  confirmed-working state; see Finding 1)
+ACCELEROMETER_QUERY_EXPECTED_AFTER_RC2 = UNKNOWN (source unchanged from a
+  proven-working state, but the RC1 failure is not explained by anything
+  source-side, so a repeat cannot be ruled out either)

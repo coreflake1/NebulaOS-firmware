@@ -1,0 +1,159 @@
+NebulaOS RC2 overnight closure — MCU Stock-handoff investigation
+Generated: 2026-09-06 (offline, printer powered off — no hardware access this run)
+Scope: mission items §17-21
+
+SYMPTOM (as tested on RC1, 2026-09-05)
+----------------------------------------
+Historical belief: NebulaOS native MCU -> switch to Stock -> hard power
+cycle -> Stock's S13mcu_update catches the Creality bootloader window and
+reflashes the Stock MCU application -> Stock Klipper connects.
+On RC1: neither a soft reboot NOR a genuine hard power cycle triggered
+Stock's S13mcu_update to reflash the MCU
+(_evidence/phase2-final-hardware-acceptance-20260905-230404/final-report.md,
+Track B) — the NebulaOS native application (candidate-001) remained
+resident, and Stock Klipper got a protocol mismatch.
+
+FINDING 1 — NO CODE REGRESSION EXISTS (PROVEN)
+-------------------------------------------------
+Full history of every MCU-lifecycle file
+(mcu_lifecycle.py, mcu_restore.py, mcu_restart.py,
+mcu_application_identify.py, mcu_known_identities.py) was walked across all
+reachable commits. They have been BYTE-IDENTICAL since candidate-002's fix
+(85814b6, 2026-08-28) straight through the current phase2-calibration-framework
+HEAD used to build RC1. Confirmed independently the same day as RC1 by
+_evidence/phase2-final-overnight-closure-20260905-012316/mcu-autoflash-investigation.txt:
+`git diff 7297aeb..03a4e55 -- .../mcu_*` is empty.
+
+There is also no dedicated "switch-to-stock" script anywhere in this
+project. Switching is a manual OS-level sequence (stop klippy/moonraker,
+write the OTA marker, reboot/power-cycle) that has NEVER touched
+/dev/ttyS1 or the GD32 MCU at all, historically or currently — confirmed by
+reading both the current sequence and the Phase 1.8B-era history.
+
+CONCLUSION: whatever is different between "2026-08-28: hard power cycle
+recovered to stock" and "2026-09-05: neither soft nor hard power cycle
+recovers to stock" is NOT a source-code regression. There is nothing to
+revert or restore in NebulaOS's own code.
+
+FINDING 2 — THE 2026-08-28 "SUCCESS" WAS LIKELY AN ARTIFACT, NOT A GENERAL
+MECHANISM (PLAUSIBLE, BEST-SUPPORTED EXPLANATION)
+------------------------------------------------------------------------------
+_project/missions/phase1.8b-candidate-002-rebuild-hardware-qualification-report.md
+§4 documents EXACTLY what happened on 2026-08-28: switching to Stock never
+touched the MCU by itself. The MCU only entered a bootloader-catchable
+state because a PRIOR, UNRELATED manual `creality_flash.py` CLI attempt
+had timed out mid-`get_version()`, leaving the chip stranded/unresponsive
+at both bootloader and application level (§4.4/§4.5 of that report). Only
+THEN did a hard power cycle let S13mcu_update catch a clean cold-boot
+window, because the chip had no valid application to jump to and had
+nothing better to do than wait for the bootloader handshake.
+
+RC1's native candidate-001 application, by contrast, is healthy and running
+(confirmed by RC1's own platform-identity table:
+"MCU 'rpi': ... connected and healthy", and separately the main GD32 MCU
+identifies and Klippy reaches `ready`). A healthy application's own
+bootloader-handshake window on reset (soft OR hard) is plausibly too short
+for S13mcu_update's cold-boot probe to catch — regardless of power-cycle
+method — which would fully explain why BOTH soft and hard power cycle
+failed identically on RC1, without requiring any NebulaOS code change to
+explain it.
+
+This is the same underlying explanation
+_evidence/phase2-final-overnight-closure-20260905-012316/mcu-autoflash-investigation.txt
+already reached independently for the soft-reboot case
+("REGRESSION_EXISTS=NO"); tonight's finding extends it to also explain why
+the hard-power-cycle re-test on 2026-09-05 could not reproduce the
+2026-08-28 result either.
+
+FINDING 3 — CREALITY_BOOTLOADER_PRESERVED = YES
+--------------------------------------------------
+See docs/mcu-flash-layout.md (written tonight) for the full source proof:
+the native application's own linker layout targets the historically-known
+0x08003000 post-bootloader offset (confirmed selected, not just available,
+in configs/ender3-v3-ke.defconfig), and creality_flash.py's wire protocol to
+the vendor bootloader has no address field at all — an out-of-range write
+is structurally impossible regardless of image content or a failed/
+interrupted transfer.
+
+WHAT REMAINS UNKNOWN
+-----------------------
+Whether the Creality bootloader's handshake window is genuinely fixed/short
+by hardware design (in which case reliable Stock recovery via a cold boot
+alone was never a repeatable general mechanism to begin with, and the
+2026-08-28 result was a one-off), versus something in candidate-001's own
+startup path narrowing that window further than genuine Stock firmware
+would (e.g. `STM32F103GD_DISABLE_SWD` auto-enabling for this target per the
+same patch, ~line 277 — its effect, if any, on bootloader-handshake timing
+has never been measured). Nothing in any available evidence directly times
+the actual window duration under either firmware.
+
+POLICY APPLIED (per mission §21: do not guess, do not implement speculative
+MCU handoff behavior without high-confidence source/history evidence)
+------------------------------------------------------------------------
+No source change was made to the MCU stock-handoff path tonight. There is
+no proven "old working sequence" to restore (Finding 1 + the switch-to-
+stock code has never touched the MCU at all, in any version), and the
+remaining hypothesis (bootloader-window timing) is a hardware-timing
+question that cannot be resolved from source or safely guessed at by
+changing GD32 firmware config blind, with the printer off and unavailable
+to validate any such change tonight.
+
+RANKED HYPOTHESES
+--------------------
+- PROVEN: MCU lifecycle guard/restore code is unchanged since candidate-002
+  (2026-08-28) through RC1 (2026-09-05) — no code regression.
+- PROVEN: neither soft nor hard power cycle (as tested 2026-09-05) triggers
+  Stock's S13mcu_update while native candidate-001 is healthy and running.
+- PROVEN: the Creality bootloader region is architecturally preserved and
+  cannot be written by this project's own tooling (docs/mcu-flash-layout.md).
+- PLAUSIBLE (best current explanation): the 2026-08-28 "success" was an
+  artifact of the MCU already being stranded by an unrelated manual mishap,
+  not a repeatable general mechanism — a healthy application's own
+  bootloader handshake window is too narrow for S13mcu_update's cold-boot
+  probe, independent of power-cycle method.
+- UNKNOWN: whether the bootloader window is fixed by hardware design or
+  narrowed further by candidate-001's own boot configuration
+  (STM32F103GD_DISABLE_SWD in particular, unconfirmed either way).
+
+SOURCE-BACKED MORNING EXPERIMENT (added to
+docs/qualification/rc2-morning-hardware-acceptance.md), ranked by how much
+each would actually tell us
+------------------------------------------------------------------------------
+1. With native candidate-001 healthy and running (today's normal state):
+   switch to Stock, hard power cycle, and this time capture a scope/logic-
+   analyzer trace (or at minimum a serial capture with tight timestamps) of
+   the boot sequence on the GD32's UART, specifically timing how long the
+   Creality bootloader's handshake window stays open before it jumps to the
+   application. This directly measures FINDING 2's central hypothesis
+   instead of just re-observing pass/fail.
+2. As a control: deliberately put the MCU into the SAME stranded state the
+   2026-08-28 candidate-002 report describes (an interrupted
+   creality_flash.py CLI call, using the guard-style code, never the bare
+   CLI per that report's own operational learning
+   BARE_CREALITY_FLASH_CLI_UNSAFE_FOR_MANUAL_USE), then hard power cycle,
+   and confirm S13mcu_update DOES catch it this time — if it does, Finding 2
+   is confirmed directly rather than merely plausible.
+3. Only if 1 and 2 together show a real, measurable, narrow window: as a
+   separate, deliberate, individually-tested follow-up (never blind
+   tonight) — try building a native candidate with
+   `STM32F103GD_DISABLE_SWD` turned off, and re-run experiment 1 to see if
+   the window changes. Do not ship this as a config default without a
+   dedicated qualification pass; it is speculative until measured.
+
+SUMMARY FOR THE FINAL REPORT
+--------------------------------
+STOCK_FLASHES_ITS_OWN_MCU = YES
+HISTORICAL_STOCK_HANDOFF_REQUIRED_HARD_POWER = YES
+LAST_KNOWN_GOOD_STOCK_HANDOFF = candidate-002, 2026-08-28
+  (_project/missions/phase1.8b-candidate-002-rebuild-hardware-qualification-report.md
+  §4 — but see Finding 2: likely an artifact of an unrelated stranded-MCU
+  state, not a repeatable mechanism)
+FIRST_KNOWN_BAD_STOCK_HANDOFF = RC1, 2026-09-05
+  (_evidence/phase2-final-hardware-acceptance-20260905-230404/final-report.md,
+  Track B — both soft and hard power cycle tested, neither triggered reflash)
+CURRENT_STOCK_HANDOFF_ROOT_CAUSE = unresolved (no code regression found;
+  best-supported explanation is a bootloader-window-timing characteristic
+  of a healthy native application, not a fixable defect — see Finding 2)
+STOCK_HANDOFF_SOURCE_FIX = READY_FOR_HW_TEST (no speculative fix
+  implemented; three ranked, source-backed experiments prepared above)
+CREALITY_BOOTLOADER_PRESERVED = YES
