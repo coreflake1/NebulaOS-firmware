@@ -1,10 +1,14 @@
 #!/bin/sh
 #
 # Offline, repeatable tests for the camera quality presets mission
-# (2026-08-04): S50webcam's LOW/MED/HIGH marker logic, set_camera_quality.py,
-# and camera-quality.cfg's macro wiring. Does not and cannot exercise the
-# real camera/V4L2 device - that needs live hardware (see this repo's other
-# missions for that pattern).
+# (2026-08-04, updated Phase 2 2026-09-05): S50webcam's LOW/MED/HIGH marker
+# logic, nebulaos-set-camera-quality script, and camera.cfg's macro wiring.
+# Does not and cannot exercise the real camera/V4L2 device - that needs live
+# hardware (see this repo's other missions for that pattern).
+#
+# Phase 2: camera-quality.cfg and GuppyScreen/scripts/set_camera_quality.py
+# were replaced by /etc/nebulaos/klipper/camera.cfg and
+# /usr/libexec/nebulaos-set-camera-quality (upstream-first config refactor).
 #
 # Usage: sh tests/camera-quality-presets-tests.sh
 
@@ -13,8 +17,8 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 S50WEBCAM="$REPO_ROOT/scripts/build/overlay/etc/init.d/S50webcam"
-SET_QUALITY_PY="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/GuppyScreen/scripts/set_camera_quality.py"
-CAMERA_CFG="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/camera-quality.cfg"
+SET_QUALITY_SCRIPT="$REPO_ROOT/scripts/build/overlay/usr/libexec/nebulaos-set-camera-quality"
+CAMERA_CFG="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/camera.cfg"
 PRINTER_CFG="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/printer.cfg"
 
 PASS=0
@@ -101,49 +105,61 @@ else
 	fail "marker=bogus: expected '1920x1080 30', got '$result'"
 fi
 
-# --- Test 6: set_camera_quality.py is present, executable, and rejects an
-# invalid preset name (source-inspection - can't run it for real here since
-# it shells out to mkdir/S50webcam restart against real device paths). ---
-if [ -x "$SET_QUALITY_PY" ]; then
+# --- Test 6: nebulaos-set-camera-quality is present, executable, and
+# restricts input to LOW/MED/HIGH (source-inspection). ---
+if [ -x "$SET_QUALITY_SCRIPT" ]; then
 	pass
 else
-	fail "$SET_QUALITY_PY missing or not executable"
+	fail "$SET_QUALITY_SCRIPT missing or not executable"
 fi
 
-if grep -q 'VALID = ("LOW", "MED", "HIGH")' "$SET_QUALITY_PY"; then
+if grep -q 'VALID = ("LOW", "MED", "HIGH")' "$SET_QUALITY_SCRIPT" \
+   || grep -qE 'LOW\|MED\|HIGH' "$SET_QUALITY_SCRIPT"; then
 	pass
 else
-	fail "$SET_QUALITY_PY does not restrict input to LOW/MED/HIGH"
+	fail "$SET_QUALITY_SCRIPT does not restrict input to LOW/MED/HIGH"
 fi
 
-# --- Test 7: camera-quality.cfg defines exactly the three expected
-# parameterless macros, each routed through the same shell command, and the
-# shell command's script path matches the runtime (/opt/printer_data/...)
-# path convention used by every other GuppyScreen script in this config -
-# Phase 1.5 persistent-namespace mission (2026-08) moved every such
-# hardcoded path off the removed /usr/data/printer_data top-level alias. ---
+# --- Test 7: camera.cfg defines exactly the three expected parameterless
+# macros, each routed through the same shell command, and the shell
+# command's script path points at the NebulaOS-owned /usr/libexec/ script
+# (Phase 2 upstream-first refactor, 2026-09). ---
 for quality in LOW MED HIGH; do
 	if grep -q "^\[gcode_macro SET_CAMERA_QUALITY_${quality}\]$" "$CAMERA_CFG" \
 		&& grep -A3 "^\[gcode_macro SET_CAMERA_QUALITY_${quality}\]$" "$CAMERA_CFG" \
 			| grep -q "RUN_SHELL_COMMAND CMD=set_camera_quality PARAMS=${quality}$"; then
 		pass
 	else
-		fail "camera-quality.cfg missing a well-formed SET_CAMERA_QUALITY_${quality} macro"
+		fail "camera.cfg missing a well-formed SET_CAMERA_QUALITY_${quality} macro"
 	fi
 done
 
-if grep -q '^command: /opt/printer_data/config/GuppyScreen/scripts/set_camera_quality.py$' "$CAMERA_CFG"; then
+if grep -q '^command: /usr/libexec/nebulaos-set-camera-quality$' "$CAMERA_CFG"; then
 	pass
 else
-	fail "camera-quality.cfg's gcode_shell_command does not point at the runtime script path"
+	fail "camera.cfg's gcode_shell_command does not point at /usr/libexec/nebulaos-set-camera-quality"
 fi
 
-# --- Test 8: printer.cfg actually includes camera-quality.cfg - a macro
-# file nobody [include]s is invisible to both Mainsail and GuppyScreen. ---
-if grep -q '^\[include camera-quality.cfg\]$' "$PRINTER_CFG"; then
+# --- Test 8: printer.cfg includes camera.cfg via absolute path (Phase 2:
+# immutable slot-owned config under /etc/nebulaos/klipper/). ---
+if grep -q '^\[include /etc/nebulaos/klipper/camera.cfg\]$' "$PRINTER_CFG"; then
 	pass
 else
-	fail "printer.cfg does not [include camera-quality.cfg]"
+	fail "printer.cfg does not [include /etc/nebulaos/klipper/camera.cfg]"
+fi
+
+# --- Test 9: old GuppyScreen camera files are absent (regression guard). ---
+OLD_SET_QUALITY="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/GuppyScreen/scripts/set_camera_quality.py"
+OLD_CAMERA_CFG="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/camera-quality.cfg"
+if [ ! -f "$OLD_SET_QUALITY" ]; then
+	pass
+else
+	fail "old GuppyScreen set_camera_quality.py still exists (should be removed in Phase 2)"
+fi
+if [ ! -f "$OLD_CAMERA_CFG" ]; then
+	pass
+else
+	fail "old camera-quality.cfg still exists (should be removed in Phase 2)"
 fi
 
 echo ""

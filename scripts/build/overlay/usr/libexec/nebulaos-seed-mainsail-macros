@@ -61,23 +61,18 @@ MARKER_PATH = os.environ.get(
 RETRY_ATTEMPTS = int(os.environ.get("NEBULAOS_MAINSAIL_SEED_RETRIES", "30"))
 RETRY_DELAY_S = float(os.environ.get("NEBULAOS_MAINSAIL_SEED_RETRY_DELAY", "2"))
 
-# NebulaOS-owned macro groups (mission Phase 2, macro cleanup + Mainsail
-# grouping, 2026-09-04). Stable IDs (the DB key suffix) are owned by
-# NebulaOS and must never change once shipped - a later firmware version
-# adding/editing a group's own CONTENTS re-seeds nothing for a group that
-# already exists (never overwrite a user-modified group), but a brand
-# new stable ID from a later version will still seed correctly into an
-# existing install on next boot, which is exactly the "add only when
-# missing" behavior this mission asks for.
+# NebulaOS-owned macro groups (Phase 2 upstream-first config refactor,
+# 2026-09-05). Stable IDs (the DB key suffix) are owned by NebulaOS and
+# must never change once shipped — a later firmware version adding/editing
+# a group's own CONTENTS re-seeds nothing for a group that already exists
+# (never overwrite a user-modified group), but a brand new stable ID from
+# a later version will still seed correctly into an existing install on
+# next boot, which is exactly the "add only when missing" behavior.
 #
-# Macro `name` values below are real button targets - RUN_* names are
-# the thin dashboard-button wrappers in calibration.cfg (Mainsail's own
-# macro-group UI only lists real [gcode_macro] objects, not arbitrary
-# Python-registered gcode commands - see that file's own header comment
-# for why a wrapper, and why RUN_* rather than colliding with the real
-# backend command name). AXIS_TWIST_X/Y and PID_CALIBRATE_BED/HOTEND are
-# real, already-existing macro names (the latter vendored from
-# SimpleAF), not wrappers.
+# Macro `name` values below are real [gcode_macro] names. NEBULAOS_*
+# macros are public wrappers calling private _NEBULAOS_* Python backends
+# (see calibration.cfg). Upstream UI adapters (AXIS_TWIST_X/Y, PID_BED/
+# PID_HOTEND) expose upstream commands as one-click Mainsail buttons.
 def _macro(pos, name, show_in_standby=True, show_in_printing=False, show_in_pause=False):
     return {
         "pos": pos,
@@ -93,35 +88,55 @@ DEFAULT_GROUPS = {
     "nebulaos_calibration": {
         "name": "Calibration",
         "macros": [
-            _macro(0, "RUN_AUTO_CALIBRATE"),
-            _macro(1, "RUN_AUTO_CALIBRATE_CANCEL"),
-            _macro(2, "RUN_Z_OFFSET_CALIBRATE"),
-            _macro(3, "AXIS_TWIST_X"),
-            _macro(4, "AXIS_TWIST_Y"),
-            _macro(5, "PID_CALIBRATE_BED"),
-            _macro(6, "PID_CALIBRATE_HOTEND"),
+            _macro(0, "NEBULAOS_AUTO_CALIBRATE"),
+            _macro(1, "NEBULAOS_Z_OFFSET_CALIBRATE"),
+            _macro(2, "AXIS_TWIST_X"),
+            _macro(3, "AXIS_TWIST_Y"),
+            _macro(4, "PID_BED"),
+            _macro(5, "PID_HOTEND"),
+            _macro(6, "NEBULAOS_NOZZLE_CLEAN"),
         ],
     },
     "nebulaos_input_shaper": {
         "name": "Input Shaper",
         "macros": [
-            _macro(0, "RUN_INPUT_SHAPER_START"),
-            _macro(1, "RUN_INPUT_SHAPER_CONTINUE"),
+            _macro(0, "NEBULAOS_INPUT_SHAPER_CALIBRATE"),
+            _macro(1, "NEBULAOS_CALIBRATION_CONTINUE"),
+            _macro(2, "NEBULAOS_CALIBRATION_CANCEL"),
         ],
     },
     "nebulaos_extruder": {
         "name": "Extruder",
         "macros": [
-            _macro(0, "RUN_ESTEPS_START"),
-            _macro(1, "RUN_ESTEPS_CONTINUE"),
-            _macro(2, "LOAD_FILAMENT", show_in_printing=True),
-            _macro(3, "UNLOAD_FILAMENT", show_in_printing=True),
+            _macro(0, "NEBULAOS_ESTEPS_CALIBRATE"),
+            _macro(1, "LOAD_FILAMENT"),
+            _macro(2, "UNLOAD_FILAMENT"),
+            _macro(3, "M600", show_in_printing=True),
+            _macro(4, "PURGE_MORE", show_in_pause=True),
+            _macro(5, "RESUME_FILAMENT_CHANGE", show_in_pause=True),
+            _macro(6, "CANCEL_FILAMENT_CHANGE", show_in_pause=True),
+        ],
+    },
+    "nebulaos_camera": {
+        "name": "Camera",
+        "macros": [
+            _macro(0, "SET_CAMERA_QUALITY_LOW"),
+            _macro(1, "SET_CAMERA_QUALITY_MED"),
+            _macro(2, "SET_CAMERA_QUALITY_HIGH"),
         ],
     },
     "nebulaos_maintenance": {
         "name": "Maintenance",
         "macros": [
-            _macro(0, "RUN_NOZZLE_CLEAN"),
+            _macro(0, "BEEP"),
+            _macro(1, "PLAY_TUNE"),
+        ],
+    },
+    "nebulaos_recovery": {
+        "name": "Recovery",
+        "macros": [
+            _macro(0, "NEBULAOS_RESUME_POWER_LOSS"),
+            _macro(1, "NEBULAOS_CLEAR_POWER_LOSS_RECOVERY"),
         ],
     },
 }

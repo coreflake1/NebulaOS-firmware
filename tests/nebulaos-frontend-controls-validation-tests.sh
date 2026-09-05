@@ -272,13 +272,9 @@ fi
 
 REAL_SRC="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config"
 if [ -f "$REAL_SRC/frontend-controls.cfg" ]; then
-	if grep -q -i -E "openke|prtouch_v2|z_compensate" "$REAL_SRC/frontend-controls.cfg"; then
-		fail "real frontend-controls.cfg unexpectedly references a Creality/OpenKE-specific module"
-	else
-		pass "real frontend-controls.cfg references no Creality/OpenKE-specific module (Level 4 correctly not used)"
-	fi
+	fail "frontend-controls.cfg still exists in the tracked overlay (removed in Phase 2 upstream-first refactor)"
 else
-	fail "real frontend-controls.cfg is missing from the tracked overlay source"
+	pass "frontend-controls.cfg correctly absent from tracked overlay (Phase 2: all macros in /etc/nebulaos/klipper/)"
 fi
 
 # --- Scenario 12: the real, tracked overlay config passes end-to-end ---

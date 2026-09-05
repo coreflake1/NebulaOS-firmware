@@ -521,6 +521,19 @@ check /etc/init.d/S56moonraker
 check /etc/init.d/S50nginx
 check /opt/printer_data/config/printer.cfg
 check /opt/printer_data/config/moonraker.conf
+check /usr/libexec/nebulaos-set-camera-quality
+
+echo "=== Phase 2: image-owned config under /etc/nebulaos/klipper/ ==="
+check /etc/nebulaos/klipper/platform.cfg
+check /etc/nebulaos/klipper/machine.cfg
+check /etc/nebulaos/klipper/prtouch.cfg
+check /etc/nebulaos/klipper/z_offset_probe.cfg
+check /etc/nebulaos/klipper/calibration.cfg
+check /etc/nebulaos/klipper/homing.cfg
+check /etc/nebulaos/klipper/print.cfg
+check /etc/nebulaos/klipper/filament.cfg
+check /etc/nebulaos/klipper/camera.cfg
+check /etc/nebulaos/klipper/beeper.cfg
 
 echo "=== Phase 1.9A: host MCU (klipper_mcu) / ADXL345 / BL24C16F ==="
 # klipper_mcu is Klipper's own MACH_LINUX build target, compiled as a native
@@ -629,9 +642,11 @@ else
 	echo "MISS S01persistent-datastore does not use /usr/data/nebulaos as the persistent backing root"
 fi
 
-echo "=== Moonraker update_manager / camera defaults (final implementation mission, 2026-07-27) ==="
+echo "=== Moonraker update_manager / camera / Mainsail macro seeding ==="
 check /usr/libexec/nebulaos-seed-camera
 check /etc/init.d/S57nebulaos-camera-seed
+check /usr/libexec/nebulaos-seed-mainsail-macros
+check /etc/init.d/S57nebulaos-mainsail-macros-seed
 
 # Content checks against the actual shipped moonraker.conf, not just its
 # presence - the whole point of this mission was that a real, previously
@@ -872,90 +887,29 @@ else
 	echo "MISS seed-manifest.json missing the real-history archive format record"
 fi
 
-echo "=== printer_data config factory seed (Ender-3 V3 KE, auto-updates-camera-complete mission addendum, 2026-07-28) ==="
-# Real bug found live: a genuinely wiped printer_data/config left Klipper
-# and Moonraker crash-looping forever on FileNotFoundError - nothing had
-# ever shipped a seed for these files at a path immune to
-# S01persistent-datastores own early, unconditional bind mount of the
-# persistent copy over /opt/printer_data. Confirms the dedicated immutable
-# seed at /opt/nebulaos-seeds/printer_data-config/ actually landed in the
-# packaged image, not just the tracked overlay source.
-if debugfs -R "stat /opt/nebulaos-seeds/printer_data-config/printer.cfg" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
-	echo "OK   /opt/nebulaos-seeds/printer_data-config/printer.cfg is present"
-else
-	echo "MISS /opt/nebulaos-seeds/printer_data-config/printer.cfg is missing from the packaged seed"
-fi
-if debugfs -R "stat /opt/nebulaos-seeds/printer_data-config/moonraker.conf" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
-	echo "OK   /opt/nebulaos-seeds/printer_data-config/moonraker.conf is present"
-else
-	echo "MISS /opt/nebulaos-seeds/printer_data-config/moonraker.conf is missing from the packaged seed"
-fi
-if debugfs -R "stat /opt/nebulaos-seeds/printer_data-config/frontend-controls.cfg" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
-	echo "OK   /opt/nebulaos-seeds/printer_data-config/frontend-controls.cfg is present"
-else
-	echo "MISS /opt/nebulaos-seeds/printer_data-config/frontend-controls.cfg is missing from the packaged seed"
-fi
-# Camera quality presets mission (2026-08-04): same class of check as
-# frontend-controls.cfg above - confirms the two new files a fresh factory
-# seed depends on (the macro/shell-command config, and the script the shell
-# command actually invokes) really landed in the packaged image, not just
-# the tracked overlay source.
-if debugfs -R "stat /opt/nebulaos-seeds/printer_data-config/camera-quality.cfg" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
-	echo "OK   /opt/nebulaos-seeds/printer_data-config/camera-quality.cfg is present"
-else
-	echo "MISS /opt/nebulaos-seeds/printer_data-config/camera-quality.cfg is missing from the packaged seed"
-fi
-if debugfs -R "stat /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/set_camera_quality.py" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
-	echo "OK   /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/set_camera_quality.py is present"
-else
-	echo "MISS /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/set_camera_quality.py is missing from the packaged seed"
-fi
+echo "=== printer_data config factory seed ==="
+# A genuinely wiped printer_data/config leaves Klipper and Moonraker
+# crash-looping - the immutable seed at /opt/nebulaos-seeds/printer_data-
+# config/ is what S02nebulaos-namespace restores from. Phase 2: seed
+# contains only printer.cfg and moonraker.conf (plus songs.conf); all
+# workflow macros live in /etc/nebulaos/klipper/*.cfg (image-owned,
+# included via absolute paths).
+check /opt/nebulaos-seeds/printer_data-config/printer.cfg
+check /opt/nebulaos-seeds/printer_data-config/moonraker.conf
+# These files belonged to the old SimpleAF/GuppyScreen architecture and
+# must NOT be present in the Phase 2 seed.
+check_absent /opt/nebulaos-seeds/printer_data-config/frontend-controls.cfg
+check_absent /opt/nebulaos-seeds/printer_data-config/camera-quality.cfg
+check_absent /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/set_camera_quality.py
+check_absent /opt/nebulaos-seeds/printer_data-config/GuppyScreen/guppy_cmd.cfg
+check_absent /opt/nebulaos-seeds/printer_data-config/simpleaf/homing.cfg
+
 rm -rf /tmp/printerdata-check
-mkdir -p /tmp/printerdata-check/GuppyScreen /tmp/printerdata-check/simpleaf
+mkdir -p /tmp/printerdata-check
 debugfs -R "dump /opt/nebulaos-seeds/printer_data-config/printer.cfg /tmp/printerdata-check/printer.cfg" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1
 debugfs -R "dump /opt/nebulaos-seeds/printer_data-config/moonraker.conf /tmp/printerdata-check/moonraker.conf" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1
-debugfs -R "dump /opt/nebulaos-seeds/printer_data-config/frontend-controls.cfg /tmp/printerdata-check/frontend-controls.cfg" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1
-debugfs -R "dump /opt/nebulaos-seeds/printer_data-config/GuppyScreen/guppy_cmd.cfg /tmp/printerdata-check/GuppyScreen/guppy_cmd.cfg" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1
-# SimpleAF backend integration (2026-07-29, see docs/
-# NEBULAOS_SIMPLEAF_BACKEND_INTEGRATION.md) - these 8 files are now what
-# printer.cfg actually includes for the print-control/workflow closure;
-# frontend-controls.cfg is dumped above only because it is still shipped on
-# disk as an unused reference, not because printer.cfg includes it any more.
-for simpleaf_f in homing.cfg useful_macros.cfg fan_control.cfg client.cfg start_end.cfg Line_Purge.cfg Smart_Park.cfg bltouch_macro.cfg; do
-	debugfs -R "dump /opt/nebulaos-seeds/printer_data-config/simpleaf/$simpleaf_f /tmp/printerdata-check/simpleaf/$simpleaf_f" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1
-done
-if [ -s /tmp/printerdata-check/printer.cfg ] && grep -q "^#\*# <---------------------- SAVE_CONFIG" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
-	echo "MISS packaged printer.cfg seed contains a real SAVE_CONFIG calibration block"
-else
-	echo "OK   packaged printer.cfg seed contains no SAVE_CONFIG calibration block"
-fi
-if [ -s /tmp/printerdata-check/printer.cfg ] && grep -q "^\[include camera-quality.cfg\]$" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
-	echo "OK   packaged printer.cfg seed includes camera-quality.cfg"
-else
-	echo "MISS packaged printer.cfg seed does not include camera-quality.cfg"
-fi
-# Clean-Update + Virgin Baseline mission, Phase 6: confirms the seeded
-# printer.cfg actually loads the new version-truth printer object, not
-# just that nebulaos_version.py exists on disk (checked separately above)
-# - a missing config section would leave the file shipped but inert.
-#
-# Phase 1 final candidate cleanup mission (2026-08-30): this used to grep
-# for the literal "[nebulaos_version]" text inside printer.cfg ITSELF and
-# reported MISS on every build, always - a false positive, not a real
-# regression. [nebulaos_version] has never lived directly in printer.cfg;
-# the Phase 1.5 persistent-namespace mission split the old monolithic
-# printer.cfg into a small, stable printer.cfg entrypoint plus the SLOT/
-# IMAGE-OWNED platform.cfg/machine.cfg it [include]s (see printer.cfg's
-# own header) - [nebulaos_version] is declared in platform.cfg, and always
-# has been (see docs/NEBULAOS_PERSISTENT_LIFECYCLE.md's own Phase 6
-# section). The old check was simply never updated for that split, and
-# nothing before this mission had actually verified platform.cfg's own
-# packaged content at all. Fixed to follow the real include chain instead
-# of assuming a flat file: printer.cfg must include platform.cfg, and the
-# actual packaged platform.cfg (extracted from the built image, not the
-# source tree) must itself declare the section - together these prove
-# [nebulaos_version] genuinely loads at boot, which is the check's own
-# stated purpose.
+
+# printer.cfg must include platform.cfg (carries [nebulaos_version]).
 if [ -s /tmp/printerdata-check/printer.cfg ] && grep -qF "[include /etc/nebulaos/klipper/platform.cfg]" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
 	echo "OK   packaged printer.cfg seed includes platform.cfg"
 else
@@ -967,22 +921,23 @@ if echo "$PLATFORM_CFG_CONTENT" | grep -q "^\[nebulaos_version\]$"; then
 else
 	echo "MISS packaged platform.cfg does not declare [nebulaos_version]"
 fi
-# A bare "key:" is only actually blank if nothing indented follows on the
-# next line - moonraker.confs own trusted_clients/cors_domains use this
-# multi-line list form legitimately; a naive single-line check flagged
-# them as false positives the first time this ran for real. Written to a
-# temp file rather than an inline awk single-quote block - this whole
-# section already lives inside one big single-quoted docker bash -c
-# argument, and a nested single quote here would close that early exactly
-# like the apostrophe bugs found earlier in this same mission.
-# SimpleAF backend integration (2026-07-29): "gcode:" is explicitly excluded
-# below - the gcode_macro directive gcode option is genuinely allowed to be
-# blank (a variable-only macro with no action, e.g. the
-# [gcode_macro _HOMING_PARAMS] section in simpleaf/homing.cfg), confirmed
-# directly against vendor/klipper/klippy/extras/gcode_macro.py, in the
-# load_template() function there, which happily wraps an empty string.
-# Every other option name is still caught - keep this in sync with the
-# identical copy in 04-cross-compile-app-stack.sh.
+# printer.cfg must include print.cfg (carries the print workflow).
+if [ -s /tmp/printerdata-check/printer.cfg ] && grep -qF "[include /etc/nebulaos/klipper/print.cfg]" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
+	echo "OK   packaged printer.cfg seed includes print.cfg"
+else
+	echo "MISS packaged printer.cfg seed does not include print.cfg"
+fi
+# printer.cfg must NOT include any SimpleAF/GuppyScreen files.
+if [ -s /tmp/printerdata-check/printer.cfg ]; then
+	if grep -qE "^\[include (simpleaf/|GuppyScreen/|frontend-controls|camera-quality)" /tmp/printerdata-check/printer.cfg 2>/dev/null; then
+		echo "MISS packaged printer.cfg seed still includes SimpleAF/GuppyScreen files"
+	else
+		echo "OK   packaged printer.cfg seed contains no SimpleAF/GuppyScreen includes"
+	fi
+fi
+# Blank-option check on the seed's printer.cfg and moonraker.conf.
+# "gcode:" is excluded - gcode_macro's gcode option is allowed to be blank
+# (a variable-only macro). Keep in sync with 04-cross-compile-app-stack.sh.
 cat > /tmp/blank-required-option.awk <<'AWKPROG'
 {
 	if (pending != "") {
@@ -997,40 +952,28 @@ blank_required_option() {
 	awk -f /tmp/blank-required-option.awk "$1"
 }
 blank_found=0
-for f in /tmp/printerdata-check/printer.cfg /tmp/printerdata-check/moonraker.conf /tmp/printerdata-check/frontend-controls.cfg /tmp/printerdata-check/simpleaf/*.cfg; do
+for f in /tmp/printerdata-check/printer.cfg /tmp/printerdata-check/moonraker.conf; do
 	[ -s "$f" ] || continue
 	if ! blank_required_option "$f" >/dev/null; then
 		blank_found=1
 	fi
 done
 if [ "$blank_found" = "1" ]; then
-	echo "MISS packaged printer.cfg/moonraker.conf/frontend-controls.cfg/simpleaf/*.cfg seed has an option present but syntactically blank"
+	echo "MISS packaged printer.cfg/moonraker.conf seed has an option present but syntactically blank"
 else
-	echo "OK   packaged printer.cfg/moonraker.conf/frontend-controls.cfg/simpleaf/*.cfg seed has no syntactically blank options"
+	echo "OK   packaged printer.cfg/moonraker.conf seed has no syntactically blank options"
 fi
 
 # Print-control config closure validation against the actual packaged
-# seed (not just the tracked source) - mainline print-controls mission,
-# 2026-07-29, see docs/NEBULAOS_FRONTEND_PRINT_CONTROLS.md. The includes
-# in printer.cfg are just concatenated here (this codebase only ever uses
-# plain literal filenames in its config includes, one level of
-# GuppyScreen/ nesting, never glob patterns), so this is a deliberately
-# simple closure builder, not a general Klipper config parser. Grep
-# patterns below use double quotes only, and the awk program is written
-# to a temp file via a quoted heredoc rather than inline - see the
-# blank_required_option note above this same docker bash -c block about
-# why a literal single quote here would break the outer quoting.
+# image. Phase 2: all 10 included configs live at /etc/nebulaos/klipper/
+# (absolute includes resolved against the rootfs). Concatenate them to
+# verify the closure has exactly one of each required section.
 if [ -s /tmp/printerdata-check/printer.cfg ]; then
-	# SimpleAF backend integration (2026-07-29, see docs/
-	# NEBULAOS_SIMPLEAF_BACKEND_INTEGRATION.md): printer.cfg no longer
-	# includes frontend-controls.cfg - simpleaf/client.cfg + simpleaf/
-	# start_end.cfg now provide the same required sections instead.
-	if grep -q "^\[include simpleaf/client\.cfg\]" /tmp/printerdata-check/printer.cfg && grep -q "^\[include simpleaf/start_end\.cfg\]" /tmp/printerdata-check/printer.cfg; then
-		echo "OK   packaged printer.cfg includes simpleaf/client.cfg and simpleaf/start_end.cfg"
-	else
-		echo "MISS packaged printer.cfg does not include simpleaf/client.cfg and simpleaf/start_end.cfg"
-	fi
-	cat /tmp/printerdata-check/printer.cfg /tmp/printerdata-check/GuppyScreen/guppy_cmd.cfg /tmp/printerdata-check/simpleaf/*.cfg > /tmp/printerdata-check/closure.txt 2>/dev/null
+	: > /tmp/printerdata-check/closure.txt
+	cat /tmp/printerdata-check/printer.cfg >> /tmp/printerdata-check/closure.txt
+	for cfg_name in platform.cfg machine.cfg prtouch.cfg z_offset_probe.cfg calibration.cfg homing.cfg print.cfg filament.cfg camera.cfg beeper.cfg; do
+		debugfs -R "cat /etc/nebulaos/klipper/$cfg_name" ${IMAGES}/rootfs.ext2 2>/dev/null >> /tmp/printerdata-check/closure.txt
+	done
 	vsd_count=$(grep -c -i -E "^\[[[:space:]]*virtual_sdcard[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
 	pr_count=$(grep -c -i -E "^\[[[:space:]]*pause_resume[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
 	ds_count=$(grep -c -i -E "^\[[[:space:]]*display_status[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
@@ -1041,9 +984,9 @@ if [ -s /tmp/printerdata-check/printer.cfg ]; then
 	if [ "$vsd_count" != "1" ]; then echo "MISS packaged config closure has $vsd_count [virtual_sdcard] sections, need exactly 1"; closure_ok=0; fi
 	if [ "$pr_count" != "1" ]; then echo "MISS packaged config closure has $pr_count [pause_resume] sections, need exactly 1"; closure_ok=0; fi
 	if [ "$ds_count" != "1" ]; then echo "MISS packaged config closure has $ds_count [display_status] sections, need exactly 1"; closure_ok=0; fi
-	if [ "$pause_macro_count" != "1" ]; then echo "MISS packaged config closure has $pause_macro_count [gcode_macro PAUSE] sections, need exactly 1 (Mainsail checks configfile.settings for this section directly)"; closure_ok=0; fi
-	if [ "$resume_macro_count" != "1" ]; then echo "MISS packaged config closure has $resume_macro_count [gcode_macro RESUME] sections, need exactly 1 (Mainsail checks configfile.settings for this section directly)"; closure_ok=0; fi
-	if [ "$cancel_macro_count" != "1" ]; then echo "MISS packaged config closure has $cancel_macro_count [gcode_macro CANCEL_PRINT] sections, need exactly 1 (Mainsail checks configfile.settings for this section directly)"; closure_ok=0; fi
+	if [ "$pause_macro_count" != "1" ]; then echo "MISS packaged config closure has $pause_macro_count [gcode_macro PAUSE] sections, need exactly 1"; closure_ok=0; fi
+	if [ "$resume_macro_count" != "1" ]; then echo "MISS packaged config closure has $resume_macro_count [gcode_macro RESUME] sections, need exactly 1"; closure_ok=0; fi
+	if [ "$cancel_macro_count" != "1" ]; then echo "MISS packaged config closure has $cancel_macro_count [gcode_macro CANCEL_PRINT] sections, need exactly 1"; closure_ok=0; fi
 	if [ "$closure_ok" = "1" ]; then
 		echo "OK   packaged config closure has exactly one each of virtual_sdcard/pause_resume/display_status/gcode_macro PAUSE/gcode_macro RESUME/gcode_macro CANCEL_PRINT"
 	fi
@@ -1111,7 +1054,7 @@ check /usr/libexec/nebulaos-wifi-power-save
 check /etc/nebulaos-wifi-boot-wait.sh
 check /etc/init.d/S99confirm-good
 check /etc/ota_marker.sh
-check /opt/printer_data/config/GuppyScreen/scripts/static_ip.py
+check_absent /opt/printer_data/config/GuppyScreen/scripts/static_ip.py
 
 echo "=== NebulaOS memory resilience (docs/NEBULAOS_MEMORY_RESILIENCE.md) ==="
 check /sbin/mkswap

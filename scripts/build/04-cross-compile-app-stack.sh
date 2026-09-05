@@ -1108,14 +1108,10 @@ fi
 # single-line grep for "key:$" flagged them as false positives the first
 # time this check ran for real).
 blank_required_option() {
-	# SimpleAF backend integration (2026-07-29): "gcode:" is explicitly
-	# excluded here - gcode_macro's own gcode option is genuinely allowed to
-	# be blank (a variable-only macro with no action, e.g. simpleaf/
-	# homing.cfg's [gcode_macro _HOMING_PARAMS]), confirmed directly against
-	# vendor/klipper/klippy/extras/gcode_macro.py's load_template(), which
-	# happily wraps an empty string. Every other option name is still
-	# caught - this exception is deliberately narrow to the one key that's
-	# legitimately allowed to be empty, not a general loosening.
+	# "gcode:" is explicitly excluded - gcode_macro's own gcode option is
+	# genuinely allowed to be blank (a variable-only macro with no action),
+	# confirmed against vendor/klipper/klippy/extras/gcode_macro.py's
+	# load_template(). Every other option name is still caught.
 	awk '
 		{
 			if (pending != "") {
@@ -1127,7 +1123,7 @@ blank_required_option() {
 		END { if (pending != "") { print pending; exit 1 } }
 	' "$1"
 }
-for f in "$PRINTER_DATA_CONFIG_SRC/printer.cfg" "$PRINTER_DATA_CONFIG_SRC/moonraker.conf" "$PRINTER_DATA_CONFIG_SRC/frontend-controls.cfg" "$PRINTER_DATA_CONFIG_SRC"/simpleaf/*.cfg; do
+for f in "$PRINTER_DATA_CONFIG_SRC/printer.cfg" "$PRINTER_DATA_CONFIG_SRC/moonraker.conf"; do
 	[ -f "$f" ] || continue
 	if ! blank_required_option "$f" >/dev/null; then
 		echo "FATAL: $f has an option present but syntactically blank (not a multi-line list value) - refusing to ship a factory default that fails to parse" >&2
