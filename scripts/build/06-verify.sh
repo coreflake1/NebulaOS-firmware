@@ -648,6 +648,39 @@ check /etc/init.d/S57nebulaos-camera-seed
 check /usr/libexec/nebulaos-seed-mainsail-macros
 check /etc/init.d/S57nebulaos-mainsail-macros-seed
 
+# RC2 overnight closure (2026-09-06): the Mainsail macro-group ID bug -
+# Mainsail's own pinned v2.18.2 Dashboard.vue lineage parses a dashboard
+# panel name as `"macrogroup_" + name.split("_")[1]`, so a further
+# underscore in a group's own stable ID resolves to the wrong id. Verified
+# straight from the actual seed script shipped in this built image, not
+# from source alone - a build that composed a stale/pre-migration copy of
+# the script would fail this even if the source tree looks correct.
+SEED_MAINSAIL_MACROS_CONTENT=$(debugfs -R "cat /usr/libexec/nebulaos-seed-mainsail-macros" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$SEED_MAINSAIL_MACROS_CONTENT" ]; then
+	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE '"nebulaos_(calibration|input_shaper|extruder|camera|maintenance|recovery)"'; then
+		echo "MISS nebulaos-seed-mainsail-macros still declares an underscore-style managed group ID"
+	else
+		echo "OK   nebulaos-seed-mainsail-macros declares no underscore-style managed group ID"
+	fi
+	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE '"nebulaos-(calibration|input-shaper|extruder|camera|maintenance|recovery)"'; then
+		echo "OK   nebulaos-seed-mainsail-macros declares all six hyphenated managed group IDs"
+	else
+		echo "MISS nebulaos-seed-mainsail-macros is missing one or more expected hyphenated group IDs"
+	fi
+	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -q "LEGACY_GROUP_ID_MAP"; then
+		echo "OK   nebulaos-seed-mainsail-macros ships the legacy underscore->hyphen migration map"
+	else
+		echo "MISS nebulaos-seed-mainsail-macros has no legacy-ID migration logic"
+	fi
+	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE 'DEFAULT_MODE = "expert"'; then
+		echo "OK   nebulaos-seed-mainsail-macros defaults a genuinely untouched macros.mode to \"expert\""
+	else
+		echo "MISS nebulaos-seed-mainsail-macros does not default macros.mode to \"expert\""
+	fi
+else
+	echo "MISS could not read /usr/libexec/nebulaos-seed-mainsail-macros from the built image"
+fi
+
 # Content checks against the actual shipped moonraker.conf, not just its
 # presence - the whole point of this mission was that a real, previously
 # undetected content-level defect (unsupported options under the reserved
