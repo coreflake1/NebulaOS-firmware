@@ -368,6 +368,29 @@ compose_verify() {
 	return 0
 }
 
+# RC2 overnight closure (2026-09-06): `git describe --dirty` (what Klipper's
+# own klippy/util.py:get_git_version() uses for its runtime version string)
+# is sensitive to file-MODE changes with zero content difference, not just
+# real edits. This project's own packaging pipeline (cp -r / tar extraction
+# into the rootfs image) does not reliably preserve the exact mode bits a
+# host git checkout recorded, which is a plausible, honest, non-modification
+# explanation for the persistent "58bd67d-dirty" symptom seen on every
+# hardware boot since Phase 1.8B candidate-001 (2026-08-28) - see
+# docs/NEBULAOS_KLIPPER_COMPOSITION.md's "why -dirty can appear" note.
+# core.fileMode=false makes git ignore mode-only differences for exactly
+# this reason; it does NOT suppress detection of any real content change,
+# which is still caught in full by compose_verify_pristine() below. Applied
+# unconditionally and idempotently (a `git config` write is cheap and safe
+# to repeat) so it takes effect on the common fast path too, not only
+# during a fresh compose_build().
+# $1=klipper checkout  $2=extensions dir
+compose_disable_filemode_tracking() {
+	for d in "$1" "$2"; do
+		[ -d "$d/.git" ] || continue
+		git -C "$d" config core.fileMode false 2>/dev/null
+	done
+}
+
 # Both checkouts must remain content-pristine. Any output at all is a
 # failure - the whole point of the architecture is that neither tree is ever
 # written to.
@@ -568,6 +591,8 @@ compose_ensure() {
 		return 1
 	fi
 
+	compose_disable_filemode_tracking "$kdir" "$extdir"
+
 	marker_name=$(compose_cfg "$extdir" marker_file)
 	[ -n "$marker_name" ] || marker_name=".nebulaos-composed"
 	want=$(compose_signature "$kdir" "$extdir")
@@ -575,6 +600,23 @@ compose_ensure() {
 
 	if [ -n "$have" ] && [ "$have" = "$want" ]; then
 		if compose_verify "$kdir" "$extdir"; then
+			# RC2 overnight closure (2026-09-06): the fast path used to skip
+			# compose_verify_pristine() entirely (it only ran inside
+			# compose_build(), i.e. only on an actual rebuild) - so a tracked
+			# modification could sit undetected on every ordinary reboot once
+			# the signature stopped changing. Checked and logged here too now,
+			# but deliberately NOT treated as a fatal activation failure the
+			# way a symlink-verify failure is: composing again would not fix
+			# a real tracked-file change (compose_build only ever touches
+			# symlinks and the exclude file), and refusing to activate Klipper
+			# over an unconfirmed hypothesis with no real hardware available
+			# to validate the failure mode would risk the OTA safety net
+			# falling back to stock on every boot - a far worse outcome than
+			# a misreported version string. Logged clearly so it is visible
+			# in boot logs / the next hardware qualification pass instead.
+			if ! compose_verify_pristine "$kdir" "$extdir"; then
+				compose_log "WARNING: composition symlinks verify correctly, but the checkout is not pristine (see the errors above) - Klipper's own version string will report -dirty even though this project's architecture requires zero tracked upstream modifications. This is NOT treated as an activation failure (see 2026-09-06 comment above); investigate the tracked-file change named above directly."
+			fi
 			compose_log "composition already current and verified (generation ${have%%:*}...) - nothing to rebuild"
 			return 0
 		fi

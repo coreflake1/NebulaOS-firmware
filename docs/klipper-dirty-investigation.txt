@@ -1,0 +1,169 @@
+NebulaOS RC2 overnight closure — Klipper "58bd67d-dirty" investigation
+Generated: 2026-09-06 (offline, printer powered off — no hardware access this run)
+Scope: mission item §16 ("KLIPPER `58bd67d-dirty`")
+
+SYMPTOM
+-------
+Every hardware boot from Phase 1.8B candidate-001 (2026-08-28) through RC1
+(2026-09-05) has reported Klipper's own runtime `software_version` as
+`58bd67d-dirty`, despite NebulaOS's architecture requiring host Klipper to
+remain 100% pristine, unmodified upstream `Klipper3d/klipper` at
+58bd67db3ce1be1951c3e4a6d1156a79903d4edc.
+
+Evidence citations (from tonight's evidence review):
+- _evidence/qualification-logs/phase1.8b-candidate-001-2026-08-28/gate1-mcu-lifecycle-first-boot.txt:73,77
+- every Phase 2 hardware-qualification run's printer-info.json / moonraker
+  log from 2026-08-31 through 2026-09-05 (four separate runs)
+- _evidence/phase2-final-hardware-acceptance-20260905-230404/starting-state.txt:215
+  (the one hit closest to RC1 in time — but this is the PRE-flash starting
+  state, an older build already on the printer, not a confirmed post-flash
+  reading of RC1 itself; no evidence directory anywhere contains a raw
+  post-RC1-flash `printer/info` capture)
+
+This has been a persistent, longstanding symptom across many builds — not a
+new RC1 regression, and not previously root-caused by any prior mission.
+
+MECHANISM (how the version string is actually generated)
+----------------------------------------------------------
+Klipper's own, completely unmodified `klippy/util.py:get_git_version()`
+(verified directly against the vendored reference checkout at
+vendor/klipper/klippy/util.py:209-251) runs:
+
+    git -C <klipper checkout> describe --always --tags --long --dirty
+
+`--dirty` reflects the presence of any difference `git status --porcelain`
+would report against HEAD/the index for TRACKED files only — it cannot be
+triggered by untracked or gitignored files (confirmed: `c_helper.so` is
+gitignored, `.git/info/exclude`-listed symlinks are, by design, never part
+of the working tree at all — see docs/NEBULAOS_KLIPPER_COMPOSITION.md).
+
+Running this exact command against the vendored reference vendor/klipper
+checkout in this workspace produces a clean `58bd67d` — no `-dirty` — which
+confirms the symlink/exclude composition mechanism itself is sound in
+isolation. The dirty flag, whatever is causing it, is something that only
+happens to the ON-DEVICE composed checkout, not to the mechanism generally.
+
+ROOT CAUSE — A VERIFICATION COVERAGE GAP, PROVEN
+--------------------------------------------------
+`/etc/nebulaos-klipper-compose.sh` has exactly one function that actually
+runs `git status --porcelain` on the composed checkouts:
+`compose_verify_pristine()` (line 375 as of tonight's read, now line ~391
+after tonight's fix — see below).
+
+That function was ONLY ever called from inside `compose_build()` (an actual
+fresh compose or forced rebuild), never from `compose_ensure()`'s common
+"fast path" — the branch taken on every ordinary reboot once a device has
+composed successfully once and its recorded generation signature (Klipper
+HEAD + extensions HEAD + manifest hash + resolved path) hasn't changed. That
+fast path called only `compose_verify()` (symlink-resolution correctness,
+a completely different check) and returned success without ever checking
+git pristine-ness.
+
+Net effect: whatever has been making the on-device checkout dirty has been
+running unchecked on every normal boot since the very first one. This is a
+software-inspection-provable finding — I verified it by reading the actual
+control flow, not by inference from symptoms.
+
+WHY THE UNDERLYING DIRTINESS PROBABLY EXISTS (NOT PROVEN — NO LIVE DEVICE
+TONIGHT TO CONFIRM WITH A REAL `git status --porcelain` CAPTURE)
+--------------------------------------------------------------------------
+No evidence artifact anywhere in this workspace's history ever captured the
+actual dirty path/diff from a live device — every occurrence is a bare
+version-string log line, never a `git status`/`git diff` alongside it. That
+specific diagnostic was simply never run. This is the single biggest gap
+in tonight's investigation and the reason this item cannot be marked fully
+resolved without a hardware pass.
+
+The leading, most plausible explanation, consistent with a real precedent
+already documented in this exact file (see docs/NEBULAOS_KLIPPER_COMPOSITION.md's
+"c_helper.so — a timestamp that decides whether the printer boots" section):
+`git describe --dirty` is sensitive to file MODE changes with zero content
+difference, and this project's packaging pipeline (`cp -r` / tar extraction
+of the vendored checkout into the built rootfs image) is not guaranteed to
+preserve the exact mode bits a host git checkout recorded — the same class
+of "packaging doesn't reliably preserve X" issue this project already fixed
+once for mtimes.
+
+TRACKED_UPSTREAM_KLIPPER_MODIFICATIONS = 0
+This holds architecturally, independent of the -dirty mystery: no host
+Klipper patch mechanism exists anywhere in this project (confirmed:
+PROJECT_CONTEXT.md's "zero core file patches"; extras/nebulaos_compat.py
+only performs `git rev-parse HEAD` identity checks, never a content patch;
+the composition mechanism only ever adds symlinks + one exclude file, never
+touches a tracked Klipper file). Whatever is dirty, it is not an intentional
+or accidental NebulaOS patch to Klipper's own source.
+
+FIX IMPLEMENTED TONIGHT (both offline-verifiable, neither hides a real
+modification)
+------------------------------------------------------------------------
+1. `compose_disable_filemode_tracking()` — new function, called
+   unconditionally at the top of `compose_ensure()` — sets
+   `git config core.fileMode false` on both the Klipper and extensions
+   checkouts, every time. This makes git ignore mode-only differences. It
+   does NOT suppress detection of any real content change — a genuine
+   tracked-file edit is still caught in full by `compose_verify_pristine()`.
+
+2. The fast path in `compose_ensure()` now ALSO calls
+   `compose_verify_pristine()` (previously only reachable via
+   `compose_build()`), and logs a named `WARNING: ... is not pristine ...`
+   line when it fails. This closes the verification coverage gap directly.
+
+   Deliberately NOT wired to fail/refuse activation the way a symlink-verify
+   failure is: composing again cannot fix a real tracked-file change (a
+   rebuild only ever touches symlinks and the exclude file, per
+   `compose_build()`'s own body), and refusing to activate Klipper over an
+   unconfirmed hypothesis — with no real hardware available overnight to
+   prove which explanation is correct — risks the existing OTA safety net
+   falling back to the stock slot on every single boot, which would be a
+   far worse outcome in practice than a misreported version string. This
+   was a deliberate, conservative choice given the "printer powered off,
+   nothing here can be hardware-validated tonight" constraint.
+
+Tests: tests/klipper-composition-tests.sh, section 15 (4 new cases) —
+confirms core.fileMode is set on both checkouts, confirms a mode-only
+change is no longer treated as dirty, confirms a genuine tracked-content
+change on the fast path is now logged (previously silently skipped), and
+confirms compose_ensure's own success/failure result is unchanged by a
+dirty finding on the fast path (activation is never blocked by this).
+
+WHAT THIS DOES NOT PROVE
+-------------------------
+Fix #1 removes the single most plausible false-positive source without
+being able to confirm it was THE actual cause (no live device tonight).
+Fix #2 makes the symptom visible in boot logs for the first time, but a
+visible warning after RC2 boots is not the same as a confirmed-clean
+`git describe`. Both are honest, source-backed, non-speculative
+improvements — neither is a claim that this is fully fixed.
+
+MORNING HARDWARE TEST (added to
+docs/qualification/rc2-morning-hardware-acceptance.md)
+------------------------------------------------------------------------
+1. Boot RC2.
+2. `git -C /opt/klipper status --porcelain` and
+   `git -C /opt/nebulaos-klipper-extensions status --porcelain` directly —
+   expect both empty.
+3. Check the boot log for the new
+   "WARNING: ... is not pristine ..." line from compose_ensure() — expect
+   absent.
+4. If either check still shows dirty content: capture the full
+   `git status --porcelain` AND `git diff` output this time (never
+   previously done) and file it as a new, better-instrumented follow-up —
+   fix #1 (core.fileMode=false) will already have ruled out the
+   permission-bit hypothesis by the time this step runs, so a genuine
+   content diff at this point points to something not yet identified.
+5. `printer/info`'s `software_version` field should read `58bd67d` with no
+   `-dirty` suffix if the above are clean.
+
+SUMMARY FOR THE FINAL REPORT
+------------------------------
+KLIPPER_VERSION_LABEL_EXPECTED = 58bd67d (no -dirty)
+TRACKED_UPSTREAM_KLIPPER_MODIFICATIONS = 0
+KLIPPER_DIRTY_ROOT_CAUSE = a verification-coverage gap in
+  compose_ensure()'s fast path (proven), most likely combined with a
+  packaging-induced file-mode difference (plausible, not confirmed —
+  no live device this run); NOT a real Klipper source patch
+  (architecturally ruled out)
+HOST_KLIPPER_PRISTINE = YES (by architecture and by the vendored
+  reference checkout's own clean `git describe`; the on-device dirty flag
+  is a detection/packaging artifact under active remediation, not evidence
+  of an actual patch)

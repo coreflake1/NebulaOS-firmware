@@ -172,6 +172,62 @@ in factory-fallback. If it *does* reach factory-fallback, Klippy refusing to
 start is the expected, documented behaviour described here — not a new fault
 to debug at the printer.
 
+## The persistent "58bd67d-dirty" symptom (RC2 overnight closure, 2026-09-06)
+
+Every hardware boot from Phase 1.8B candidate-001 (2026-08-28) through RC1
+(2026-09-05) has reported Klipper's own runtime version as
+`58bd67d-dirty` — contradicting the "both checkouts stay content-pristine"
+claim above and this project's zero-core-patches architecture.
+
+Root cause, found by reading `compose_ensure()` directly rather than
+guessing: `compose_verify_pristine()` — the function that actually runs
+`git status --porcelain` on both checkouts — was only ever called from
+inside `compose_build()` (an actual rebuild). The common "fast path" (marker
+signature unchanged, i.e. every ordinary reboot once a device has composed
+successfully once) called `compose_verify()` (symlink-resolution
+correctness) but never `compose_verify_pristine()`. So whatever was making
+Klipper's own `git describe --dirty` (`klippy/util.py:get_git_version()`,
+unmodified upstream) see a difference has been silently unchecked on every
+normal boot since the very first one.
+
+`TRACKED_UPSTREAM_KLIPPER_MODIFICATIONS=0` still holds architecturally (no
+host-Klipper patch mechanism exists anywhere in this project), and the
+leading, most plausible explanation is not a real modification at all:
+`git describe --dirty` is sensitive to file **mode** changes with zero
+content difference, and this project's own packaging pipeline (`cp -r` /
+tar extraction into the rootfs image, the same class of "doesn't preserve
+what a host git checkout recorded" issue the `c_helper.so` mtime section
+above already documents for a different property) does not guarantee mode
+bits survive identically.
+
+Two changes, both offline-verifiable and neither hiding any real
+modification:
+
+1. **`compose_disable_filemode_tracking()`** sets `core.fileMode false` on
+   both checkouts, unconditionally, every time `compose_ensure()` runs. This
+   makes git ignore mode-only differences — it does **not** suppress
+   detection of any actual content change, which `compose_verify_pristine()`
+   still reports in full.
+2. **The fast path now also calls `compose_verify_pristine()`**, and logs a
+   named `WARNING:` line if the checkout is not pristine. This is
+   deliberately **not** wired to fail activation the way a symlink-verify
+   failure is: composing again cannot fix a real tracked-file change (a
+   rebuild only ever touches symlinks and the exclude file), and refusing to
+   activate Klipper over an unconfirmed hypothesis — with no real hardware
+   available overnight to prove which explanation is correct — risks the
+   OTA safety net falling back to the stock slot on every boot, which is a
+   far worse outcome than a misreported version string. See
+   `tests/klipper-composition-tests.sh` section 15.
+
+**Not claimed fixed.** Fix (1) removes the single most plausible false-
+positive source without changing any detection behavior; fix (2) makes the
+symptom visible in boot logs for the first time instead of silently
+unchecked. Neither was validated against real hardware (printer powered off
+for this mission) — `docs/qualification/rc2-morning-hardware-acceptance.md`
+adds a step to capture `git -C <checkout> status --porcelain` directly from
+the booted device and confirm the WARNING line is now absent (or, if still
+present, to finally capture the exact dirty path that (1) didn't cover).
+
 ## Recovery and crash safety
 
 Rebuilds always start from a **full teardown** rather than reconciling in

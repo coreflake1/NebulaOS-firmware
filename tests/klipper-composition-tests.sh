@@ -519,6 +519,48 @@ else
 	pass "compose_ensure REFUSES a manifest declaring a module with no source file"
 fi
 
+# --- 15. RC2 overnight closure (2026-09-06): pristine check on the fast
+#     path, and core.fileMode=false suppressing mode-only false positives --
+
+PK="$WORK/klipper-pristine"; PE="$WORK/extensions-pristine"
+make_klipper_fixture "$PK"
+make_extensions_fixture "$PE"
+compose_ensure "$PK" "$PE" >/dev/null 2>&1
+
+if git -C "$PK" config --get core.fileMode 2>/dev/null | grep -qx "false" \
+	&& git -C "$PE" config --get core.fileMode 2>/dev/null | grep -qx "false"; then
+	pass "compose_ensure sets core.fileMode=false on both checkouts"
+else
+	fail "core.fileMode was not disabled on one or both checkouts"
+fi
+
+# A mode-only change (no content difference) must NOT be reported as dirty,
+# and must NOT produce the pristine WARNING on the fast path.
+chmod 755 "$PK/klippy/extras/fan.py"
+if compose_ensure "$PK" "$PE" >"$WORK/log15" 2>&1 \
+	&& ! grep -q "is not pristine" "$WORK/log15"; then
+	pass "a file-mode-only change on the Klipper checkout is not treated as dirty (core.fileMode=false)"
+else
+	fail "a mode-only change was incorrectly treated as dirty"; cat "$WORK/log15"
+fi
+
+# A genuine tracked-content change on the fast path (marker/signature still
+# match - HEAD hasn't moved) must be detected and logged, but must NOT flip
+# compose_ensure's own success/failure result - see the 2026-09-06 comment
+# in compose_ensure() for why activation is not refused over this.
+printf '# upstream fan (locally modified)\n' > "$PK/klippy/extras/fan.py"
+if compose_ensure "$PK" "$PE" >"$WORK/log16" 2>&1; then
+	pass "compose_ensure still succeeds (returns 0) when the fast path finds a dirty tracked file"
+else
+	fail "compose_ensure incorrectly failed on a dirty-but-structurally-fine fast path"; cat "$WORK/log16"
+fi
+if grep -q "WARNING:.*is not pristine\|is not pristine after composition" "$WORK/log16"; then
+	pass "a genuine tracked-content change on the fast path is logged (previously silently skipped)"
+else
+	fail "a genuine tracked-content change on the fast path was NOT logged"; cat "$WORK/log16"
+fi
+git -C "$PK" checkout -q -- klippy/extras/fan.py
+
 # --- summary --------------------------------------------------------------
 
 echo
