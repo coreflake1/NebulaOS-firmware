@@ -48,7 +48,7 @@ MANAGED_DIR = REPO_ROOT / "scripts/build/overlay/etc/nebulaos/moonraker"
 OVERLAY_ROOT = REPO_ROOT / "scripts/build/overlay"
 
 KLIPPER_PIN = "58bd67db3ce1be1951c3e4a6d1156a79903d4edc"
-EXTENSIONS_PIN = "12c187f"
+EXTENSIONS_PIN = "7f62767"
 OFFICIAL_KLIPPER = "https://github.com/Klipper3d/klipper.git"
 EXTENSIONS_ORIGIN = "https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
 

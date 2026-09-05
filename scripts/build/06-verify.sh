@@ -1006,6 +1006,38 @@ AWKPROG2
 	else
 		echo "MISS packaged [virtual_sdcard] path is $vsd_path, expected /opt/printer_data/gcodes"
 	fi
+	# Phase 2 RC architecture checks against the built config closure.
+	fan_count=$(grep -c -i -E "^\[[[:space:]]*fan[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	output_pin_fan0=$(grep -c -i -E "^\[[[:space:]]*output_pin[[:space:]]+fan0[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	if [ "$fan_count" = "1" ] && [ "$output_pin_fan0" = "0" ]; then
+		echo "OK   upstream [fan] section present, no [output_pin fan0]"
+	else
+		echo "MISS fan config: [fan]=$fan_count [output_pin fan0]=$output_pin_fan0 (expect 1/0)"
+	fi
+	if grep -qE "shaper_freq_end:[[:space:]]*80" /tmp/printerdata-check/closure.txt \
+	   && grep -qE "shaper_accel_per_hz:[[:space:]]*50" /tmp/printerdata-check/closure.txt; then
+		echo "OK   Input Shaper envelope 80/50 present in calibration config"
+	else
+		echo "MISS Input Shaper envelope 80/50 not found in config closure"
+	fi
+	custom_m109=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m109[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	custom_m190=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m190[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	if [ "$custom_m109" = "0" ] && [ "$custom_m190" = "0" ]; then
+		echo "OK   no custom M109/M190 gcode_macro overrides"
+	else
+		echo "MISS custom M109=$custom_m109 M190=$custom_m190 gcode_macro overrides found (expect 0/0)"
+	fi
+	if grep -q "^\[nebulaos_calibration\]" /tmp/printerdata-check/closure.txt; then
+		echo "OK   [nebulaos_calibration] section present"
+	else
+		echo "MISS [nebulaos_calibration] section not found in config closure"
+	fi
+	nebulaos_plr=$(grep -c -i -E "^\[[[:space:]]*nebulaos_power_loss_recovery[[:space:]]*\]" /tmp/printerdata-check/closure.txt)
+	if [ "$nebulaos_plr" = "1" ]; then
+		echo "OK   [nebulaos_power_loss_recovery] section present"
+	else
+		echo "MISS [nebulaos_power_loss_recovery] not found in config closure"
+	fi
 else
 	echo "MISS packaged printer.cfg could not be dumped from rootfs.ext2 - cannot validate print-control closure"
 fi

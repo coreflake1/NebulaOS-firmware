@@ -16,14 +16,15 @@ same backend.
 | `PID_CALIBRATE_HOTEND [HOTEND_TEMP=..]` | SimpleAF-vendored, same file: stock `PID_CALIBRATE HEATER=extruder`, default `HOTEND_TEMP=230`, refuses while printing. `NEBULAOS_PID_CALIBRATE_HOTEND` removed 2026-09-04, same reason. |
 | `NEBULAOS_BED_MESH_CALIBRATE [PROFILE=..]` | Stock `BED_MESH_CALIBRATE` + `BED_MESH_PROFILE SAVE`, default profile name `nebulaos_calibration`. |
 | `NEBULAOS_CALIBRATION_STATUS` | Reports the coordinator's current Z-offset calibration state; also available via `printer.objects.query`/`subscribe` on `nebulaos_calibration` (`get_status()`). |
-| `NEBULAOS_NOZZLE_CLEAN` | Canonical name for the existing native load-cell nozzle-wipe sequence (registered by `[z_compensate]`, same handler as `CRTENSE_NOZZLE_CLEAR`). |
+| `NEBULAOS_NOZZLE_CLEAN` | Canonical name for the native load-cell nozzle-wipe sequence (public macro in `calibration.cfg`, backed by `_NEBULAOS_NOZZLE_CLEAN` in `[z_compensate]`). |
 
-## Compatibility aliases (unchanged, kept because GuppyScreen already calls them)
+## Compatibility aliases
 
 | Alias | Canonical equivalent |
 |---|---|
-| `CRTENSE_NOZZLE_CLEAR` | `NEBULAOS_NOZZLE_CLEAN` (same handler, not a separate implementation) |
 | `Z_OFFSET_CALIBRATION` | Predates `NEBULAOS_Z_OFFSET_CALIBRATE METHOD=LOAD_CELL`; NOT yet rewired to delegate to it - still its own, separately-tested implementation. See "Not yet implemented" below. |
+
+**Removed in Phase 2 RC:** `CRTENSE_NOZZLE_CLEAR` (legacy GuppyScreen compat). GuppyScreen adaptation will call `NEBULAOS_NOZZLE_CLEAN`.
 
 ## Not yet implemented (see the Phase 2 mission status report for the full list)
 
