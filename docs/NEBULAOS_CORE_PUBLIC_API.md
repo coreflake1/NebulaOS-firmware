@@ -99,7 +99,7 @@ reach them is the console or a direct API/gcode call.
 
 | CANONICAL_NAME | OWNER | DATA_SOURCE | USER_SURFACE | MAINSAIL_GROUP/PANEL | STATE_RESTRICTIONS | STATUS |
 |---|---|---|---|---|---|---|
-| `Z_OFFSET_CALIBRATION` | NebulaOS (`z_compensate.py`, `cmd_z_offset_calibration`) | Per-print, live Z gcode-offset correction: touch-probes at the BLTouch-homed point via `nebulaos_z_offset_probe.touch_probe()`, applies the delta as a live `SET_GCODE_OFFSET`-equivalent for the current print only (not a permanent `z_offset` rewrite) | **None** — not referenced by `START_PRINT`, `END_PRINT`, any macro, or any slicer-gcode template in this composed config; console/API only | None (not a macro) | n/a | **NOT_SUPPORTED_BY_MAINSAIL_UI** — see "Most concerning finding" below |
+| `Z_OFFSET_CALIBRATION` | NebulaOS (`z_compensate.py`, `cmd_z_offset_calibration`) | Per-print, live Z gcode-offset correction: touch-probes at the BLTouch-homed point via `nebulaos_z_offset_probe.touch_probe()`, applies the delta as a live `SET_GCODE_OFFSET`-equivalent for the current print only (not a permanent `z_offset` rewrite) | **NebulaOS-guppyscreen's `recalibration_wizard_panel.cpp`**, confirmed by reading that repo's source directly (`ws.gcode_script("Z_OFFSET_CALIBRATION", ...)`) — not the composed config, which is why the earlier RC2 pass mischaracterized this as unreferenced; GuppyScreen calls it over the Moonraker websocket, bypassing the printer.cfg macro layer entirely | None (not a macro; deliberately console-visible for GuppyScreen's own diagnostics, not end-user discovery) | n/a | **PUBLIC_REQUIRED** — see §"Z_OFFSET_CALIBRATION resolution" below |
 | `NEBULAOS_CALIBRATION_STATUS` | NebulaOS (`nebulaos_calibration.py`, `cmd_calibration_status`) | Reports the coordinator's Z-offset/auto-calibrate/e-steps/input-shaper state | Console/API only; same data is also the `nebulaos_calibration` status object (`printer.objects.query`/`subscribe`) | None (not a macro) | n/a | OK — a status query, not an action; no user-facing need for a button when the same data is already a subscribable object |
 | `NEBULAOS_PLR_STATUS` | NebulaOS (`nebulaos_power_loss_recovery.py`) | See §6 above | Console/API only | None | n/a | OK (status query, same reasoning) |
 | `LOAD_CELL_READ` / `LOAD_CELL_TARE` / `LOAD_CELL_CALIBRATE` / `LOAD_CELL_DIAGNOSTIC` | Upstream Klipper (`load_cell.py`'s `LoadCell` wrapper, instantiated by `[nebulaos_z_offset_probe]`) | Zero-motion HX711 sensor qualification/calibration (sets `counts_per_gram`/`reference_tare_counts` via `SAVE_CONFIG`) | Console/API only, by design (per the mission's own instruction: the load cell needs a correct config object + a working calibration path, not a permanent Mainsail graph) | None | n/a | OK |
@@ -152,25 +152,46 @@ panels, see `NEBULAOS_MAINSAIL_SENSOR_INVENTORY.md`:
 
 ---
 
-## Most concerning finding
+## Z_OFFSET_CALIBRATION resolution (final pre-hardware closure, 2026-09-06)
 
-**`Z_OFFSET_CALIBRATION` is a fully real, hardware-safety-relevant command
-(it drives the nozzle load cell into contact to set a live per-print Z
-offset) with zero discoverability anywhere a Mainsail user would look.** It
-has no `[gcode_macro]` wrapper, so it cannot be placed in any
-`DEFAULT_GROUPS` entry no matter how the seed script evolves; it is not
-called from `START_PRINT`/`END_PRINT` or any other macro in this composed
-config; and its own name is one word away from the canonical, fully-wired
-`NEBULAOS_Z_OFFSET_CALIBRATE` (a different command, for a different purpose
-— one-time load-cell/BLTouch reconciliation vs. per-print live offset),
-which is a real risk of operator confusion for anyone reading raw macro
-names off a console history or a slicer's custom-gcode field.
-`docs/NEBULAOS_CALIBRATION_PUBLIC_API.md` already flags this exact gap
-("NOT yet rewired... still its own, separately-tested implementation"), so
-it is a known, tracked issue rather than a fresh discovery — but it remains
-unresolved as of this RC2 pass and is the single item in this inventory
-that most needs either a public macro wrapper (with a clear, distinguishing
-name) or an explicit product decision to retire it.
+RC2's audit flagged `Z_OFFSET_CALIBRATION` as an apparent orphan: no
+`[gcode_macro]` wrapper, no caller anywhere in this project's own composed
+config, and a name one word away from the canonical
+`NEBULAOS_Z_OFFSET_CALIBRATE` — a real risk of operator confusion for
+anyone reading raw command names off a console history. That analysis
+missed one thing: **the "no composed-config caller" heuristic cannot see a
+caller living in a sibling repository's compiled UI binary.** Reading
+`NebulaOS-guppyscreen/src/recalibration_wizard_panel.cpp` directly (not
+inferred) shows a real, active call —
+`ws.gcode_script("Z_OFFSET_CALIBRATION", ...)` — made over the Moonraker
+websocket every time a user runs GuppyScreen's own recalibration wizard.
+
+**Classification: `PUBLIC_REQUIRED`.** This is not a stale alias, a dead
+surface, or a duplicate of `NEBULAOS_Z_OFFSET_CALIBRATE` — it is a
+different implementation (a single raw load-cell touch reading, vs.
+`NEBULAOS_Z_OFFSET_CALIBRATE`'s guided, `nebulaos_probe_pair.py`-mediated
+BLTouch/HX711 reconciliation) serving a different, currently-shipped
+consumer. Per this mission's own architecture rule ("GuppyScreen adapts to
+the final NebulaOS API; NebulaOS core does not preserve legacy backend
+architecture merely to satisfy the current GuppyScreen binary" — but also
+"binary remains shipped" and functional testing is *deferred*, not
+*removed*), renaming or removing this command now would silently break a
+real, currently-shipped GuppyScreen feature with no compensating benefit,
+since GuppyScreen's own binary is pinned and cannot pick up a renamed
+command without its own rebuild — out of scope for a core-only closure
+mission.
+
+**Resolution applied**: no removal, no rename. `z_compensate.py`'s
+registration site now carries an explicit comment naming the real caller,
+so a future audit never re-flags this as an orphan; the command's own
+`desc=` help text was rewritten to name both its real purpose (the
+GuppyScreen wizard primitive) and the canonical alternative
+(`NEBULAOS_Z_OFFSET_CALIBRATE`) a console user actually wants, resolving
+the operator-confusion risk without touching either command's behavior.
+Three new tests (`extras/test_z_compensate_reentrancy_guard.py`'s
+`PublicAPISurfaceTest`, in the extensions repo) prove the two commands are
+genuinely independent implementations, registered separately, never
+aliasing one another.
 
 ## STATUS bucket totals (this deliverable)
 
@@ -178,12 +199,28 @@ name) or an explicit product decision to retire it.
 |---|---|---|
 | OK | 30 | All group-seeded macros (22), `SAVE_INPUT_SHAPER`, `M300`, `START_PRINT`/`END_PRINT`/`PAUSE`/`RESUME`/`CANCEL_PRINT` (5), `NEBULAOS_CALIBRATION_STATUS`, `NEBULAOS_PLR_STATUS`, `LOAD_CELL_*` (1 group) |
 | INTERNAL_ONLY | 3 | `_GUPPY_LOAD_MODULE`/`_GUPPY_UNLOAD_MODULE` (1 group), `_GUPPY_SAVE_CONFIG`/`_GUPPY_DELETE_CONFIG` (1 group), `RUN_SHELL_COMMAND` |
-| NOT_SUPPORTED_BY_MAINSAIL_UI | 1 | `Z_OFFSET_CALIBRATION` — see "Most concerning finding" |
-| STALE | 0 | none in this deliverable (the one stale item, `load_cell_probe.cfg`, is hardware/config-shaped and lives in the sensor inventory) |
+| PUBLIC_REQUIRED (console-only, GuppyScreen-facing) | 1 | `Z_OFFSET_CALIBRATION` — see "Z_OFFSET_CALIBRATION resolution" above |
+| STALE | 0 | the one stale item this project shipped, `load_cell_probe.cfg`, was removed from the production overlay entirely tonight (see `historical-reconciliation.md` §7) — no longer present to classify |
 | DUPLICATE | 0 | `M300`/`BEEP` and `SAVE_INPUT_SHAPER` were checked closely and are primitive-vs-convenience pairs, not duplicates |
 | BROKEN | 0 | none found |
 
 22 macros are seeded into the six `DEFAULT_GROUPS` panels; 5 more are
 native-toolbar/slicer-wired by design; 6 are raw commands with no macro
-wrapper (5 of those are fine as console/API-only status/primitive commands,
-1 — `Z_OFFSET_CALIBRATION` — is the flagged gap above).
+wrapper (5 of those are plain console/API-only status/primitive commands;
+1, `Z_OFFSET_CALIBRATION`, is deliberately console-visible because its real
+consumer — GuppyScreen — is another compiled binary, not a Mainsail macro).
+
+## Mission classification mapping (PUBLIC_PRODUCT_API / UPSTREAM_NATIVE / PRIVATE_INTERNAL)
+
+| This doc's STATUS | Mission classification |
+|---|---|
+| OK, entries with `NebulaOS` as OWNER | `PUBLIC_PRODUCT_API` |
+| OK, entries with an "Upstream ..." OWNER (e.g. `AXIS_TWIST_X`, `PID_BED`) | `UPSTREAM_NATIVE` |
+| INTERNAL_ONLY | `PRIVATE_INTERNAL` |
+| `Z_OFFSET_CALIBRATION` (PUBLIC_REQUIRED) | `PUBLIC_PRODUCT_API` — real, currently-consumed API, its consumer is GuppyScreen rather than Mainsail |
+
+```
+PUBLIC_API_AMBIGUITIES = 0
+Z_OFFSET_CALIBRATION_CLASSIFICATION = PUBLIC_REQUIRED
+Z_OFFSET_CALIBRATION_PUBLIC_AMBIGUITY_RESOLVED = YES
+```

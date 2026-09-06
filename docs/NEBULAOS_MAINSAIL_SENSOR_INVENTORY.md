@@ -23,9 +23,12 @@ beeper.cfg`, followed by a real, live `SAVE_CONFIG` autosave block (bltouch
 z_offset, extruder PID + rotation_distance, heater_bed PID).
 
 A full `find` across `scripts/build/overlay` for `*.cfg` turned up exactly
-these 11 files plus `load_cell_probe.cfg` — there is no other `.cfg` anywhere
-in the overlay tree, so there is no hidden duplicate sensor/heater/fan/MCU
-section outside what's inventoried below.
+these 11 files plus `load_cell_probe.cfg` at RC2 time — there is no other
+`.cfg` anywhere in the overlay tree, so there is no hidden duplicate
+sensor/heater/fan/MCU section outside what's inventoried below.
+**Update, final pre-hardware closure (2026-09-06): `load_cell_probe.cfg` has
+since been removed from the overlay entirely — see its entry in §3 and the
+STATUS totals below, both updated to reflect its removal.**
 
 Legend for STATUS: OK, DUPLICATE, STALE, BROKEN, INTERNAL_ONLY,
 NOT_SUPPORTED_BY_MAINSAIL_UI.
@@ -140,8 +143,14 @@ Deliverable 2.
   `[bltouch]`/`[adxl345]`/`load_cell` across every `.cfg` in the overlay
   confirms each section is defined exactly once, in exactly one of the 11
   live cfg files.
-- Retired load-cell aliases: none live; the one true stale artifact is the
-  **uncomposed** `load_cell_probe.cfg` file itself (§3 above).
+- Retired load-cell aliases: none live. The one true stale artifact this
+  project shipped, the **uncomposed** `load_cell_probe.cfg` file (§3 above),
+  was removed from `scripts/build/overlay/etc/nebulaos/klipper/` entirely
+  during the final pre-hardware closure (2026-09-06) — confirmed no active
+  include, migration reference, test dependency, or doc requirement existed
+  first (see `historical-reconciliation.md` §7). Its historical design
+  rationale remains in git history (commit `6b170dc`), not as a live config
+  file. `06-verify.sh` now asserts its absence from the built rootfs.
 - ADXL345 defined but not really wired to `[mcu rpi]`: not the case — the
   single `[adxl345]` section is genuinely wired to `mcu rpi`'s SPI bus
   (`cs_pin: rpi:None`, `spi_bus: spidev2.0`), confirmed by direct read.
@@ -152,10 +161,11 @@ Deliverable 2.
 |---|---|---|
 | OK | 24 | mcu, mcu rpi, stepper_x/y/z + tmc2208 x/y/z (counted as 1 row group), extruder, heater_bed, temperature_sensor mcu_temp, fan, heater_fan nozzle_fan, output_pin MainBoardFan, bltouch, nebulaos_z_offset_probe, z_compensate, prtouch (absent, OK), adxl345, resonance_tester, input_shaper, bl24c16f (retired by design), nebulaos_power_loss_recovery, exclude_object, bed_mesh, skew_correction, virtual_sdcard/pause_resume/display_status/respond/idle_timeout (1 group), filament sensor (absent, OK) |
 | INTERNAL_ONLY | 8 | verify_heater extruder/heater_bed, tmcstatus, nebulaos_compat, nebulaos_version, firmware_retraction, virtual_pins, output_pin Bed_Warp_Stabilisation |
-| STALE | 1 | `load_cell_probe.cfg` / upstream `[load_cell_probe]` (uncomposed, superseded design) |
+| STALE | 0 | `load_cell_probe.cfg` removed from the production overlay tonight (final pre-hardware closure, 2026-09-06) — no longer present to classify |
 | DUPLICATE | 0 | none found |
 | BROKEN | 0 | none found |
 | NOT_SUPPORTED_BY_MAINSAIL_UI | 0 | none — every gap found (HX711, ADXL345, tmcstatus) is an intentional console/API-only surface per the mission's own instruction, not a Mainsail limitation being worked around |
 
-Total objects inventoried: 33 (rows above; some rows group 2-4 physically
+Total objects inventoried: 32 (33 at RC2 time, minus the removed
+`load_cell_probe.cfg` row; rows above group 2-4 physically
 identical stepper/driver sections for brevity).
