@@ -655,12 +655,21 @@ check /etc/init.d/S57nebulaos-mainsail-macros-seed
 # straight from the actual seed script shipped in this built image, not
 # from source alone - a build that composed a stale/pre-migration copy of
 # the script would fail this even if the source tree looks correct.
+#
+# Scoped to the DEFAULT_GROUPS assignment only (real fresh-install/seed
+# group IDs) - LEGACY_GROUP_ID_MAP's own KEYS are deliberately the old
+# underscore IDs (that is what the migration maps FROM), so a whole-file
+# grep for the underscore pattern produces a false MISS against a
+# perfectly correct script. Found live against the first real RC2 build
+# tonight - the whole-file version of this check was wrong, not the
+# script.
 SEED_MAINSAIL_MACROS_CONTENT=$(debugfs -R "cat /usr/libexec/nebulaos-seed-mainsail-macros" ${IMAGES}/rootfs.ext2 2>/dev/null)
+DEFAULT_GROUPS_BLOCK=$(echo "$SEED_MAINSAIL_MACROS_CONTENT" | awk '/^DEFAULT_GROUPS = \{/{grab=1} grab{print} grab && /^\}$/{exit}')
 if [ -n "$SEED_MAINSAIL_MACROS_CONTENT" ]; then
-	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE '"nebulaos_(calibration|input_shaper|extruder|camera|maintenance|recovery)"'; then
-		echo "MISS nebulaos-seed-mainsail-macros still declares an underscore-style managed group ID"
+	if echo "$DEFAULT_GROUPS_BLOCK" | grep -qE '"nebulaos_(calibration|input_shaper|extruder|camera|maintenance|recovery)"'; then
+		echo "MISS nebulaos-seed-mainsail-macros's DEFAULT_GROUPS still declares an underscore-style managed group ID"
 	else
-		echo "OK   nebulaos-seed-mainsail-macros declares no underscore-style managed group ID"
+		echo "OK   nebulaos-seed-mainsail-macros's DEFAULT_GROUPS declares no underscore-style managed group ID"
 	fi
 	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE '"nebulaos-(calibration|input-shaper|extruder|camera|maintenance|recovery)"'; then
 		echo "OK   nebulaos-seed-mainsail-macros declares all six hyphenated managed group IDs"
