@@ -534,6 +534,14 @@ check /etc/nebulaos/klipper/print.cfg
 check /etc/nebulaos/klipper/filament.cfg
 check /etc/nebulaos/klipper/camera.cfg
 check /etc/nebulaos/klipper/beeper.cfg
+# Final pre-hardware closure (2026-09-06): load_cell_probe.cfg was a
+# never-included Phase 1.8 design artifact (the abandoned "replace BLTouch
+# entirely with the load cell" direction) that still shipped on the
+# read-only rootfs despite being permanently inactive - a stale production
+# artifact per the Phase 2 sensor audit. Removed from source entirely;
+# historical design rationale remains in git history (commit 6b170dc) and
+# this project's own commit messages, not as a live config file on disk.
+check_absent /etc/nebulaos/klipper/load_cell_probe.cfg
 
 echo "=== Phase 1.9A: host MCU (klipper_mcu) / ADXL345 / BL24C16F ==="
 # klipper_mcu is Klipper's own MACH_LINUX build target, compiled as a native
