@@ -1,0 +1,216 @@
+#!/bin/sh
+#
+# nebulaos-recover - offline recovery tool for NebulaOS runtime components
+#
+# Restores a mutable runtime component from the immutable baked copy on the
+# read-only squashfs. Manual only, works offline, no automatic rollback.
+#
+# Subcommands:
+#   status              Show activation state of all components
+#   klipper             Restore Klipper from immutable /opt/klipper
+#   moonraker           Restore Moonraker from immutable /opt/moonraker
+#   mainsail            Restore Mainsail from immutable /usr/share/mainsail
+#   klipper-extensions  Restore extensions from immutable squashfs
+#
+# The immutable squashfs is the source of truth. Each recovery replaces the
+# mutable /usr/data/nebulaos/apps/<component> with a fresh copy from the
+# squashfs, then requires a reboot for S05nebulaos-activate to re-bind.
+
+set -eu
+
+NEBULAOS_ROOT="${NEBULAOS_ROOT:-/usr/data/nebulaos}"
+APPS_DIR="$NEBULAOS_ROOT/apps"
+ACTIVATION_STATE="$NEBULAOS_ROOT/system/activation-state.json"
+
+# Immutable source paths (on the read-only squashfs)
+IMMUTABLE_KLIPPER="/opt/klipper"
+IMMUTABLE_MOONRAKER="/opt/moonraker"
+IMMUTABLE_MAINSAIL="/usr/share/mainsail"
+
+die() { echo "nebulaos-recover: error: $1" >&2; exit 1; }
+warn() { echo "nebulaos-recover: warning: $1" >&2; }
+
+# ---------- status ----------
+
+cmd_status() {
+    echo "NebulaOS Component Recovery Status"
+    echo "==================================="
+    echo ""
+
+    if [ -f "$ACTIVATION_STATE" ]; then
+        echo "Activation state file: $ACTIVATION_STATE"
+        echo ""
+    else
+        echo "No activation state file found."
+        echo "(Components may be running from immutable squashfs.)"
+        echo ""
+    fi
+
+    for component in klipper moonraker mainsail nebulaos-klipper-extensions; do
+        _persistent="$APPS_DIR/$component"
+        _immutable=""
+
+        case "$component" in
+            klipper)              _immutable="$IMMUTABLE_KLIPPER" ;;
+            moonraker)            _immutable="$IMMUTABLE_MOONRAKER" ;;
+            mainsail)             _immutable="$IMMUTABLE_MAINSAIL" ;;
+            nebulaos-klipper-extensions) _immutable="(composed into klipper)" ;;
+        esac
+
+        printf "  %-30s" "$component:"
+        if [ -d "$_persistent" ]; then
+            echo "persistent copy present"
+        else
+            echo "no persistent copy (using immutable)"
+        fi
+    done
+
+    echo ""
+
+    # Check bind mount status (only meaningful on device, not dev host)
+    if [ -f /proc/mounts ]; then
+        echo "Active bind mounts:"
+        for mount_target in /opt/klipper /opt/moonraker /usr/share/mainsail; do
+            if awk -v t="$mount_target" '$2==t {found=1} END{exit !found}' /proc/mounts 2>/dev/null; then
+                printf "  %-30s%s\n" "$mount_target:" "bind-mounted (persistent)"
+            else
+                printf "  %-30s%s\n" "$mount_target:" "immutable squashfs"
+            fi
+        done
+    fi
+}
+
+# ---------- recover helpers ----------
+
+stop_services() {
+    _component="$1"
+    case "$_component" in
+        klipper|klipper-extensions)
+            echo "Stopping Klipper..."
+            /etc/init.d/S55klipper stop 2>/dev/null || true
+            if [ -f /etc/init.d/S54nebulaos-host-mcu ]; then
+                /etc/init.d/S54nebulaos-host-mcu stop 2>/dev/null || true
+            fi
+            ;;
+        moonraker)
+            echo "Stopping Moonraker..."
+            /etc/init.d/S56moonraker stop 2>/dev/null || true
+            ;;
+        mainsail)
+            echo "Mainsail is static files; no service to stop."
+            ;;
+    esac
+}
+
+do_recover() {
+    _component="$1"
+    _immutable_src="$2"
+    _persistent_dst="$APPS_DIR/$_component"
+    _backup_dst="${_persistent_dst}.pre-recovery.$(date +%Y%m%d-%H%M%S)"
+
+    if [ ! -d "$_immutable_src" ]; then
+        die "immutable source not found at $_immutable_src (not running on a NebulaOS device?)"
+    fi
+
+    echo "Recovering $_component from $_immutable_src"
+    echo ""
+
+    stop_services "$_component"
+
+    if [ -d "$_persistent_dst" ]; then
+        echo "Moving existing persistent copy to $_backup_dst"
+        mv "$_persistent_dst" "$_backup_dst"
+    fi
+
+    echo "Copying immutable source to $_persistent_dst..."
+    mkdir -p "$_persistent_dst"
+    cp -a "$_immutable_src"/. "$_persistent_dst"/
+
+    echo ""
+    echo "Recovery complete for $_component."
+    echo "A reboot is required for S05nebulaos-activate to re-bind."
+    echo ""
+    echo "If recovering klipper, also recover klipper-extensions to"
+    echo "ensure the composed symlinks are consistent."
+}
+
+# ---------- individual component commands ----------
+
+cmd_klipper() {
+    do_recover "klipper" "$IMMUTABLE_KLIPPER"
+}
+
+cmd_moonraker() {
+    do_recover "moonraker" "$IMMUTABLE_MOONRAKER"
+}
+
+cmd_mainsail() {
+    do_recover "mainsail" "$IMMUTABLE_MAINSAIL"
+}
+
+cmd_klipper_extensions() {
+    _immutable_ext=""
+    _persistent_dst="$APPS_DIR/nebulaos-klipper-extensions"
+    _backup_dst="${_persistent_dst}.pre-recovery.$(date +%Y%m%d-%H%M%S)"
+
+    # Extensions on the immutable squashfs are baked directly into
+    # /opt/klipper/klippy/extras/ as real files (not symlinks). The
+    # separate persistent extensions repo is at
+    # /usr/data/nebulaos/apps/nebulaos-klipper-extensions.
+    #
+    # Recovery means removing the persistent extensions copy so that
+    # S05nebulaos-activate falls back to immutable Klipper (which
+    # already has the baked extensions).
+
+    echo "Recovering klipper-extensions"
+    echo ""
+
+    stop_services "klipper-extensions"
+
+    if [ -d "$_persistent_dst" ]; then
+        echo "Moving existing persistent extensions to $_backup_dst"
+        mv "$_persistent_dst" "$_backup_dst"
+        echo ""
+        echo "Recovery complete for klipper-extensions."
+        echo "The persistent extensions copy has been moved aside."
+        echo "On reboot, S05nebulaos-activate will skip activation and"
+        echo "Klipper will run with the immutable baked extensions."
+    else
+        echo "No persistent extensions copy found."
+        echo "Already running from immutable squashfs extensions."
+    fi
+
+    echo ""
+    echo "A reboot is required for changes to take effect."
+}
+
+# ---------- main ----------
+
+usage() {
+    echo "Usage: nebulaos-recover <command>"
+    echo ""
+    echo "Commands:"
+    echo "  status              Show activation state of all components"
+    echo "  klipper             Restore Klipper from immutable copy"
+    echo "  moonraker           Restore Moonraker from immutable copy"
+    echo "  mainsail            Restore Mainsail from immutable copy"
+    echo "  klipper-extensions  Restore extensions (remove persistent copy)"
+    exit 1
+}
+
+if [ $# -eq 0 ]; then
+    usage
+fi
+
+command="$1"
+shift
+
+case "$command" in
+    status)             cmd_status ;;
+    klipper)            cmd_klipper ;;
+    moonraker)          cmd_moonraker ;;
+    mainsail)           cmd_mainsail ;;
+    klipper-extensions) cmd_klipper_extensions ;;
+    -h|--help|help)     usage ;;
+    *) die "unknown command '$command'. Run 'nebulaos-recover help' for usage." ;;
+esac

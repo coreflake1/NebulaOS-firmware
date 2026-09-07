@@ -47,8 +47,6 @@ MANAGED_DIR = REPO_ROOT / "scripts/build/overlay/etc/nebulaos/moonraker"
 # overlay_root argument uses.
 OVERLAY_ROOT = REPO_ROOT / "scripts/build/overlay"
 
-KLIPPER_PIN = "58bd67db3ce1be1951c3e4a6d1156a79903d4edc"
-EXTENSIONS_PIN = "71610aa6df8f26928007325816f6097c6d964fd3"
 OFFICIAL_KLIPPER = "https://github.com/Klipper3d/klipper.git"
 EXTENSIONS_ORIGIN = "https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
 
@@ -198,9 +196,14 @@ check(
 if cfg.has_section("update_manager klipper"):
     k = dict(cfg.items("update_manager klipper"))
     check(
-        k.get("pinned_commit") == KLIPPER_PIN,
-        f"Klipper is pinned to the qualified commit {KLIPPER_PIN}",
-        f"Klipper pinned_commit is {k.get('pinned_commit')!r}, expected {KLIPPER_PIN}",
+        "pinned_commit" not in k,
+        "Klipper has no pinned_commit — updates independently via upstream master",
+        f"Klipper has unexpected pinned_commit: {k.get('pinned_commit')!r}",
+    )
+    check(
+        k.get("channel") == "dev",
+        "Klipper channel is dev (tracks upstream master branch)",
+        f"Klipper channel is {k.get('channel')!r}, expected 'dev'",
     )
     check(
         "origin" not in k,
@@ -224,7 +227,6 @@ if cfg.has_section(SECT):
         "origin": EXTENSIONS_ORIGIN,
         "primary_branch": "main",
         "managed_services": "klipper",
-        "pinned_commit": EXTENSIONS_PIN,
         "path": "/usr/data/nebulaos/apps/nebulaos-klipper-extensions",
     }
     for key, want in expectations.items():
@@ -233,6 +235,11 @@ if cfg.has_section(SECT):
             f"extensions section sets {key} = {want}",
             f"extensions section has {key} = {e.get(key)!r}, expected {want!r}",
         )
+    check(
+        "pinned_commit" not in e,
+        "extensions have no pinned_commit — update independently",
+        f"extensions have unexpected pinned_commit: {e.get('pinned_commit')!r}",
+    )
     check(
         e.get("primary_branch") == "main",
         "primary_branch is set explicitly - Moonraker defaults it to 'master', "
@@ -246,25 +253,25 @@ if cfg.has_section(SECT):
         "virtualenv/requirements should not be set for a pure-Python extras repo",
     )
 
-# --- 4. the two pins are one qualified pair -------------------------------
+# --- 4. build pins vs runtime independence --------------------------------
 
 deps = (REPO_ROOT / "manifests/dependencies.conf").read_text(encoding="utf-8")
 check(
-    f"KLIPPER_PIN={KLIPPER_PIN}" in deps,
-    "moonraker.conf's Klipper pin matches KLIPPER_PIN in manifests/dependencies.conf",
-    "moonraker.conf's Klipper pin has drifted from manifests/dependencies.conf",
-)
-check(
-    f"KLIPPER_EXTENSIONS_PIN={EXTENSIONS_PIN}" in deps,
-    "moonraker.conf's extensions pin matches KLIPPER_EXTENSIONS_PIN in dependencies.conf",
-    "moonraker.conf's extensions pin has drifted from manifests/dependencies.conf",
-)
-check(
     f"KLIPPER_REPO={OFFICIAL_KLIPPER}" in deps,
-    "the firmware pins official Klipper3d/klipper, which is the origin Moonraker's "
+    "the firmware builds from official Klipper3d/klipper, which is the origin Moonraker's "
     "reserved slot hardcodes anyway - so the 'Unofficial remote url' anomaly the old "
     "fork tripped on every refresh is gone by construction",
     "KLIPPER_REPO is not official Klipper3d/klipper",
+)
+check(
+    "KLIPPER_PIN=" in deps,
+    "manifests/dependencies.conf still pins Klipper for BUILD (immutable recovery copy)",
+    "KLIPPER_PIN missing from dependencies.conf",
+)
+check(
+    "KLIPPER_EXTENSIONS_PIN=" in deps,
+    "manifests/dependencies.conf still pins extensions for BUILD (immutable recovery copy)",
+    "KLIPPER_EXTENSIONS_PIN missing from dependencies.conf",
 )
 
 # --- 5. printer.cfg ordering and sensor type ------------------------------
@@ -400,7 +407,6 @@ else:
     app_dep = (src / "moonraker/components/update_manager/app_deploy.py").read_text(encoding="utf-8")
     both = git_dep + app_dep
     if cfg.has_section(SECT):
-        # An option is "real" only if the deploy classes actually read it.
         for opt in sorted(dict(cfg.items(SECT))):
             pattern = rf'(get|getboolean|getlist|getchoice|getint|getdict|has_option)\(\s*[\'"]{re.escape(opt)}[\'"]'
             check(
@@ -415,20 +421,6 @@ else:
             "'managed_services: klipper' is a genuinely supported value, so an extensions "
             "update restarts Klippy natively with no NebulaOS code involved",
             f"'klipper' is not among the supported managed_services values: {choices}",
-        )
-        # pinned_commit must short-circuit the channel logic, otherwise "channel: dev"
-        # really would mean "track the branch" and the pin would not hold.
-        check(
-            re.search(
-                r"if self\.pinned_commit is not None:.*?elif self\.channel == Channel\.DEV:",
-                git_dep,
-                re.S,
-            )
-            is not None,
-            "pinned_commit is evaluated BEFORE the channel branch in "
-            "_get_upstream_version(), so the pin - not 'channel: dev' - decides what this "
-            "device can update to",
-            "pinned_commit no longer short-circuits the channel logic at this pin",
         )
 
 print()

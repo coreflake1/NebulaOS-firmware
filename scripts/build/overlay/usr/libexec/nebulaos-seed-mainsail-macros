@@ -120,13 +120,13 @@ def _macro(pos, name, show_in_standby=True, show_in_printing=False, show_in_paus
     }
 
 
-def _group(name, macros):
+def _group(name, macros, show_in_standby=True, show_in_printing=True, show_in_pause=True):
     return {
         "name": name,
         "color": "primary",
-        "showInStandby": True,
-        "showInPause": True,
-        "showInPrinting": True,
+        "showInStandby": show_in_standby,
+        "showInPause": show_in_pause,
+        "showInPrinting": show_in_printing,
         "macros": macros,
     }
 
@@ -140,33 +140,26 @@ DEFAULT_GROUPS = {
         _macro(4, "PID_BED"),
         _macro(5, "PID_HOTEND"),
         _macro(6, "NEBULAOS_NOZZLE_CLEAN"),
-    ]),
-    "nebulaos-input-shaper": _group("Input Shaper", [
-        _macro(0, "NEBULAOS_INPUT_SHAPER_CALIBRATE"),
-        _macro(1, "NEBULAOS_CALIBRATION_CONTINUE"),
-        _macro(2, "NEBULAOS_CALIBRATION_CANCEL"),
-    ]),
+        _macro(7, "NEBULAOS_INPUT_SHAPER_CALIBRATE"),
+    ], show_in_printing=False, show_in_pause=False),
     "nebulaos-extruder": _group("Extruder", [
         _macro(0, "NEBULAOS_ESTEPS_CALIBRATE"),
         _macro(1, "LOAD_FILAMENT"),
         _macro(2, "UNLOAD_FILAMENT"),
-        _macro(3, "M600", show_in_printing=True),
-        _macro(4, "PURGE_MORE", show_in_pause=True),
-        _macro(5, "RESUME_FILAMENT_CHANGE", show_in_pause=True),
-        _macro(6, "CANCEL_FILAMENT_CHANGE", show_in_pause=True),
+        _macro(3, "M600", show_in_standby=False, show_in_printing=True),
+    ], show_in_printing=True, show_in_pause=False),
+    "nebulaos-recovery": _group("Recovery", [
+        _macro(0, "NEBULAOS_RESUME_POWER_LOSS"),
+        _macro(1, "NEBULAOS_CLEAR_POWER_LOSS_RECOVERY"),
+    ], show_in_printing=False, show_in_pause=False),
+    "nebulaos-maintenance": _group("Maintenance", [
+        _macro(0, "BEEP"),
+        _macro(1, "PLAY_TUNE"),
     ]),
     "nebulaos-camera": _group("Camera", [
         _macro(0, "SET_CAMERA_QUALITY_LOW"),
         _macro(1, "SET_CAMERA_QUALITY_MED"),
         _macro(2, "SET_CAMERA_QUALITY_HIGH"),
-    ]),
-    "nebulaos-maintenance": _group("Maintenance", [
-        _macro(0, "BEEP"),
-        _macro(1, "PLAY_TUNE"),
-    ]),
-    "nebulaos-recovery": _group("Recovery", [
-        _macro(0, "NEBULAOS_RESUME_POWER_LOSS"),
-        _macro(1, "NEBULAOS_CLEAR_POWER_LOSS_RECOVERY"),
     ]),
 }
 
@@ -181,6 +174,27 @@ LEGACY_GROUP_ID_MAP = {
     "nebulaos_camera": "nebulaos-camera",
     "nebulaos_maintenance": "nebulaos-maintenance",
     "nebulaos_recovery": "nebulaos-recovery",
+}
+
+# Groups that existed in the RC3 six-group schema but are removed in the
+# final five-group schema. Only deleted when they exactly match the known
+# NebulaOS-shipped default (never if user-modified).
+OBSOLETE_GROUPS = {
+    "nebulaos-input-shaper": {
+        "name": "Input Shaper",
+        "color": "primary",
+        "showInStandby": True,
+        "showInPause": True,
+        "showInPrinting": True,
+        "macros": [
+            {"pos": 0, "name": "NEBULAOS_INPUT_SHAPER_CALIBRATE",
+             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
+            {"pos": 1, "name": "NEBULAOS_CALIBRATION_CONTINUE",
+             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
+            {"pos": 2, "name": "NEBULAOS_CALIBRATION_CANCEL",
+             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
+        ],
+    },
 }
 
 MODE_KEY = "macros.mode"
@@ -409,6 +423,49 @@ def migrate_legacy_group_ids(get_status, post, delete, log,
     return results
 
 
+def remove_obsolete_groups(get_status, delete, log,
+                           obsolete_groups: dict | None = None) -> dict:
+    """Remove groups that were part of a prior NebulaOS schema but are no
+    longer in the final product surface. Only deletes when the stored value
+    EXACTLY matches the known NebulaOS default — a user who renamed,
+    reordered, or added macros to the group keeps their version untouched.
+
+    Returns a dict of group_id -> one of "removed", "not_present",
+    "user_modified_left_untouched", "failed".
+    """
+    obsolete_groups = obsolete_groups if obsolete_groups is not None else OBSOLETE_GROUPS
+    results = {}
+    for group_id, known_default in obsolete_groups.items():
+        try:
+            existing = get_group(get_status, group_id)
+        except TransportError as exc:
+            log(f"obsolete cleanup: could not check {group_id!r} ({exc}) - skipping")
+            results[group_id] = "failed"
+            continue
+
+        if existing is None:
+            results[group_id] = "not_present"
+            continue
+
+        if existing != known_default:
+            log(f"obsolete cleanup: {group_id!r} exists but differs from the known "
+                "NebulaOS default — user-modified, leaving untouched")
+            results[group_id] = "user_modified_left_untouched"
+            continue
+
+        log(f"obsolete cleanup: removing {group_id!r} (matches known NebulaOS default exactly)")
+        try:
+            delete_item(delete, f"macros.macrogroups.{group_id}")
+        except TransportError as exc:
+            log(f"obsolete cleanup: deleting {group_id!r} failed ({exc})")
+            results[group_id] = "failed"
+            continue
+
+        results[group_id] = "removed"
+
+    return results
+
+
 def seed_default_mode(get_status, post, log,
                        mode_key: str = MODE_KEY, default_mode: str = DEFAULT_MODE) -> str:
     """Sets macros.mode to `default_mode` ONLY if the key does not exist
@@ -497,6 +554,7 @@ def run(
     log=print,
     groups: dict | None = None,
     legacy_map: dict | None = None,
+    obsolete_groups: dict | None = None,
     mode_key: str = MODE_KEY,
     default_mode: str = DEFAULT_MODE,
     retry_attempts: int = RETRY_ATTEMPTS,
@@ -517,6 +575,8 @@ def run(
         return 1
 
     migration_results = migrate_legacy_group_ids(get_status, post, delete, log, legacy_map)
+
+    obsolete_results = remove_obsolete_groups(get_status, delete, log, obsolete_groups)
 
     created = []
     already_present = []
@@ -573,6 +633,7 @@ def run(
 
     migration_failed = [k for k, v in migration_results.items()
                         if v in ("failed", "ambiguous_left_untouched")]
+    obsolete_failed = [k for k, v in obsolete_results.items() if v == "failed"]
 
     write_marker_atomic(marker_path, {
         "checked_at": _now(),
@@ -580,13 +641,15 @@ def run(
         "already_present": already_present,
         "failed": failed,
         "migration": migration_results,
+        "obsolete_cleanup": obsolete_results,
         "mode_default": mode_result,
     })
     log(f"marker written ({marker_path}): created={created} "
         f"already_present={already_present} failed={failed} "
-        f"migration={migration_results} mode_default={mode_result}")
+        f"migration={migration_results} obsolete_cleanup={obsolete_results} "
+        f"mode_default={mode_result}")
 
-    return 1 if (failed or migration_failed or mode_result == "failed") else 0
+    return 1 if (failed or migration_failed or obsolete_failed or mode_result == "failed") else 0
 
 
 if __name__ == "__main__":

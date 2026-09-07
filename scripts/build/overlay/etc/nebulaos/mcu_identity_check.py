@@ -30,10 +30,22 @@ SAFETY CONTRACT (unchanged from the original file, still enforced):
     hardware-identity-gated creality_flash.flash() function.
 """
 
+import os
 import sys
 
 import mcu_lifecycle
 import mcu_restore
+
+MCU_MANAGED_FLAG = os.environ.get(
+    "MCU_MANAGED_FLAG", "/usr/data/nebulaos/mcu/managed")
+
+
+def _is_managed():
+    try:
+        with open(MCU_MANAGED_FLAG, "r") as f:
+            return f.read().strip() != "false"
+    except (IOError, OSError):
+        return True
 
 
 def emit(fields):
@@ -46,6 +58,11 @@ def main():
     fields = decision.as_dict()
 
     if decision.action == mcu_lifecycle.RESTORE_AUTHORIZED:
+        if not _is_managed():
+            fields["MCU_RESTORE_RESULT"] = "skipped_not_managed"
+            emit(fields)
+            print("MCU_GUARD_RESULT=WARN")
+            sys.exit(0)
         restore_result = mcu_restore.restore()
         fields.update(restore_result.as_dict())
         emit(fields)

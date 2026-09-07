@@ -125,23 +125,6 @@ def with_marker_dir(fn):
         shutil.rmtree(d, ignore_errors=True)
 
 
-def run_seed(marker_path, moon, groups=None, legacy_map=None, retry_attempts=3, retry_delay=0):
-    logs = []
-    rc = seed.run(
-        get_status=moon.get_status,
-        post=moon.post,
-        delete=moon.delete,
-        marker_path=marker_path,
-        log=logs.append,
-        groups=groups if groups is not None else TWO_GROUPS,
-        legacy_map=legacy_map if legacy_map is not None else {},
-        retry_attempts=retry_attempts,
-        retry_delay=retry_delay,
-        sleep=lambda _s: None,
-    )
-    return rc, logs
-
-
 # --- Test 1: Moonraker unavailable - bounded retry, no marker, safe exit ---
 def test_moonraker_unavailable():
     def body(marker_path):
@@ -341,8 +324,9 @@ def test_default_groups_are_well_formed():
         check(f"{group_id}: has group-level color metadata",
               definition.get("color") == "primary")
         for flag in ("showInStandby", "showInPause", "showInPrinting"):
-            check(f"{group_id}: has group-level {flag}=True",
-                  definition.get(flag) is True)
+            check(f"{group_id}: has group-level {flag} (bool)",
+                  isinstance(definition.get(flag), bool),
+                  f"{flag}={definition.get(flag)!r}")
         macros = definition.get("macros")
         check(f"{group_id}: has at least one macro",
               isinstance(macros, list) and len(macros) > 0)
@@ -358,9 +342,10 @@ def test_default_groups_are_well_formed():
 #     real key in DEFAULT_GROUPS, every key is the exact pre-2026-09-06
 #     underscore form, and no accidental self-mapping. ---
 def test_legacy_group_id_map_is_well_formed():
+    valid_targets = set(seed.DEFAULT_GROUPS.keys()) | set(seed.OBSOLETE_GROUPS.keys())
     for old_id, new_id in seed.LEGACY_GROUP_ID_MAP.items():
-        check(f"legacy map: {old_id!r} -> {new_id!r} target exists in DEFAULT_GROUPS",
-              new_id in seed.DEFAULT_GROUPS)
+        check(f"legacy map: {old_id!r} -> {new_id!r} target exists in DEFAULT_GROUPS or OBSOLETE_GROUPS",
+              new_id in valid_targets)
         check(f"legacy map: {old_id!r} is a real underscore id (differs from its target)",
               old_id != new_id)
 
@@ -553,6 +538,172 @@ def test_mode_default_transport_failure_does_not_block_groups():
     with_marker_dir(body)
 
 
+# --- Test 17: final product has exactly five groups ---
+def test_final_product_has_exactly_five_groups():
+    check("final group count is exactly 5",
+          len(seed.DEFAULT_GROUPS) == 5,
+          f"got {len(seed.DEFAULT_GROUPS)}: {list(seed.DEFAULT_GROUPS.keys())}")
+    expected_ids = {"nebulaos-calibration", "nebulaos-extruder", "nebulaos-recovery",
+                    "nebulaos-maintenance", "nebulaos-camera"}
+    check("final group IDs match spec",
+          set(seed.DEFAULT_GROUPS.keys()) == expected_ids,
+          f"got {set(seed.DEFAULT_GROUPS.keys())}")
+    check("no Input Shaper standalone group",
+          "nebulaos-input-shaper" not in seed.DEFAULT_GROUPS)
+
+
+# --- Test 18: Input Shaper macro is in Calibration group ---
+def test_input_shaper_in_calibration_group():
+    cal = seed.DEFAULT_GROUPS["nebulaos-calibration"]
+    macro_names = [m["name"] for m in cal["macros"]]
+    check("NEBULAOS_INPUT_SHAPER_CALIBRATE in Calibration group",
+          "NEBULAOS_INPUT_SHAPER_CALIBRATE" in macro_names)
+    check("NEBULAOS_CALIBRATION_CONTINUE not in any group",
+          not any("NEBULAOS_CALIBRATION_CONTINUE" in [m["name"] for m in g["macros"]]
+                  for g in seed.DEFAULT_GROUPS.values()))
+    check("NEBULAOS_CALIBRATION_CANCEL not in any group",
+          not any("NEBULAOS_CALIBRATION_CANCEL" in [m["name"] for m in g["macros"]]
+                  for g in seed.DEFAULT_GROUPS.values()))
+
+
+# --- Test 19: no workflow helper macros in any dashboard group ---
+def test_no_workflow_helpers_in_dashboard():
+    forbidden = {"PURGE_MORE", "RESUME_FILAMENT_CHANGE", "CANCEL_FILAMENT_CHANGE"}
+    for group_id, definition in seed.DEFAULT_GROUPS.items():
+        macro_names = {m["name"] for m in definition["macros"]}
+        overlap = macro_names & forbidden
+        check(f"{group_id}: no workflow helpers in dashboard",
+              len(overlap) == 0, f"found {overlap}")
+
+
+# --- Test 20: group visibility flags match spec ---
+def test_group_visibility_flags():
+    spec = {
+        "nebulaos-calibration": (True, False, False),
+        "nebulaos-extruder": (True, True, False),
+        "nebulaos-recovery": (True, False, False),
+        "nebulaos-maintenance": (True, True, True),
+        "nebulaos-camera": (True, True, True),
+    }
+    for group_id, (standby, printing, pause) in spec.items():
+        g = seed.DEFAULT_GROUPS[group_id]
+        check(f"{group_id}: showInStandby={standby}", g["showInStandby"] == standby)
+        check(f"{group_id}: showInPrinting={printing}", g["showInPrinting"] == printing)
+        check(f"{group_id}: showInPause={pause}", g["showInPause"] == pause)
+
+
+# --- Test 21: M600 macro visibility (standby=NO, printing=YES) ---
+def test_m600_macro_visibility():
+    ext = seed.DEFAULT_GROUPS["nebulaos-extruder"]
+    m600 = next(m for m in ext["macros"] if m["name"] == "M600")
+    check("M600: showInStandby=False", m600["showInStandby"] is False)
+    check("M600: showInPrinting=True", m600["showInPrinting"] is True)
+    check("M600: showInPause=False", m600["showInPause"] is False)
+
+
+# --- Test 22: obsolete group removal — exact default match is removed ---
+def test_obsolete_group_exact_match_removed():
+    def body(marker_path):
+        obsolete_default = seed.OBSOLETE_GROUPS["nebulaos-input-shaper"]
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-input-shaper"): obsolete_default,
+        })
+        rc, logs = run_seed(marker_path, moon, groups={},
+                            obsolete_groups=seed.OBSOLETE_GROUPS)
+        check("obsolete exact: group removed from store",
+              group_key("nebulaos-input-shaper") not in moon.store)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("obsolete exact: marker records removed",
+              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "removed")
+
+    with_marker_dir(body)
+
+
+# --- Test 23: obsolete group removal — user-modified version is left untouched ---
+def test_obsolete_group_user_modified_left_untouched():
+    def body(marker_path):
+        user_modified = {"name": "My Input Shaper", "macros": [{"pos": 0, "name": "CUSTOM"}]}
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-input-shaper"): user_modified,
+        })
+        rc, logs = run_seed(marker_path, moon, groups={},
+                            obsolete_groups=seed.OBSOLETE_GROUPS)
+        check("obsolete user-modified: group still in store",
+              group_key("nebulaos-input-shaper") in moon.store)
+        check("obsolete user-modified: content unchanged",
+              moon.store[group_key("nebulaos-input-shaper")] == user_modified)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("obsolete user-modified: marker records user_modified_left_untouched",
+              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "user_modified_left_untouched")
+
+    with_marker_dir(body)
+
+
+# --- Test 24: obsolete group not present — no-op ---
+def test_obsolete_group_not_present():
+    def body(marker_path):
+        moon = FakeMoonrakerDb(existing={})
+        rc, logs = run_seed(marker_path, moon, groups={},
+                            obsolete_groups=seed.OBSOLETE_GROUPS)
+        check("obsolete not present: rc==0", rc == 0)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("obsolete not present: marker records not_present",
+              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "not_present")
+
+    with_marker_dir(body)
+
+
+# --- Test 25: full six-to-five migration scenario ---
+def test_full_six_to_five_migration():
+    """Simulates an RC3 install that has all six groups with NebulaOS defaults.
+    After migration: Input Shaper group removed, five final groups present."""
+    def body(marker_path):
+        # Build the old six-group state as it would have been seeded
+        old_groups = {}
+        for gid, gdef in seed.DEFAULT_GROUPS.items():
+            old_groups[group_key(gid)] = gdef
+        # Add the now-obsolete Input Shaper group
+        old_groups[group_key("nebulaos-input-shaper")] = seed.OBSOLETE_GROUPS["nebulaos-input-shaper"]
+
+        moon = FakeMoonrakerDb(existing=old_groups)
+        # Also seed the mode
+        moon.store[seed.MODE_KEY] = "expert"
+
+        rc, logs = run_seed(marker_path, moon,
+                            obsolete_groups=seed.OBSOLETE_GROUPS)
+        check("six-to-five: rc==0", rc == 0)
+        check("six-to-five: Input Shaper group removed",
+              group_key("nebulaos-input-shaper") not in moon.store)
+        check("six-to-five: all five final groups present",
+              all(group_key(gid) in moon.store for gid in seed.DEFAULT_GROUPS))
+        check("six-to-five: mode still expert",
+              moon.store[seed.MODE_KEY] == "expert")
+
+    with_marker_dir(body)
+
+
+def run_seed(marker_path, moon, groups=None, legacy_map=None,
+             obsolete_groups=None, retry_attempts=3, retry_delay=0):
+    logs = []
+    rc = seed.run(
+        get_status=moon.get_status,
+        post=moon.post,
+        delete=moon.delete,
+        marker_path=marker_path,
+        log=logs.append,
+        groups=groups if groups is not None else TWO_GROUPS,
+        legacy_map=legacy_map if legacy_map is not None else {},
+        obsolete_groups=obsolete_groups if obsolete_groups is not None else {},
+        retry_attempts=retry_attempts,
+        retry_delay=retry_delay,
+        sleep=lambda _s: None,
+    )
+    return rc, logs
+
+
 def main():
     test_moonraker_unavailable()
     test_fresh_install_creates_both_groups()
@@ -570,6 +721,15 @@ def main():
     test_migration_leaves_a_genuine_collision_untouched()
     test_mode_default_never_overwrites_existing_value()
     test_mode_default_transport_failure_does_not_block_groups()
+    test_final_product_has_exactly_five_groups()
+    test_input_shaper_in_calibration_group()
+    test_no_workflow_helpers_in_dashboard()
+    test_group_visibility_flags()
+    test_m600_macro_visibility()
+    test_obsolete_group_exact_match_removed()
+    test_obsolete_group_user_modified_left_untouched()
+    test_obsolete_group_not_present()
+    test_full_six_to_five_migration()
 
     print()
     print(f"=== {PASS} passed, {FAIL} failed ===")
