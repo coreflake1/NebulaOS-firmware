@@ -112,7 +112,6 @@ make_extensions() {
   "compat_schema_version": 1,
   "extensions_version": "$content",
   "nebulaos_api_level": 1,
-  "klipper": {"qualified_commit": "0000", "allow_unqualified": false},
   "required_klipper_symbols": [],
   "composition": {
     "source_dir": "extras",

@@ -143,6 +143,32 @@ mkdir -p "$BUILDROOT_DIR/board/halley5-nebulaos-wheels"
 cp "$REPO_ROOT/scripts/build/vendor-wheels/"*.whl "$BUILDROOT_DIR/board/halley5-nebulaos-wheels/"
 cp "$REPO_ROOT/scripts/build/vendor-patches/python-matplotlib/python-matplotlib.mk" "$BUILDROOT_DIR/package/python-matplotlib/python-matplotlib.mk"
 
+# squashfs-tools 4.6.1: GitHub's auto-generated tag archives are mutable —
+# the hash changed after Buildroot pinned it. Upstream Buildroot fixed this
+# by switching to the stable release asset (same content, immutable URL).
+# Apply the same fix idempotently to our pinned buildroot-x2000 checkout.
+_sq_mk="$BUILDROOT_DIR/package/squashfs/squashfs.mk"
+_sq_hash="$BUILDROOT_DIR/package/squashfs/squashfs.hash"
+if grep -q 'call github,plougher' "$_sq_mk" 2>/dev/null; then
+	sed -i \
+		-e 's|^SQUASHFS_SITE = .*|SQUASHFS_SOURCE = squashfs-tools-$(SQUASHFS_VERSION).tar.gz\nSQUASHFS_SITE = https://github.com/plougher/squashfs-tools/releases/download/$(SQUASHFS_VERSION)|' \
+		"$_sq_mk"
+	sed -i \
+		-e 's|squashfs-4\.6\.1\.tar\.gz|squashfs-tools-4.6.1.tar.gz|' \
+		"$_sq_hash"
+	echo "== squashfs-tools: switched to stable release asset (upstream Buildroot fix) =="
+else
+	echo "== squashfs-tools: already using stable release asset =="
+fi
+if grep -q 'call github,plougher' "$_sq_mk" 2>/dev/null; then
+	echo "FATAL: squashfs-tools still uses GitHub auto-generated archive after fix" >&2
+	exit 1
+fi
+if ! grep -q 'squashfs-tools-4\.6\.1\.tar\.gz' "$_sq_hash" 2>/dev/null; then
+	echo "FATAL: squashfs.hash does not reference the stable release asset filename" >&2
+	exit 1
+fi
+
 echo "== normalizing .config (resolves any derived Kconfig selects) =="
 ( cd "$BUILDROOT_DIR" && make olddefconfig )
 

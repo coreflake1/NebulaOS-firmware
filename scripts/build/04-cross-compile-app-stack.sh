@@ -821,23 +821,16 @@ _assert_seed_matches_pin nebulaos-klipper-extensions \
 	"$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" "$KLIPPER_EXTENSIONS_PIN"
 _assert_seed_matches_pin moonraker \
 	"$OVERLAY/opt/nebulaos-seeds/moonraker.tar.gz" "$MOONRAKER_PIN"
-
-# Also verify the extensions manifest declares the correct Klipper qualification
-# target and does not allow unqualified operation.
 _ext_manifest="$VENDOR/nebulaos-klipper-extensions/nebulaos-extensions.json"
-_ext_qualified=$(grep -o '"qualified_commit"[[:space:]]*:[[:space:]]*"[^"]*"' "$_ext_manifest" | \
-	sed -E 's/.*"([^"]*)"$/\1/' | head -1)
-_ext_allow_unq=$(grep -o '"allow_unqualified"[[:space:]]*:[[:space:]]*[a-z]*' "$_ext_manifest" | \
-	sed -E 's/.*:[[:space:]]*//' | head -1)
-if [ "$_ext_qualified" != "$KLIPPER_PIN" ]; then
-	echo "FATAL: extensions manifest qualified_commit ($_ext_qualified) does not match KLIPPER_PIN ($KLIPPER_PIN)" >&2
+if grep -q '"qualified_commit"' "$_ext_manifest" 2>/dev/null; then
+	echo "FATAL: extensions manifest still contains qualified_commit (removed: Klipper and extensions are independently updateable)" >&2
 	exit 1
 fi
-if [ "$_ext_allow_unq" != "false" ]; then
-	echo "FATAL: extensions manifest allow_unqualified=$_ext_allow_unq (must be false)" >&2
+if grep -q '"allow_unqualified"' "$_ext_manifest" 2>/dev/null; then
+	echo "FATAL: extensions manifest still contains allow_unqualified (removed: Klipper and extensions are independently updateable)" >&2
 	exit 1
 fi
-echo "  extensions manifest: qualified_commit matches KLIPPER_PIN, allow_unqualified=false"
+echo "  extensions manifest: no global Klipper version gate (correct)"
 echo "== seed archive integrity verified =="
 
 # Verify seed_commit output from make_seed_archive matches the pin as well.
