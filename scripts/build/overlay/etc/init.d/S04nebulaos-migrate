@@ -474,6 +474,128 @@ migrate_moonraker_legacy_sections() {
 	return 0
 }
 
+# Phase 2 overnight convergence mission (2026-09-09): commit cddf41b
+# ("Phase 2 core convergence: seeder, configs, MCU CLI, recovery tool,
+# managed gate") flipped this project's own shipped moonraker.conf default
+# from channel: dev (moonraker) / channel: beta (mainsail) to the final
+# frozen policy of channel: stable for both (Klipper stays dev/upstream -
+# see _project/missions/final-core-convergence/DECISIONS.md's "Runtime
+# Updaters" section). A device provisioned from an image built before that
+# commit still has the old dev/beta values baked into its persistent
+# moonraker.conf, which nothing else here ever revisits (moonraker.conf is
+# USER OWNED - see this file's own header - so no other migration touches
+# its update_manager sections at all). Live evidence (Phase 2 RC4 overnight
+# qualification, 2026-09-09): a real device carried exactly this narrow old
+# shape unchanged.
+#
+# Deliberately narrow and value-exact, same discipline as
+# _moonraker_legacy_sections_are_narrow() above: only rewrites the literal
+# `channel: dev` / `channel: beta` values, and only when the surrounding
+# section contains nothing this migration does not already recognize as
+# this project's own known shape (type/repo/path/channel/blank/comment). A
+# section with an explicit pinned_commit, a different channel a user chose
+# on purpose, or any other unrecognized option is left completely
+# untouched - this migration cannot distinguish "the old shipped default,
+# never revisited" from "a user deliberately chose dev/beta and that
+# happens to match the old default", so touching anything outside this
+# exact narrow shape would risk silently overriding a real user choice
+# rather than a same known default.
+_UPDATER_CHANNEL_MIGRATIONS='update_manager moonraker:dev
+update_manager mainsail:beta'
+
+# 0 if the named section in $1 contains only blank lines, comments, and
+# options from the allowed set for that section (channel always allowed;
+# mainsail's section additionally allows type:/repo:/path: - its own known
+# shape, see the shipped seed moonraker.conf) - 1 if anything else is
+# present. A section that does not exist at all is trivially narrow (exit
+# 0) - the caller separately checks the channel value itself before ever
+# treating a section as a migration candidate.
+_updater_section_is_narrow() {
+	sec="$1"; file="$2"
+	awk -v want="[$sec]" '
+		BEGIN { extra = (want == "[update_manager mainsail]") }
+		/^\[.*\]$/ { in_sec = ($0 == want); next }
+		in_sec && $0 ~ /^[ \t]*(#.*)?$/ { next }
+		in_sec && $0 ~ /^[ \t]*channel[ \t]*:/ { next }
+		in_sec && extra && $0 ~ /^[ \t]*(type|repo|path)[ \t]*:/ { next }
+		in_sec { bad = 1 }
+		END { exit bad ? 1 : 0 }
+	' "$file"
+}
+
+# Rewrites the `channel:` value inside exactly one named section, in place
+# in $2, from $3 to $4. Only ever called after _updater_section_is_narrow
+# has already confirmed the section has no other content, and after the
+# caller has confirmed the current value is exactly $3 - so this never
+# needs to re-validate, only rewrite.
+_updater_rewrite_channel() {
+	sec="$1"; file="$2"; from="$3"; to="$4"
+	awk -v want="[$sec]" -v from="$from" -v to="$to" '
+		/^\[.*\]$/ { in_sec = ($0 == want); print; next }
+		in_sec && $0 ~ ("^[ \t]*channel[ \t]*:[ \t]*" from "[ \t]*$") {
+			sub(from, to)
+		}
+		{ print }
+	' "$file"
+}
+
+migrate_updater_channels() {
+	f="$PRINTER_DATA_CONFIG/moonraker.conf"
+	[ -f "$f" ] || return 0
+
+	changed=0
+	work="$f"
+	tmp="$f.migrate-tmp.$$"
+
+	old_ifs="$IFS"
+	IFS='
+'
+	for entry in $_UPDATER_CHANNEL_MIGRATIONS; do
+		IFS="$old_ifs"
+		sec="${entry%%:*}"
+		old_val="${entry##*:}"
+
+		cur=$(awk -v want="[$sec]" '
+			/^\[.*\]$/ { in_sec = ($0 == want); next }
+			in_sec && $0 ~ /^[ \t]*channel[ \t]*:/ {
+				sub(/^[ \t]*channel[ \t]*:[ \t]*/, "")
+				gsub(/[ \t]+$/, "")
+				print
+				exit
+			}
+		' "$work")
+
+		if [ "$cur" != "$old_val" ]; then
+			IFS='
+'
+			continue
+		fi
+		if ! _updater_section_is_narrow "$sec" "$work"; then
+			log "updater-channel migration: [$sec] has channel: $old_val but also unrecognized content - leaving untouched (manual review, not a known-safe shape)"
+			IFS='
+'
+			continue
+		fi
+
+		if ! _updater_rewrite_channel "$sec" "$work" "$old_val" "stable" > "$tmp"; then
+			log "ERROR: could not rewrite [$sec] channel for updater-channel migration"
+			rm -f "$tmp"
+			IFS='
+'
+			continue
+		fi
+		mv "$tmp" "$work"
+		changed=1
+		log "moonraker.conf: [$sec] channel migrated from the old shipped default ($old_val) to stable"
+		IFS='
+'
+	done
+	IFS="$old_ifs"
+
+	[ "$changed" = "1" ] || return 0
+	return 0
+}
+
 # The one anchor line this mission's own printer.cfg (both the old
 # monolithic shape and the new split entrypoint) has always carried
 # unchanged, in the same relative position - the last of the SimpleAF
@@ -483,36 +605,129 @@ migrate_moonraker_legacy_sections() {
 # Klipper config parser.
 _MIGRATE_PCFG_ANCHOR='[include simpleaf/bltouch_macro.cfg]'
 
+# The exact, literal include lines this project's own post-7b4a2ec/
+# pre-8889ef0 generation shipped between calibration.cfg's include and the
+# anchor line - see migrate_printer_cfg()'s case-3 comment for why this
+# region must be checked narrowly rather than assumed safe to discard.
+_PCFG_GEN3_KNOWN_MIDDLE_INCLUDES='[include GuppyScreen/guppy_cmd.cfg]
+[include camera-quality.cfg]
+[include simpleaf/homing.cfg]
+[include simpleaf/useful_macros.cfg]
+[include simpleaf/fan_control.cfg]
+[include simpleaf/client.cfg]
+[include simpleaf/start_end.cfg]
+[include simpleaf/Line_Purge.cfg]
+[include simpleaf/Smart_Park.cfg]'
+
+# 0 if the region of $1 strictly between calibration.cfg's include line and
+# the anchor line contains only blank lines, comments, and the exact known
+# include lines listed above (in any order/count - a technician may have
+# commented one out, which still counts as "recognized", just inert); 1 if
+# anything else is present (a real option, a section header, an include
+# this generation never shipped). Klipper's own include resolution doesn't
+# care about surrounding blank lines/comments, so those are always safe to
+# discard either way - this only guards against discarding a real
+# configuration change.
+_pcfg_gen3_middle_region_is_narrow() {
+	awk -v known="$_PCFG_GEN3_KNOWN_MIDDLE_INCLUDES" -v calib='[include /etc/nebulaos/klipper/calibration.cfg]' -v anchor="$_MIGRATE_PCFG_ANCHOR" '
+		BEGIN {
+			n = split(known, arr, "\n")
+			for (i = 1; i <= n; i++) is_known[arr[i]] = 1
+			in_region = 0
+			bad = 0
+		}
+		$0 == calib { in_region = 1; next }
+		$0 == anchor { in_region = 0; next }
+		in_region && $0 ~ /^[ \t]*(#.*)?$/ { next }
+		in_region && ($0 in is_known) { next }
+		in_region { bad = 1 }
+		END { exit bad ? 1 : 0 }
+	' "$1"
+}
+
 migrate_printer_cfg() {
 	f="$PRINTER_DATA_CONFIG/printer.cfg"
 	[ -f "$f" ] || return 0
 
-	# Case D: already migrated - detectable, idempotent, no-op.
-	grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$f" && return 0
+	# Case D: already migrated - detectable, idempotent, no-op. Requires
+	# the FULL current include set, not just platform.cfg: Phase 2
+	# overnight convergence mission (2026-09-09) found a real device live
+	# whose printer.cfg had platform.cfg/machine.cfg/z_offset_probe.cfg/
+	# calibration.cfg (added by the earlier Phase 1.5 split, commit
+	# 7b4a2ec) but predated commit 8889ef0 ("Phase 2 upstream-first config
+	# refactor: remove SimpleAF/GuppyScreen deps"), which is what actually
+	# added homing.cfg/print.cfg/filament.cfg/beeper.cfg and removed the
+	# direct GuppyScreen/guppy_cmd.cfg + simpleaf/*.cfg includes. Checking
+	# only platform.cfg let that device's printer.cfg short-circuit here
+	# forever, silently running the old SimpleAF/GuppyScreen print,
+	# filament-runout, and homing implementations instead of the Phase 2
+	# ones - and, on that specific device, with no [filament_switch_sensor]
+	# object loaded at all (filament.cfg was never included), a genuine
+	# runout-detection gap. filament.cfg is the last of the four files that
+	# commit added, so its presence is what "fully migrated" now means.
+	grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$f" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/filament.cfg]' "$f" \
+		&& return 0
 
-	# Only a file that looks like this mission's own known old monolithic
-	# shape is migrated automatically. Recognized by: it does NOT yet have
-	# the new include (checked above), the anchor line appears exactly
-	# once, and it carries this project's own authorship markers - EITHER
-	# [nebulaos_compat] as a real (non-included) section (every generation
-	# from the no-fork migration onward), OR, for a device that predates
-	# that section entirely, [tmcstatus] AND [nebulaos_version] both
-	# present as real sections. Both of those are this project's own
-	# extension modules, defined inline in every generation of this
-	# project's printer.cfg since the Virgin-Baseline Fix + Rebuild mission
-	# (2026-08-08) - well before [nebulaos_compat] was introduced. Real
-	# device found live (Phase 1.5 hardware qualification, 2026-08-19): a
-	# device provisioned in that earlier window has neither [nebulaos_compat]
-	# nor the new include, so the original (narrower) check refused it -
-	# correctly safe, but it meant the device could never migrate off the
-	# un-migrated shape at all, silently, forever. Anything with NONE of
-	# these markers is still refused rather than guessed at.
+	# Only a file that looks like one of this mission's own known old
+	# shapes is migrated automatically. Recognized by: it does NOT yet
+	# have the full new include set (checked above), the anchor line
+	# appears exactly once, and it carries this project's own authorship
+	# markers - ANY of:
+	#   1. [nebulaos_compat] as a real (non-included) section (every
+	#      generation from the no-fork migration onward)
+	#   2. for a device that predates that section entirely, [tmcstatus]
+	#      AND [nebulaos_version] both present as real sections - this
+	#      project's own extension modules, defined inline in every
+	#      generation of this project's printer.cfg since the Virgin-
+	#      Baseline Fix + Rebuild mission (2026-08-08), well before
+	#      [nebulaos_compat] was introduced. Real device found live (Phase
+	#      1.5 hardware qualification, 2026-08-19): a device provisioned in
+	#      that earlier window has neither marker, so the original
+	#      (narrower) check refused it - correctly safe, but it meant the
+	#      device could never migrate off the un-migrated shape at all,
+	#      silently, forever.
+	#   3. the post-7b4a2ec/pre-8889ef0 intermediate shape described above:
+	#      already has the platform/machine/z_offset_probe/calibration
+	#      includes (case D's own markers, just not the newer four) - this
+	#      is ALSO this project's own known, documented shape from an
+	#      identifiable commit range, not a guess.
+	# Anything with NONE of these markers is still refused rather than
+	# guessed at.
 	anchor_count=$(grep -cxF "$_MIGRATE_PCFG_ANCHOR" "$f")
 	known_shape=0
 	if grep -qE '^\[nebulaos_compat\]' "$f"; then
 		known_shape=1
 	elif grep -qE '^\[tmcstatus\]' "$f" && grep -qE '^\[nebulaos_version\]' "$f"; then
 		known_shape=1
+	elif grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$f" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/machine.cfg]' "$f" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/z_offset_probe.cfg]' "$f" \
+		&& grep -qxF '[include /etc/nebulaos/klipper/calibration.cfg]' "$f"; then
+		# Case 3's own extra guard: the anchor-cut below discards
+		# EVERYTHING from the top of the file through the anchor line,
+		# unconditionally - it has no way to preserve content a
+		# technician inserted BETWEEN calibration.cfg's include and the
+		# anchor (as opposed to genuine trailing content AFTER the
+		# anchor, which the cut already preserves correctly). Real
+		# device found live (Phase 2 RC4 overnight qualification,
+		# 2026-09-09): exactly this happened - a documented,
+		# safety-critical live-qualification override
+		# ([axis_twist_compensation] calibrate_end_y, preventing the
+		# probe frame from exceeding the real Y-axis travel by 4mm) had
+		# been inserted right after calibration.cfg's include, and a
+		# first version of this fix silently discarded it. Rather than
+		# try to relocate arbitrary mid-block insertions correctly (a
+		# technician could put anything there, in any order), this
+		# region must contain ONLY the exact known GuppyScreen/
+		# camera-quality/simpleaf include lines this generation shipped
+		# (plus blank lines and comments) for case 3 to apply at all -
+		# anything else falls through to "unrecognized shape" (refused,
+		# backed up, logged) rather than risk deleting something a human
+		# added for a real reason.
+		if _pcfg_gen3_middle_region_is_narrow "$f"; then
+			known_shape=1
+		fi
 	fi
 	if [ "$known_shape" -ne 1 ] || [ "$anchor_count" -ne 1 ]; then
 		ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -601,6 +816,44 @@ migrate_config_ownership() {
 	return $rc
 }
 
+# GuppyScreen's upstream guppy_cmd.cfg ships [guppy_module_loader] and
+# [guppy_config_helper] sections that require the Guppy fork of Klipper.
+# NebulaOS runs upstream pristine Klipper, which has no such modules, so
+# these sections cause an immediate config error on startup. A device
+# provisioned before NebulaOS (or one that inherited GuppyScreen config
+# from a prior install) may still have these in its persistent config.
+# This migration comments them out, idempotently, so the include is not
+# broken. The rest of guppy_cmd.cfg (shell commands, macros, beeper) is
+# valid upstream Klipper and left untouched.
+migrate_guppy_stale_modules() {
+	f="$PRINTER_DATA_CONFIG/GuppyScreen/guppy_cmd.cfg"
+	[ -f "$f" ] || return 0
+
+	if ! grep -q '^\[guppy_module_loader\]\|^\[guppy_config_helper\]' "$f"; then
+		return 0
+	fi
+
+	tmp="$f.migrate-tmp.$$"
+	if ! sed \
+		-e 's/^\[guppy_module_loader\]$/# [guppy_module_loader]  # removed by NebulaOS migration: not in upstream Klipper/' \
+		-e 's/^\[guppy_config_helper\]$/# [guppy_config_helper]  # removed by NebulaOS migration: not in upstream Klipper/' \
+		"$f" > "$tmp"; then
+		log "ERROR: could not rewrite GuppyScreen/guppy_cmd.cfg to remove stale Guppy-fork sections"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	if grep -q '^\[guppy_module_loader\]\|^\[guppy_config_helper\]' "$tmp"; then
+		log "ERROR: GuppyScreen/guppy_cmd.cfg migration did not remove all stale sections - leaving the original untouched"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	mv "$tmp" "$f"
+	log "GuppyScreen/guppy_cmd.cfg: commented out [guppy_module_loader] and [guppy_config_helper] (Guppy-fork modules not present in upstream Klipper)"
+	return 0
+}
+
 start() {
 	_diag_init
 	_expected_version=""
@@ -632,8 +885,10 @@ start() {
 	# device on an old config shape must recover on the very next boot
 	# rather than only when a generation happens to change.
 	migrate_moonraker_pin_include
+	migrate_updater_channels
 	migrate_printer_cfg
 	migrate_config_ownership
+	migrate_guppy_stale_modules
 
 	if [ ! -f "$SEEDS/seed-manifest.json" ]; then
 		_migration_action="skipped:no_manifest"
