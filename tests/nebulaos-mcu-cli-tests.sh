@@ -278,6 +278,136 @@ else
 fi
 
 # =========================================================================
+# 8b. Klipper stop/restart wrapping around flash/managed (Phase 2
+#     overnight convergence mission, 2026-09-09): real device found live
+#     that cmd_flash/cmd_managed never stopped the Klipper SERVICE before
+#     touching the MCU serial port at all - check_printer_idle() only
+#     checks Moonraker's reported print_stats state, which says nothing
+#     about whether klippy.py still holds /dev/ttyS1. Proven live: running
+#     the underlying identify path (mcu_identity_check.py, via
+#     `nebulaos-mcu status` reading a cached file was safe, but the same
+#     identify handshake IS what flash/managed's own restart-then-identify
+#     sequence exercises live) while Klipper was connected reset the MCU
+#     outright and needed a hard power cycle to recover - a corrupted
+#     flash write racing the same connection would be a real bricking
+#     risk, not just a reset. These tests verify stop happens BEFORE the
+#     flash helper runs and restart happens AFTER, in both the success and
+#     the failure case (a flash that fails must still get Klipper back).
+# =========================================================================
+
+echo ""
+echo "--- Klipper stop/restart wrapping (flash) ---"
+
+MOCK_FLASH_OK="$TMPDIR/mock_flash_ok.sh"
+cat > "$MOCK_FLASH_OK" <<'EOF'
+#!/bin/sh
+echo "mock flash helper: pretending to flash $2"
+exit 0
+EOF
+chmod +x "$MOCK_FLASH_OK"
+
+MOCK_FLASH_FAIL="$TMPDIR/mock_flash_fail.sh"
+cat > "$MOCK_FLASH_FAIL" <<'EOF'
+#!/bin/sh
+echo "mock flash helper: pretending to fail" >&2
+exit 1
+EOF
+chmod +x "$MOCK_FLASH_FAIL"
+
+FIRMWARE_FIXTURE="$TMPDIR/firmware.bin"
+echo "fake firmware bytes" > "$FIRMWARE_FIXTURE"
+
+FLASH_MANAGED_DIR="$TMPDIR/flash-managed"
+
+# PYTHON3=/bin/sh: the mock helper is a plain shell script, not Python -
+# `nebulaos-mcu` always invokes it as `"$PYTHON3" "$MCU_FLASH_FILE" ...`,
+# and `sh /path/to/mock.sh <args>` runs it correctly either way.
+flash_ok_output=$(MCU_FLASH_FILE="$MOCK_FLASH_OK" PYTHON3=/bin/sh \
+    MCU_MANAGED_DIR="$FLASH_MANAGED_DIR" \
+    MOONRAKER_URL="http://127.0.0.1:1" \
+    "$CLI_SCRIPT" flash "$FIRMWARE_FIXTURE" 2>&1)
+
+if echo "$flash_ok_output" | grep -q "Stopping Klipper"; then
+    pass "successful flash stops Klipper first"
+else
+    fail "successful flash did not stop Klipper first ($flash_ok_output)"
+fi
+if echo "$flash_ok_output" | grep -q "Restarting Klipper"; then
+    pass "successful flash restarts Klipper afterward"
+else
+    fail "successful flash did not restart Klipper afterward ($flash_ok_output)"
+fi
+stop_line=$(echo "$flash_ok_output" | grep -n "Stopping Klipper" | head -1 | cut -d: -f1)
+flash_line=$(echo "$flash_ok_output" | grep -n "mock flash helper" | head -1 | cut -d: -f1)
+restart_line=$(echo "$flash_ok_output" | grep -n "Restarting Klipper" | head -1 | cut -d: -f1)
+if [ -n "$stop_line" ] && [ -n "$flash_line" ] && [ -n "$restart_line" ] \
+   && [ "$stop_line" -lt "$flash_line" ] && [ "$flash_line" -lt "$restart_line" ]; then
+    pass "flash sequence order is correct: stop -> flash -> restart"
+else
+    fail "flash sequence order is wrong (stop=$stop_line flash=$flash_line restart=$restart_line)"
+fi
+
+flash_fail_output=$(MCU_FLASH_FILE="$MOCK_FLASH_FAIL" PYTHON3=/bin/sh \
+    MCU_MANAGED_DIR="$FLASH_MANAGED_DIR" \
+    MOONRAKER_URL="http://127.0.0.1:1" \
+    "$CLI_SCRIPT" flash "$FIRMWARE_FIXTURE" 2>&1) || true
+
+if echo "$flash_fail_output" | grep -q "Restarting Klipper"; then
+    pass "a FAILED flash still restarts Klipper (never leaves it stopped)"
+else
+    fail "a failed flash left Klipper stopped ($flash_fail_output)"
+fi
+if echo "$flash_fail_output" | grep -qi "flash failed"; then
+    pass "a failed flash is reported as a failure"
+else
+    fail "a failed flash was not reported correctly"
+fi
+
+echo ""
+echo "--- Klipper stop/restart wrapping (managed) ---"
+
+MOCK_IDENTITY_NATIVE="$TMPDIR/mock_identity_native.sh"
+cat > "$MOCK_IDENTITY_NATIVE" <<'EOF'
+#!/bin/sh
+echo "MCU_APPLICATION_CLASS=NATIVE_CANDIDATE_001"
+echo "MCU_GUARD_RESULT=PASS"
+EOF
+chmod +x "$MOCK_IDENTITY_NATIVE"
+
+managed_output=$(MCU_IDENTITY_CHECK="$MOCK_IDENTITY_NATIVE" PYTHON3=/bin/sh \
+    MCU_MANAGED_DIR="$FLASH_MANAGED_DIR" \
+    "$CLI_SCRIPT" managed 2>&1) || true
+
+if echo "$managed_output" | grep -q "Stopping Klipper"; then
+    pass "managed stops Klipper before checking MCU state"
+else
+    fail "managed did not stop Klipper first ($managed_output)"
+fi
+if echo "$managed_output" | grep -q "Restarting Klipper"; then
+    pass "managed restarts Klipper afterward (already-native success path)"
+else
+    fail "managed did not restart Klipper afterward ($managed_output)"
+fi
+
+MOCK_IDENTITY_UNKNOWN="$TMPDIR/mock_identity_unknown.sh"
+cat > "$MOCK_IDENTITY_UNKNOWN" <<'EOF'
+#!/bin/sh
+echo "MCU_APPLICATION_CLASS=UNKNOWN_APPLICATION"
+echo "MCU_GUARD_RESULT=WARN"
+EOF
+chmod +x "$MOCK_IDENTITY_UNKNOWN"
+
+managed_refused_output=$(MCU_IDENTITY_CHECK="$MOCK_IDENTITY_UNKNOWN" PYTHON3=/bin/sh \
+    MCU_MANAGED_DIR="$FLASH_MANAGED_DIR" \
+    "$CLI_SCRIPT" managed 2>&1) || true
+
+if echo "$managed_refused_output" | grep -q "Restarting Klipper"; then
+    pass "managed restarts Klipper even on the REFUSED/unknown-application exit path"
+else
+    fail "managed left Klipper stopped on the refused path ($managed_refused_output)"
+fi
+
+# =========================================================================
 # 9. Unknown command handling
 # =========================================================================
 

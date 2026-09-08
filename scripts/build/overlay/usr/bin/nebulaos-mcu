@@ -52,6 +52,48 @@ set_managed() {
     echo "$1" > "$MCU_MANAGED_FLAG"
 }
 
+# Phase 2 overnight convergence mission (2026-09-09): mcu_identity_check.py,
+# mcu_restart.py and mcu_application_identify.py's shared run_connected()
+# were all designed and tested for boot-time-only use, strictly BEFORE
+# Klipper ever touches /dev/ttyS1 (S50nebulaos-mcu-guard runs before
+# S55klipper specifically so the port is never contended - see that
+# script's own header, and tests/mcu-guard-tests.sh's own "S50 releases
+# /dev/ttyS1 before S55 starts" coverage). Neither cmd_flash() nor
+# cmd_managed() below ever stopped the Klipper SERVICE before calling into
+# them, though - only check_printer_idle()'s Moonraker API check, which
+# says nothing about whether klippy.py still holds the port. Proven live:
+# running mcu_identity_check.py manually (via `nebulaos-mcu status`, which
+# only reads a cached file and was safe, but the SAME underlying identify
+# path is what a user would expect `flash`/`managed` to also exercise)
+# while Klipper was connected reset the MCU outright - Klipper reported
+# "Lost communication with MCU 'mcu'", and neither FIRMWARE_RESTART, a
+# full Klipper service restart, nor a full host reboot could recover it;
+# only a hard power cycle did. That single, less-invasive identify probe
+# is nothing next to an actual bootloader-entry-and-flash sequence
+# racing Klipper's own live connection - a corrupted flash write is a
+# real bricking risk, not just a reset. Fixed at the root separately
+# (mcu_application_identify.py now refuses to open a port already held
+# open by another process), but that is defense in depth, not a reason
+# to keep racing Klipper here: stopping the service outright, the same
+# way nebulaos-recover's own stop_services() already does for its
+# component restores, removes the race entirely rather than relying on
+# a check to catch it after the fact.
+stop_klipper_for_mcu_touch() {
+    echo "Stopping Klipper (required before any MCU serial operation)..."
+    /etc/init.d/S55klipper stop 2>/dev/null || true
+    if [ -f /etc/init.d/S54nebulaos-host-mcu ]; then
+        /etc/init.d/S54nebulaos-host-mcu stop 2>/dev/null || true
+    fi
+}
+
+restart_klipper_after_mcu_touch() {
+    echo "Restarting Klipper..."
+    if [ -f /etc/init.d/S54nebulaos-host-mcu ]; then
+        /etc/init.d/S54nebulaos-host-mcu start 2>/dev/null || true
+    fi
+    /etc/init.d/S55klipper start 2>/dev/null || true
+}
+
 check_printer_idle() {
     _state=$("$PYTHON3" -c "
 import json, sys
@@ -130,8 +172,15 @@ cmd_flash() {
         die "Python interpreter not found at $PYTHON3"
     fi
 
+    stop_klipper_for_mcu_touch
+
     echo "Flashing $FIRMWARE_FILE to MCU..."
-    if "$PYTHON3" "$MCU_FLASH_FILE" "$FIRMWARE_FILE"; then
+    _flash_rc=0
+    "$PYTHON3" "$MCU_FLASH_FILE" "$FIRMWARE_FILE" || _flash_rc=$?
+
+    restart_klipper_after_mcu_touch
+
+    if [ "$_flash_rc" -eq 0 ]; then
         set_managed "false"
         echo ""
         echo "MCU firmware flashed successfully."
@@ -153,6 +202,13 @@ cmd_managed() {
     if [ ! -x "$PYTHON3" ]; then
         die "Python interpreter not found at $PYTHON3"
     fi
+
+    # trap, not a plain call at the end: cmd_managed has several exit
+    # points below (exit 0 twice, exit 1 three times) - a trap guarantees
+    # Klipper comes back exactly once regardless of which one fires,
+    # rather than needing every branch to remember to call it.
+    trap restart_klipper_after_mcu_touch EXIT
+    stop_klipper_for_mcu_touch
 
     echo "Checking MCU state and restoring native firmware..."
     check_output=$("$PYTHON3" "$MCU_IDENTITY_CHECK" 2>&1) || true
