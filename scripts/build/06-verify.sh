@@ -105,6 +105,10 @@ check_vendor_pin pellcorp-creality "$PELLCORP_CREALITY_PIN" \
 # deterministically copied in by 02-configure-buildroot.sh from tracked
 # sources in this repo (scripts/build/vendor-patches/, this project's own
 # config layer) - expected every time, not accidental drift.
+# squashfs.mk/squashfs.hash: 02-configure-buildroot.sh idempotently
+# switches squashfs-tools from GitHub's mutable auto-generated archive to
+# the stable release asset (upstream Buildroot fix backported to our
+# pinned checkout).
 check_vendor_pin buildroot-x2000 "$BUILDROOT_PIN" \
 	"$BUILDROOT_REPO" 0 \
 	package/python-matplotlib/python-matplotlib.mk \
@@ -112,7 +116,9 @@ check_vendor_pin buildroot-x2000 "$BUILDROOT_PIN" \
 	board/halley5-nebulaos-fragment.config \
 	board/halley5-nebulaos-overlay/ \
 	board/halley5-nebulaos-wheels/ \
-	local.mk
+	local.mk \
+	package/squashfs/squashfs.mk \
+	package/squashfs/squashfs.hash
 check_vendor_pin k1-ustreamer "$K1_USTREAMER_PIN" \
 	"$K1_USTREAMER_REPO" 0
 # k1-ustreamer's own real git submodules (jpeg-9d, ustreamer) - pinned via
@@ -1072,10 +1078,22 @@ AWKPROG2
 	fi
 	custom_m109=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m109[[:space:]]*\]" /tmp/printerdata-check/closure.txt || true)
 	custom_m190=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m190[[:space:]]*\]" /tmp/printerdata-check/closure.txt || true)
-	if [ "$custom_m109" = "0" ] && [ "$custom_m190" = "0" ]; then
-		echo "OK   no custom M109/M190 gcode_macro overrides"
+	_filament_cfg_m109=0; _filament_cfg_m190=0
+	_filament_src="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/filament.cfg"
+	if [ -f "$_filament_src" ]; then
+		_filament_cfg_m109=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m109[[:space:]]*\]" "$_filament_src" || true)
+		_filament_cfg_m190=$(grep -c -i -E "^\[[[:space:]]*gcode_macro[[:space:]]+m190[[:space:]]*\]" "$_filament_src" || true)
+	fi
+	if [ "$custom_m109" = "1" ] && [ "$custom_m190" = "1" ] \
+	   && [ "$_filament_cfg_m109" = "1" ] && [ "$_filament_cfg_m190" = "1" ] \
+	   && grep -qi "rename_existing.*m109" "$_filament_src" 2>/dev/null \
+	   && grep -qi "rename_existing.*m190" "$_filament_src" 2>/dev/null \
+	   && grep -qi "TEMPERATURE_WAIT" "$_filament_src" 2>/dev/null; then
+		echo "OK   NebulaOS M109/M190 fast-wait overrides: exactly 1/1 in filament.cfg (rename_existing + TEMPERATURE_WAIT)"
+	elif [ "$custom_m109" = "0" ] && [ "$custom_m190" = "0" ]; then
+		echo "MISS M109/M190 fast-wait overrides missing from config closure (expect 1/1 in filament.cfg)"
 	else
-		echo "MISS custom M109=$custom_m109 M190=$custom_m190 gcode_macro overrides found (expect 0/0)"
+		echo "MISS M109=$custom_m109 M190=$custom_m190 overrides: unexpected count or source (expect exactly 1/1 from filament.cfg with rename_existing + TEMPERATURE_WAIT)"
 	fi
 	if grep -q "^\[nebulaos_calibration\]" /tmp/printerdata-check/closure.txt; then
 		echo "OK   [nebulaos_calibration] section present"
