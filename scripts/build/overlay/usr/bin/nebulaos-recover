@@ -7,25 +7,56 @@
 #
 # Subcommands:
 #   status              Show activation state of all components
-#   klipper             Restore Klipper from immutable /opt/klipper
-#   moonraker           Restore Moonraker from immutable /opt/moonraker
-#   mainsail            Restore Mainsail from immutable /usr/share/mainsail
+#   klipper             Restore Klipper from its immutable seed tarball
+#   moonraker           Restore Moonraker from its immutable seed tarball
+#   mainsail            Restore Mainsail from the immutable squashfs copy
 #   klipper-extensions  Restore extensions from immutable squashfs
 #
 # The immutable squashfs is the source of truth. Each recovery replaces the
-# mutable /usr/data/nebulaos/apps/<component> with a fresh copy from the
-# squashfs, then requires a reboot for S05nebulaos-activate to re-bind.
+# mutable /usr/data/nebulaos/apps/<component> with a fresh, verified copy,
+# then requires a reboot for S05nebulaos-activate to re-bind.
+#
+# Phase 2 overnight convergence mission (2026-09-09): klipper/moonraker
+# recovery deliberately does NOT read through /opt/klipper or
+# /opt/moonraker any more, even though those paths are commonly described
+# elsewhere as "the immutable copy" - on a device where
+# S05nebulaos-activate has already bound a persistent copy over them
+# (the normal, common case, exactly when recovery is actually needed),
+# they resolve to the very persistent copy being recovered, not the
+# read-only squashfs underneath. Proven live: deliberately corrupting the
+# persistent klipper checkout, then running the previous implementation
+# (`cp -a /opt/klipper/. "$dst"/`), produced a "Recovery complete"
+# message while silently copying the corruption onto itself. Recovery for
+# these two now extracts directly from $SEEDS/<component>.tar.gz (real,
+# non-bundled git history, always present on the squashfs, never bind-
+# mounted), verified with the same branch/origin/clean-tree discipline
+# S04nebulaos-migrate's reseed_git_app() already established, before ever
+# promoting it over the current persistent copy. Mainsail has no such
+# tarball (it is a plain static release tree, not a git repo - see
+# S04nebulaos-factory-seed's own comment on why) and unmounts its own
+# bind point first instead, to reveal the same real squashfs content the
+# git-based approach reads from a tarball.
 
 set -eu
 
 NEBULAOS_ROOT="${NEBULAOS_ROOT:-/usr/data/nebulaos}"
 APPS_DIR="$NEBULAOS_ROOT/apps"
 ACTIVATION_STATE="$NEBULAOS_ROOT/system/activation-state.json"
+SEEDS="${SEEDS:-/opt/nebulaos-seeds}"
+MOUNT_BIN="${MOUNT_BIN:-mount}"
+UMOUNT_BIN="${UMOUNT_BIN:-umount}"
+PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
 
-# Immutable source paths (on the read-only squashfs)
-IMMUTABLE_KLIPPER="/opt/klipper"
-IMMUTABLE_MOONRAKER="/opt/moonraker"
-IMMUTABLE_MAINSAIL="/usr/share/mainsail"
+# Immutable source paths (on the read-only squashfs). Used ONLY by
+# cmd_status's bind-mount display and by cmd_mainsail (see its own
+# comment for why Mainsail alone has no seed tarball and must instead
+# unmount to reach its real immutable copy) - klipper/moonraker recovery
+# below deliberately does NOT read through these paths any more (see
+# recover_git_component()'s own comment for the real-device bug that
+# forced this).
+IMMUTABLE_KLIPPER="${IMMUTABLE_KLIPPER:-/opt/klipper}"
+IMMUTABLE_MOONRAKER="${IMMUTABLE_MOONRAKER:-/opt/moonraker}"
+IMMUTABLE_MAINSAIL="${IMMUTABLE_MAINSAIL:-/usr/share/mainsail}"
 
 die() { echo "nebulaos-recover: error: $1" >&2; exit 1; }
 warn() { echo "nebulaos-recover: warning: $1" >&2; }
@@ -102,32 +133,84 @@ stop_services() {
     esac
 }
 
-do_recover() {
+# Phase 2 overnight convergence mission (2026-09-09): the original
+# do_recover() this replaced did `cp -a "$IMMUTABLE_*"/. "$dst"/`, where
+# IMMUTABLE_KLIPPER/MOONRAKER are "/opt/klipper"/"/opt/moonraker" - the
+# BIND MOUNT TARGETS S05nebulaos-activate points at the very persistent
+# copy being recovered, not the true read-only squashfs content. Proven
+# live: deliberately deleting klippy/klippy.py from the persistent copy,
+# then running the old `nebulaos-recover klipper`, produced a "Recovery
+# complete" message while the restored copy was BYTE-FOR-BYTE IDENTICAL
+# to the corrupted one (same 405 files, klippy.py still missing) -
+# because /opt/klipper's bind mount kept resolving to the same
+# underlying (just-renamed-but-still-mounted) inode throughout the whole
+# operation, so the tool copied the corruption onto itself and reported
+# success. The bug is structural, not a one-off: the exact same
+# do_recover() call sites existed for moonraker (identical code path)
+# and mainsail (same "/opt-style path doubles as both the live bind
+# mount and the claimed immutable source" pattern) - so it was never
+# just a klipper defect.
+#
+# Fix for klipper/moonraker: never read through the (possibly
+# bind-mounted) /opt/* path at all. Extract directly from this project's
+# own seed tarballs at $SEEDS/<component>.tar.gz - real, non-bundled git
+# history, always present on the read-only squashfs, never touched by
+# any bind mount - using the exact same verify-before-trust discipline
+# S04nebulaos-migrate's reseed_git_app() already established (branch,
+# origin, and clean-working-tree checks on the EXTRACTED copy before it
+# is ever considered good enough to promote), reused here rather than
+# reimplemented independently. A failure at any verification step
+# leaves the current persistent copy completely untouched - the
+# component keeps running on whatever it had, corrupted or not, rather
+# than risk an unverified swap.
+recover_git_component() {
     _component="$1"
-    _immutable_src="$2"
+    _branch="$2"
+    _origin="$3"
+    _archive="$SEEDS/$_component.tar.gz"
     _persistent_dst="$APPS_DIR/$_component"
     _backup_dst="${_persistent_dst}.pre-recovery.$(date +%Y%m%d-%H%M%S)"
+    _partial="${_persistent_dst}.recover-partial"
 
-    if [ ! -d "$_immutable_src" ]; then
-        die "immutable source not found at $_immutable_src (not running on a NebulaOS device?)"
+    if [ ! -f "$_archive" ]; then
+        die "seed archive not found at $_archive (not running on a NebulaOS device?) - cannot recover $_component, persistent copy left untouched"
     fi
 
-    echo "Recovering $_component from $_immutable_src"
+    echo "Recovering $_component from $_archive"
     echo ""
 
     stop_services "$_component"
+
+    rm -rf "$_partial"
+    mkdir -p "$_partial"
+    if ! sh -c "gzip -dc '$_archive' | tar -xo -C '$_partial'"; then
+        rm -rf "$_partial"
+        die "tar extraction failed for $_component - persistent copy left untouched"
+    fi
+
+    _actual_branch=$(git -C "$_partial" symbolic-ref --short HEAD 2>/dev/null || true)
+    if [ "$_actual_branch" != "$_branch" ]; then
+        rm -rf "$_partial"
+        die "$_component extracted checkout is on branch '$_actual_branch', expected '$_branch' - refusing rather than promoting an unverified copy, persistent copy left untouched"
+    fi
+    _actual_origin=$(git -C "$_partial" remote get-url origin 2>/dev/null || true)
+    if [ "$_actual_origin" != "$_origin" ]; then
+        rm -rf "$_partial"
+        die "$_component extracted checkout has origin '$_actual_origin', expected '$_origin' - refusing rather than promoting an unverified copy, persistent copy left untouched"
+    fi
+    if [ -n "$(git -C "$_partial" status --porcelain 2>/dev/null || true)" ]; then
+        rm -rf "$_partial"
+        die "$_component extracted checkout has an unexpectedly dirty working tree - refusing rather than promoting an unverified copy, persistent copy left untouched"
+    fi
 
     if [ -d "$_persistent_dst" ]; then
         echo "Moving existing persistent copy to $_backup_dst"
         mv "$_persistent_dst" "$_backup_dst"
     fi
-
-    echo "Copying immutable source to $_persistent_dst..."
-    mkdir -p "$_persistent_dst"
-    cp -a "$_immutable_src"/. "$_persistent_dst"/
+    mv "$_partial" "$_persistent_dst"
 
     echo ""
-    echo "Recovery complete for $_component."
+    echo "Recovery complete for $_component (verified: branch $_branch, $(git -C "$_persistent_dst" rev-parse HEAD))."
     echo "A reboot is required for S05nebulaos-activate to re-bind."
     echo ""
     echo "If recovering klipper, also recover klipper-extensions to"
@@ -137,15 +220,62 @@ do_recover() {
 # ---------- individual component commands ----------
 
 cmd_klipper() {
-    do_recover "klipper" "$IMMUTABLE_KLIPPER"
+    recover_git_component "klipper" "master" "https://github.com/Klipper3d/klipper.git"
 }
 
 cmd_moonraker() {
-    do_recover "moonraker" "$IMMUTABLE_MOONRAKER"
+    recover_git_component "moonraker" "master" "https://github.com/Arksine/moonraker.git"
 }
 
+# Mainsail has no seed tarball (S04nebulaos-factory-seed's own header:
+# "Mainsail needs no seed archive - it is already a plain static release
+# tree, not a git repo ... the existing /usr/share/mainsail copy IS its
+# own offline seed") - it is a plain directory the image ships directly
+# at /usr/share/mainsail on the squashfs. The same bind-mount bug applies
+# though: once S05nebulaos-activate has bound a persistent copy over
+# that path, /usr/share/mainsail no longer shows the immutable content,
+# it shows the persistent copy - reading through it "recovers" nothing.
+# Unmounting the bind (if one is active) reveals the real squashfs
+# content at that same path - what a plain bind mount always does - so
+# recovery here does that first, copies from the now-genuine immutable
+# path, then re-binds the fresh persistent copy so Mainsail keeps
+# serving for the remainder of this boot (a reboot re-does this anyway
+# via S05, matching every other component here).
 cmd_mainsail() {
-    do_recover "mainsail" "$IMMUTABLE_MAINSAIL"
+    _target="$IMMUTABLE_MAINSAIL"
+    _persistent_dst="$APPS_DIR/mainsail"
+    _backup_dst="${_persistent_dst}.pre-recovery.$(date +%Y%m%d-%H%M%S)"
+    _was_bind_mounted=0
+
+    echo "Recovering mainsail from the immutable squashfs at $_target"
+    echo ""
+
+    if awk -v t="$_target" '$2==t {found=1} END{exit !found}' "$PROC_MOUNTS" 2>/dev/null; then
+        echo "Unmounting the persistent bind mount at $_target to reveal the immutable copy underneath..."
+        if ! "$UMOUNT_BIN" "$_target"; then
+            die "could not unmount $_target - refusing to guess, persistent copy left untouched"
+        fi
+        _was_bind_mounted=1
+    fi
+
+    if [ -d "$_persistent_dst" ]; then
+        echo "Moving existing persistent copy to $_backup_dst"
+        mv "$_persistent_dst" "$_backup_dst"
+    fi
+
+    echo "Copying immutable source to $_persistent_dst..."
+    mkdir -p "$_persistent_dst"
+    cp -a "$_target"/. "$_persistent_dst"/
+
+    if [ "$_was_bind_mounted" = "1" ]; then
+        echo "Re-binding the fresh persistent copy over $_target for the remainder of this boot..."
+        "$MOUNT_BIN" --bind "$_persistent_dst" "$_target" \
+            || warn "could not re-bind $_target - a reboot will fix this (S05nebulaos-activate re-binds on every boot)"
+    fi
+
+    echo ""
+    echo "Recovery complete for mainsail."
+    echo "A reboot is required for S05nebulaos-activate to re-bind."
 }
 
 cmd_klipper_extensions() {

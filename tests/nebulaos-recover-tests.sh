@@ -116,22 +116,39 @@ fi
 echo ""
 echo "--- Immutable source paths ---"
 
-if grep -q 'IMMUTABLE_KLIPPER="/opt/klipper"' "$CLI_SCRIPT"; then
-    pass "klipper immutable path is /opt/klipper"
+if grep -q 'IMMUTABLE_KLIPPER="${IMMUTABLE_KLIPPER:-/opt/klipper}"' "$CLI_SCRIPT"; then
+    pass "klipper immutable path defaults to /opt/klipper (overridable for tests)"
 else
-    fail "klipper immutable path is wrong"
+    fail "klipper immutable path default is wrong"
 fi
 
-if grep -q 'IMMUTABLE_MOONRAKER="/opt/moonraker"' "$CLI_SCRIPT"; then
-    pass "moonraker immutable path is /opt/moonraker"
+if grep -q 'IMMUTABLE_MOONRAKER="${IMMUTABLE_MOONRAKER:-/opt/moonraker}"' "$CLI_SCRIPT"; then
+    pass "moonraker immutable path defaults to /opt/moonraker (overridable for tests)"
 else
-    fail "moonraker immutable path is wrong"
+    fail "moonraker immutable path default is wrong"
 fi
 
-if grep -q 'IMMUTABLE_MAINSAIL="/usr/share/mainsail"' "$CLI_SCRIPT"; then
-    pass "mainsail immutable path is /usr/share/mainsail"
+if grep -q 'IMMUTABLE_MAINSAIL="${IMMUTABLE_MAINSAIL:-/usr/share/mainsail}"' "$CLI_SCRIPT"; then
+    pass "mainsail immutable path defaults to /usr/share/mainsail (overridable for tests)"
 else
-    fail "mainsail immutable path is wrong"
+    fail "mainsail immutable path default is wrong"
+fi
+
+# klipper/moonraker recovery deliberately no longer READS these two
+# IMMUTABLE_* paths at all (see recover_git_component()'s own comment for
+# why) - they remain only for cmd_status's bind-mount display. Confirm
+# that wiring explicitly, so a future change can't quietly reintroduce
+# the exact bug this mission fixed.
+if ! grep -q 'cp -a "\$IMMUTABLE_KLIPPER"\|cp -a "\$IMMUTABLE_MOONRAKER"' "$CLI_SCRIPT"; then
+    pass "klipper/moonraker recovery no longer reads through the bind-mount-target IMMUTABLE_* paths"
+else
+    fail "klipper/moonraker recovery still copies from IMMUTABLE_KLIPPER/MOONRAKER - the exact bug this mission fixed has regressed"
+fi
+
+if grep -q 'SEEDS/\$_component.tar.gz\|SEEDS/\${_component}.tar.gz' "$CLI_SCRIPT" || grep -q '_archive="\$SEEDS' "$CLI_SCRIPT"; then
+    pass "klipper/moonraker recovery reads from \$SEEDS/<component>.tar.gz instead"
+else
+    fail "klipper/moonraker recovery does not appear to read from a seed tarball"
 fi
 
 # =========================================================================
@@ -178,39 +195,242 @@ else
 fi
 
 # =========================================================================
-# 6. Recovery with mock immutable source
+# 6. Recovery correctness (Phase 2 overnight convergence mission,
+#    2026-09-09): a REAL device found live that the previous
+#    implementation's `cp -a "$IMMUTABLE_KLIPPER"/. "$dst"/` read from
+#    /opt/klipper - the BIND MOUNT TARGET S05nebulaos-activate points at
+#    the very persistent copy being recovered, not the true immutable
+#    squashfs content. Deliberately deleting klippy/klippy.py from the
+#    persistent copy, then running the OLD `nebulaos-recover klipper`,
+#    produced a "Recovery complete" message while the "restored" copy was
+#    byte-for-byte IDENTICAL to the corrupted one - the tool copied the
+#    corruption onto itself and reported success. The section this
+#    replaces only ever checked for "Recovering klipper\|immutable source
+#    not found" in the output - a message the old, broken implementation
+#    printed just as confidently as a real fix would, so it could never
+#    have caught this. These tests instead build real, minimal git repos,
+#    package them exactly like this project's own seed tarballs
+#    ($SEEDS/<component>.tar.gz), and verify the corrupted file is
+#    ACTUALLY missing beforehand and ACTUALLY restored afterward - the
+#    property that matters, not just that the tool printed something.
 # =========================================================================
 
 echo ""
-echo "--- Recovery with mock filesystem ---"
+echo "--- Recovery correctness (real seed tarballs, real corruption) ---"
 
-MOCK_IMMUTABLE="$TMPDIR/immutable"
-mkdir -p "$MOCK_IMMUTABLE/opt/klipper/klippy"
-echo "immutable_marker" > "$MOCK_IMMUTABLE/opt/klipper/klippy/klippy.py"
-mkdir -p "$MOCK_IMMUTABLE/opt/moonraker/moonraker"
-echo "immutable_marker" > "$MOCK_IMMUTABLE/opt/moonraker/moonraker/server.py"
-mkdir -p "$MOCK_IMMUTABLE/usr/share/mainsail"
-echo "immutable_marker" > "$MOCK_IMMUTABLE/usr/share/mainsail/index.html"
+make_seed_tarball() {
+    # $1=work dir to build the repo in, $2=branch, $3=origin url,
+    # $4=marker file path (repo-relative), $5=output tarball path.
+    # Archives the repo's CONTENTS directly at the tarball root (no
+    # wrapping directory) - matching the real shape S04nebulaos-migrate's
+    # reseed_git_app() extracts via `tar -xo -C "$dest.migrate-partial"`,
+    # where dest.migrate-partial becomes the repo root directly, not a
+    # subdirectory of it.
+    _build="$1"; _branch="$2"; _origin="$3"; _marker="$4"; _out="$5"
+    rm -rf "$_build"
+    mkdir -p "$_build"
+    ( cd "$_build" && \
+      git init -q -b "$_branch" . && \
+      git config user.email test@example.com && \
+      git config user.name "Test" && \
+      mkdir -p "$(dirname "$_marker")" && \
+      echo "seed_marker_content" > "$_marker" && \
+      git add -A && \
+      git commit -q -m "seed commit" && \
+      git remote add origin "$_origin" )
+    ( cd "$_build" && tar ca -f "$_out" . )
+}
 
-# Prepare persistent copies with different content
-MOCK_RECOVER_ROOT="$TMPDIR/recover_root"
-MOCK_RECOVER_APPS="$MOCK_RECOVER_ROOT/apps"
-mkdir -p "$MOCK_RECOVER_APPS/klipper/klippy"
-echo "corrupted" > "$MOCK_RECOVER_APPS/klipper/klippy/klippy.py"
+SEEDS_SANDBOX="$TMPDIR/seeds"
+mkdir -p "$SEEDS_SANDBOX"
 
-# Klipper recovery: immutable path overridden
-recover_output=$(NEBULAOS_ROOT="$MOCK_RECOVER_ROOT" \
-    IMMUTABLE_KLIPPER="$MOCK_IMMUTABLE/opt/klipper" \
-    "$CLI_SCRIPT" klipper 2>&1) || true
+# --- klipper: corrupt then recover, verify the missing file comes back ---
 
-# The script uses hardcoded IMMUTABLE_KLIPPER="/opt/klipper" so on a dev
-# host this will fail because /opt/klipper doesn't exist. That's expected.
-# Test the structural properties instead.
+make_seed_tarball "$TMPDIR/seed-build/klipper" "master" \
+    "https://github.com/Klipper3d/klipper.git" "klippy/klippy.py" \
+    "$SEEDS_SANDBOX/klipper.tar.gz"
 
-if echo "$recover_output" | grep -q 'Recovering klipper\|immutable source not found'; then
-    pass "klipper recovery attempts recovery or reports missing source"
+KREC_ROOT="$TMPDIR/krec_root"
+mkdir -p "$KREC_ROOT/apps/klipper/klippy"
+echo "seed_marker_content" > "$KREC_ROOT/apps/klipper/klippy/klippy.py"
+git -C "$KREC_ROOT/apps/klipper" init -q -b master >/dev/null 2>&1
+( cd "$KREC_ROOT/apps/klipper" && git config user.email t@e.com && git config user.name T \
+  && git add -A && git commit -q -m init \
+  && git remote add origin "https://github.com/Klipper3d/klipper.git" )
+
+# Deliberate corruption: delete the marker file from the persistent copy.
+rm -f "$KREC_ROOT/apps/klipper/klippy/klippy.py"
+if [ ! -f "$KREC_ROOT/apps/klipper/klippy/klippy.py" ]; then
+    pass "klipper recovery test: corruption confirmed (marker file actually missing)"
 else
-    fail "klipper recovery did not produce expected output"
+    fail "klipper recovery test: corruption setup failed - marker file still present"
+fi
+
+krec_output=$(NEBULAOS_ROOT="$KREC_ROOT" SEEDS="$SEEDS_SANDBOX" "$CLI_SCRIPT" klipper 2>&1) || true
+
+if [ -f "$KREC_ROOT/apps/klipper/klippy/klippy.py" ] \
+   && [ "$(cat "$KREC_ROOT/apps/klipper/klippy/klippy.py")" = "seed_marker_content" ]; then
+    pass "klipper recovery ACTUALLY restores the missing file with correct content"
+else
+    fail "klipper recovery did not restore the missing file (got: $krec_output)"
+fi
+
+if git -C "$KREC_ROOT/apps/klipper" status --porcelain >/dev/null 2>&1 \
+   && [ -z "$(git -C "$KREC_ROOT/apps/klipper" status --porcelain 2>/dev/null)" ]; then
+    pass "klipper recovered checkout has a clean working tree"
+else
+    fail "klipper recovered checkout is not a clean git working tree"
+fi
+
+backup_count=$(find "$KREC_ROOT/apps" -maxdepth 1 -name 'klipper.pre-recovery.*' 2>/dev/null | wc -l)
+if [ "$backup_count" -ge 1 ]; then
+    pass "klipper recovery created a backup of the corrupted copy before overwriting"
+else
+    fail "klipper recovery did not create a backup"
+fi
+
+no_partial_left=$(find "$KREC_ROOT/apps" -maxdepth 1 -name 'klipper.recover-partial' 2>/dev/null | wc -l)
+if [ "$no_partial_left" -eq 0 ]; then
+    pass "klipper recovery leaves no stray .recover-partial directory behind"
+else
+    fail "klipper recovery left a stray .recover-partial directory"
+fi
+
+# --- klipper: refusal path - seed archive on the wrong branch is REJECTED,
+#     persistent copy left completely untouched (not silently promoted) ---
+
+make_seed_tarball "$TMPDIR/seed-build/klipper-badbranch" "not-master" \
+    "https://github.com/Klipper3d/klipper.git" "klippy/klippy.py" \
+    "$SEEDS_SANDBOX/klipper-badbranch.tar.gz"
+mv "$SEEDS_SANDBOX/klipper-badbranch.tar.gz" "$SEEDS_SANDBOX/klipper.tar.gz.bad"
+
+KREC2_ROOT="$TMPDIR/krec2_root"
+mkdir -p "$KREC2_ROOT/apps/klipper/klippy"
+echo "still_here" > "$KREC2_ROOT/apps/klipper/klippy/klippy.py"
+git -C "$KREC2_ROOT/apps/klipper" init -q -b master >/dev/null 2>&1
+
+BADSEEDS="$TMPDIR/seeds-bad"
+mkdir -p "$BADSEEDS"
+cp "$SEEDS_SANDBOX/klipper.tar.gz.bad" "$BADSEEDS/klipper.tar.gz"
+
+bad_output=$(NEBULAOS_ROOT="$KREC2_ROOT" SEEDS="$BADSEEDS" "$CLI_SCRIPT" klipper 2>&1) || true
+
+if [ "$(cat "$KREC2_ROOT/apps/klipper/klippy/klippy.py" 2>/dev/null)" = "still_here" ]; then
+    pass "klipper recovery refuses a wrong-branch seed archive, persistent copy left untouched"
+else
+    fail "klipper recovery promoted a wrong-branch seed archive instead of refusing it"
+fi
+if echo "$bad_output" | grep -qi 'expected .master.\|refusing'; then
+    pass "klipper recovery reports a clear refusal reason for the wrong-branch case"
+else
+    fail "klipper recovery did not explain the refusal ($bad_output)"
+fi
+
+# --- moonraker: same correctness proof, independent component ---
+
+make_seed_tarball "$TMPDIR/seed-build/moonraker" "master" \
+    "https://github.com/Arksine/moonraker.git" "moonraker/server.py" \
+    "$SEEDS_SANDBOX/moonraker.tar.gz"
+
+MREC_ROOT="$TMPDIR/mrec_root"
+mkdir -p "$MREC_ROOT/apps/moonraker/moonraker"
+echo "seed_marker_content" > "$MREC_ROOT/apps/moonraker/moonraker/server.py"
+git -C "$MREC_ROOT/apps/moonraker" init -q -b master >/dev/null 2>&1
+( cd "$MREC_ROOT/apps/moonraker" && git config user.email t@e.com && git config user.name T \
+  && git add -A && git commit -q -m init \
+  && git remote add origin "https://github.com/Arksine/moonraker.git" )
+rm -f "$MREC_ROOT/apps/moonraker/moonraker/server.py"
+
+mrec_output=$(NEBULAOS_ROOT="$MREC_ROOT" SEEDS="$SEEDS_SANDBOX" "$CLI_SCRIPT" moonraker 2>&1) || true
+
+if [ -f "$MREC_ROOT/apps/moonraker/moonraker/server.py" ] \
+   && [ "$(cat "$MREC_ROOT/apps/moonraker/moonraker/server.py")" = "seed_marker_content" ]; then
+    pass "moonraker recovery ACTUALLY restores the missing file with correct content"
+else
+    fail "moonraker recovery did not restore the missing file (got: $mrec_output)"
+fi
+
+# --- mainsail: unmount-then-copy path, verified with mocked mount/umount
+#     (no real mount namespace touched) ---
+
+echo ""
+echo "--- Mainsail recovery (mocked mount/umount, no real mount touched) ---"
+
+MSAIL_ROOT="$TMPDIR/msail_root"
+MSAIL_TARGET="$TMPDIR/msail_target"
+mkdir -p "$MSAIL_ROOT/apps" "$MSAIL_TARGET"
+echo "immutable_content" > "$MSAIL_TARGET/index.html"
+
+FAKE_MOUNTS="$TMPDIR/fake-mounts"
+printf '/dev/root %s ext4 rw 0 0\n' "$MSAIL_TARGET" > "$FAKE_MOUNTS"
+
+MOCK_BIN="$TMPDIR/mockbin"
+mkdir -p "$MOCK_BIN"
+UMOUNT_LOG="$TMPDIR/umount.log"
+MOUNT_LOG="$TMPDIR/mount.log"
+cat > "$MOCK_BIN/fake-umount" <<EOF
+#!/bin/sh
+echo "\$@" >> "$UMOUNT_LOG"
+exit 0
+EOF
+cat > "$MOCK_BIN/fake-mount" <<EOF
+#!/bin/sh
+echo "\$@" >> "$MOUNT_LOG"
+exit 0
+EOF
+chmod +x "$MOCK_BIN/fake-umount" "$MOCK_BIN/fake-mount"
+
+msail_output=$(NEBULAOS_ROOT="$MSAIL_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$FAKE_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" \
+    UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    "$CLI_SCRIPT" mainsail 2>&1) || true
+
+if [ -f "$UMOUNT_LOG" ] && grep -qF "$MSAIL_TARGET" "$UMOUNT_LOG"; then
+    pass "mainsail recovery unmounts the detected bind mount before copying"
+else
+    fail "mainsail recovery did not unmount the bind mount ($msail_output)"
+fi
+
+if [ -f "$MSAIL_ROOT/apps/mainsail/index.html" ] \
+   && [ "$(cat "$MSAIL_ROOT/apps/mainsail/index.html")" = "immutable_content" ]; then
+    pass "mainsail recovery copies from the (now-unmounted) immutable path"
+else
+    fail "mainsail recovery did not produce the expected persistent copy"
+fi
+
+if [ -f "$MOUNT_LOG" ] && grep -qF "$MSAIL_ROOT/apps/mainsail" "$MOUNT_LOG" && grep -qF -- "--bind" "$MOUNT_LOG"; then
+    pass "mainsail recovery re-binds the fresh persistent copy for the rest of this boot"
+else
+    fail "mainsail recovery did not re-bind after copying ($msail_output)"
+fi
+
+# --- mainsail: no bind mount active (fresh/immutable-only device) - must
+#     NOT attempt to unmount anything, just copy directly ---
+
+MSAIL2_ROOT="$TMPDIR/msail2_root"
+mkdir -p "$MSAIL2_ROOT/apps"
+EMPTY_MOUNTS="$TMPDIR/empty-mounts"
+: > "$EMPTY_MOUNTS"
+rm -f "$UMOUNT_LOG"
+
+msail2_output=$(NEBULAOS_ROOT="$MSAIL2_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$EMPTY_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" \
+    UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    "$CLI_SCRIPT" mainsail 2>&1) || true
+
+if [ ! -f "$UMOUNT_LOG" ]; then
+    pass "mainsail recovery does not attempt to unmount when no bind mount is active"
+else
+    fail "mainsail recovery attempted an unnecessary unmount"
+fi
+if [ -f "$MSAIL2_ROOT/apps/mainsail/index.html" ]; then
+    pass "mainsail recovery still copies correctly when no bind mount was active"
+else
+    fail "mainsail recovery failed when no bind mount was active"
 fi
 
 # =========================================================================
