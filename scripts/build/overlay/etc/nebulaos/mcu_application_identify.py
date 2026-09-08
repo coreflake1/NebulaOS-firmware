@@ -54,6 +54,70 @@ def _import_klippy_serial_modules(klippy_lib_path=None):
     return reactor, serialhdl
 
 
+def _resolve_port_realpath(port):
+    try:
+        return os.path.realpath(port)
+    except OSError:
+        return port
+
+
+def find_process_holding_port(port, proc_root="/proc"):
+    """Scan /proc/[pid]/fd for any process that already has `port` open, by
+    resolving both sides to their real device path first (a symlink like
+    /dev/serial/by-id/... and its /dev/ttySN target must compare equal).
+    Returns the owning pid (int) or None if the port appears free.
+
+    Phase 2 overnight convergence mission (2026-09-09): real device found
+    live where mcu_identity_check.py (via this module's run_connected(),
+    which reuses Klipper's own serialhdl.SerialReader.connect_uart() -
+    connect_uart() itself calls serial.Serial(..., exclusive=True), the
+    exact same call Klipper's own normal MCU connection uses) was run
+    manually while klippy.py already held /dev/ttyS1 open and connected.
+    The competing open() raced Klipper's own connection and, going by
+    Klipper's own serialhdl.py (which elsewhere uses an explicit DTR
+    toggle - ser.dtr = True; ser.dtr = False - as its own deliberate
+    MCU-reset mechanism over this exact class of port), very plausibly
+    toggled DTR as a side effect of the OS-level open() itself, before
+    pyserial's own exclusive-lock check ever had a chance to reject it -
+    the MCU then stopped responding to Klipper's identify handshake
+    entirely, and only a full power cycle (which the running printer
+    otherwise had no problem with) recovered it.
+
+    Rather than rely on the open() attempt failing safely (it doesn't
+    always, and even a failed attempt already touched the device by the
+    time pyserial notices), refuse to attempt the open AT ALL when the
+    port is already visibly in use - checked with a plain fd scan, no
+    actual open() call, so this check itself can never disturb a live
+    connection. Not airtight against every possible race (a process could
+    open the port in the instant after this check runs, before ours), but
+    directly closes the exact failure mode found live: this check, plus
+    S50nebulaos-mcu-guard's own documented ordering (it runs before
+    S55klipper specifically so Klipper never holds the port yet), covers
+    the realistic cases - a technician manually re-running this tool
+    while Klipper is already up, or a second guard invocation racing a
+    slow-starting Klipper.
+    """
+    target = _resolve_port_realpath(port)
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        fd_dir = os.path.join(proc_root, pid, "fd")
+        try:
+            fds = os.listdir(fd_dir)
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                link = os.readlink(os.path.join(fd_dir, fd))
+            except OSError:
+                continue
+            if _resolve_port_realpath(link) == target:
+                return int(pid)
+    return None
+
+
 def run_connected(port, baud, action_fn, timeout=5.0, klippy_lib_path=None,
                    error_cls=ApplicationIdentifyError):
     """Connect to the MCU at (port, baud) and call action_fn(serial_reader)
@@ -82,6 +146,14 @@ def run_connected(port, baud, action_fn, timeout=5.0, klippy_lib_path=None,
     serial_reader/reactor methods that internally pause() - it always runs
     from inside the dispatched callback.
     """
+    holder_pid = find_process_holding_port(port)
+    if holder_pid is not None:
+        raise error_cls(
+            f"port_already_in_use_by_pid_{holder_pid}: refusing to open "
+            f"{port} - another process already has it open, and opening "
+            "it again risks disrupting that process's own connection to "
+            "the MCU (see this function's own docstring)")
+
     try:
         reactor, serialhdl = _import_klippy_serial_modules(klippy_lib_path)
     except ImportError as e:

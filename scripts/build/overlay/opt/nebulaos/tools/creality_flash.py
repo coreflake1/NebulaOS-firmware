@@ -70,7 +70,19 @@ class SerialTransport(Transport):
     """Real transport - only ever constructed by the CLI, never by tests."""
     def __init__(self, port: str, baud: int, timeout: float = 2.0):
         import serial  # imported lazily: not a dependency of the test suite
-        self._serial = serial.Serial(port, baudrate=baud, timeout=timeout)
+        # dtr=False, rts=False (Phase 2 overnight convergence mission,
+        # 2026-09-09): pyserial's Serial() constructor form opens the
+        # device immediately, and on many UART/USB-serial combinations the
+        # underlying open() asserts DTR/RTS high as a termios side effect
+        # unless told not to - a well-known cause of unwanted resets on
+        # boards that wire a reset/bootloader-entry pin to one of those
+        # lines (this project's own Klipper serialhdl.py uses exactly that
+        # DTR-toggle technique deliberately elsewhere, over this same
+        # class of port). Passing dtr=False/rts=False here makes pyserial
+        # set those lines low BEFORE the OS-level open, instead of leaving
+        # them at whatever the driver defaults to.
+        self._serial = serial.Serial(
+            port, baudrate=baud, timeout=timeout, dtr=False, rts=False)
 
     def write(self, data: bytes) -> int:
         return self._serial.write(data)
