@@ -3,9 +3,9 @@
 # nebulaos-mcu - MCU management CLI for NebulaOS
 #
 # Subcommands:
-#   status    Show current MCU lifecycle state (from last boot check)
-#   flash     Manually trigger MCU firmware restore (known-stock only)
-#   managed   Show or set whether auto-restore runs at boot
+#   status    Show current MCU lifecycle state (read-only, from last boot check)
+#   flash <f> Flash arbitrary firmware file to MCU (sets manual ownership)
+#   managed   Immediately restore pinned native firmware (re-enter managed mode)
 #
 # The MCU lifecycle state machine (mcu_lifecycle.py) distinguishes:
 #   SUPPORTED_HW_NATIVE_APP       - candidate-001 running, healthy
@@ -14,10 +14,16 @@
 #   UNSUPPORTED_HW                - wrong hardware, block everything
 #   MCU_UNREACHABLE               - serial unreachable, warn only
 #
-# "Manual ownership persists in /usr/data" (DECISIONS.md):
-#   /usr/data/nebulaos/mcu/managed contains "true" or "false". When false,
-#   S50nebulaos-mcu-guard still identifies the MCU but skips auto-restore.
-#   `nebulaos-mcu flash` ignores this flag (explicit manual action).
+# Ownership model:
+#   /usr/data/nebulaos/mcu/managed contains "true" or "false".
+#   - managed=true (default): NebulaOS manages the MCU. Boot guard restores
+#     native if stock is detected.
+#   - managed=false: User flashed custom firmware via `flash <file>`.
+#     Boot guard skips restore for unknown applications but still restores
+#     from known stock (stock recovery is always the right call).
+#
+# `nebulaos-mcu flash <file>` sets managed=false (manual ownership).
+# `nebulaos-mcu managed` immediately restores native and sets managed=true.
 
 set -eu
 
@@ -25,9 +31,51 @@ MCU_GUARD_STATE="${MCU_GUARD_STATE:-/run/nebulaos-mcu-guard.state}"
 MCU_MANAGED_DIR="${MCU_MANAGED_DIR:-/usr/data/nebulaos/mcu}"
 MCU_MANAGED_FLAG="${MCU_MANAGED_FLAG:-${MCU_MANAGED_DIR}/managed}"
 MCU_IDENTITY_CHECK="${MCU_IDENTITY_CHECK:-/etc/nebulaos/mcu_identity_check.py}"
+MCU_FLASH_FILE="${MCU_FLASH_FILE:-/etc/nebulaos/mcu_flash_file.py}"
+MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
 PYTHON3="${MCU_GUARD_PYTHON3:-/usr/bin/python3}"
 
 die() { echo "nebulaos-mcu: error: $1" >&2; exit 1; }
+
+# ---------- helpers ----------
+
+read_managed_flag() {
+    if [ -f "$MCU_MANAGED_FLAG" ]; then
+        cat "$MCU_MANAGED_FLAG"
+    else
+        echo "true"
+    fi
+}
+
+set_managed() {
+    mkdir -p "$MCU_MANAGED_DIR"
+    echo "$1" > "$MCU_MANAGED_FLAG"
+}
+
+check_printer_idle() {
+    _state=$("$PYTHON3" -c "
+import json, sys
+try:
+    import urllib.request
+    resp = urllib.request.urlopen('${MOONRAKER_URL}/printer/objects/query?print_stats', timeout=5)
+    data = json.loads(resp.read().decode('utf-8'))
+    print(data['result']['status']['print_stats']['state'])
+except Exception:
+    print('unknown')
+" 2>/dev/null) || _state="unknown"
+
+    case "$_state" in
+        printing)
+            echo "REFUSED: Printer is printing. Cannot flash MCU during a print." >&2
+            return 1
+            ;;
+        paused)
+            echo "REFUSED: Printer is paused. Cannot flash MCU while paused." >&2
+            return 1
+            ;;
+    esac
+    return 0
+}
 
 # ---------- status ----------
 
@@ -58,9 +106,47 @@ cmd_status() {
     echo "Auto-restore at boot:  ${_managed}"
 }
 
-# ---------- flash ----------
+# ---------- flash <file> ----------
 
 cmd_flash() {
+    if [ $# -eq 0 ]; then
+        die "flash requires a firmware file. Usage: nebulaos-mcu flash <file>"
+    fi
+    FIRMWARE_FILE="$1"
+
+    if [ ! -f "$FIRMWARE_FILE" ]; then
+        die "firmware file not found: $FIRMWARE_FILE"
+    fi
+    if [ ! -r "$FIRMWARE_FILE" ]; then
+        die "firmware file not readable: $FIRMWARE_FILE"
+    fi
+
+    check_printer_idle || exit 1
+
+    if [ ! -f "$MCU_FLASH_FILE" ]; then
+        die "flash helper not found at $MCU_FLASH_FILE"
+    fi
+    if [ ! -x "$PYTHON3" ]; then
+        die "Python interpreter not found at $PYTHON3"
+    fi
+
+    echo "Flashing $FIRMWARE_FILE to MCU..."
+    if "$PYTHON3" "$MCU_FLASH_FILE" "$FIRMWARE_FILE"; then
+        set_managed "false"
+        echo ""
+        echo "MCU firmware flashed successfully."
+        echo "Auto-restore disabled (manual ownership)."
+        echo "Use 'nebulaos-mcu managed' to restore NebulaOS native firmware."
+    else
+        echo ""
+        echo "Flash failed. MCU ownership unchanged." >&2
+        exit 1
+    fi
+}
+
+# ---------- managed ----------
+
+cmd_managed() {
     if [ ! -f "$MCU_IDENTITY_CHECK" ]; then
         die "identity check helper not found at $MCU_IDENTITY_CHECK"
     fi
@@ -68,98 +154,46 @@ cmd_flash() {
         die "Python interpreter not found at $PYTHON3"
     fi
 
-    echo "Running MCU lifecycle check..."
+    echo "Checking MCU state and restoring native firmware..."
     check_output=$("$PYTHON3" "$MCU_IDENTITY_CHECK" 2>&1) || true
 
-    _lifecycle_state=$(echo "$check_output" | sed -n 's/^MCU_LIFECYCLE_STATE=//p' | head -1)
     _application_class=$(echo "$check_output" | sed -n 's/^MCU_APPLICATION_CLASS=//p' | head -1)
-    _guard_result=$(echo "$check_output" | sed -n 's/^MCU_GUARD_RESULT=//p' | tail -1)
     _restore_result=$(echo "$check_output" | sed -n 's/^MCU_RESTORE_RESULT=//p' | head -1)
+    _guard_result=$(echo "$check_output" | sed -n 's/^MCU_GUARD_RESULT=//p' | tail -1)
 
     case "$_application_class" in
         NATIVE_CANDIDATE_001)
+            set_managed "true"
             echo "MCU is already running native firmware (candidate-001)."
-            echo "No restore needed."
+            echo "Auto-restore enabled."
             exit 0
             ;;
         KNOWN_STOCK)
-            echo "Stock Creality firmware detected."
             if [ "$_restore_result" = "RESTORED_AND_VERIFIED" ]; then
-                echo "Restore completed and verified successfully."
+                set_managed "true"
+                echo "Native firmware restored and verified."
+                echo "Auto-restore enabled."
                 exit 0
-            elif [ -n "$_restore_result" ] && [ "$_restore_result" != "not_attempted" ]; then
-                echo "Restore attempted but failed: $_restore_result"
-                echo ""
-                echo "Full output:"
-                echo "$check_output"
-                exit 1
             else
-                echo "Restore was authorized but did not run."
-                echo "Full output:"
-                echo "$check_output"
+                echo "FAILED: Could not restore native firmware." >&2
+                echo "Restore result: ${_restore_result:-unknown}" >&2
+                echo "" >&2
+                echo "Full output:" >&2
+                echo "$check_output" >&2
                 exit 1
             fi
             ;;
         UNKNOWN_APPLICATION|"")
-            echo "REFUSED: Unrecognized MCU application firmware."
-            echo "Application class: ${_application_class:-unknown}"
-            echo "Lifecycle state:   ${_lifecycle_state:-unknown}"
-            echo ""
-            echo "Auto-restore only works for KNOWN stock Creality firmware."
-            echo "An unrecognized application will never be auto-flashed."
-            echo ""
-            echo "Full output:"
-            echo "$check_output"
+            echo "REFUSED: Unrecognized MCU application firmware." >&2
+            echo "Cannot auto-restore from unknown firmware." >&2
+            echo "Use 'nebulaos-mcu flash <file>' to flash specific firmware," >&2
+            echo "or flash stock Creality firmware first, then retry." >&2
             exit 1
             ;;
         *)
-            echo "Unexpected application class: $_application_class"
-            echo "$check_output"
+            echo "Unexpected application class: $_application_class" >&2
+            echo "$check_output" >&2
             exit 1
-            ;;
-    esac
-}
-
-# ---------- managed ----------
-
-read_managed_flag() {
-    if [ -f "$MCU_MANAGED_FLAG" ]; then
-        cat "$MCU_MANAGED_FLAG"
-    else
-        echo "true"
-    fi
-}
-
-cmd_managed() {
-    if [ $# -eq 0 ]; then
-        _managed=$(read_managed_flag)
-        echo "Auto-restore at boot: ${_managed}"
-        if [ "$_managed" = "true" ]; then
-            echo "S50nebulaos-mcu-guard will auto-restore native firmware"
-            echo "if stock Creality firmware is detected at boot."
-        else
-            echo "S50nebulaos-mcu-guard will identify the MCU but will NOT"
-            echo "auto-restore. Use 'nebulaos-mcu flash' to restore manually."
-        fi
-        return
-    fi
-
-    case "$1" in
-        on|true)
-            mkdir -p "$MCU_MANAGED_DIR"
-            echo "true" > "$MCU_MANAGED_FLAG"
-            echo "Auto-restore enabled. Native firmware will be restored at boot"
-            echo "if stock Creality firmware is detected."
-            ;;
-        off|false)
-            mkdir -p "$MCU_MANAGED_DIR"
-            echo "false" > "$MCU_MANAGED_FLAG"
-            echo "Auto-restore disabled. S50nebulaos-mcu-guard will still"
-            echo "identify the MCU but will not flash. Use 'nebulaos-mcu flash'"
-            echo "to restore manually."
-            ;;
-        *)
-            die "managed: expected 'on' or 'off', got '$1'"
             ;;
     esac
 }
@@ -170,9 +204,9 @@ usage() {
     echo "Usage: nebulaos-mcu <command> [args]"
     echo ""
     echo "Commands:"
-    echo "  status          Show current MCU lifecycle state"
-    echo "  flash           Manually trigger MCU firmware restore"
-    echo "  managed [on|off] Show or set auto-restore at boot"
+    echo "  status          Show current MCU lifecycle state (read-only)"
+    echo "  flash <file>    Flash arbitrary firmware file to MCU"
+    echo "  managed         Restore native firmware and re-enter managed mode"
     exit 1
 }
 
@@ -185,8 +219,8 @@ shift
 
 case "$command" in
     status)  cmd_status ;;
-    flash)   cmd_flash ;;
-    managed) cmd_managed "$@" ;;
+    flash)   cmd_flash "$@" ;;
+    managed) cmd_managed ;;
     -h|--help|help) usage ;;
     *) die "unknown command '$command'. Run 'nebulaos-mcu help' for usage." ;;
 esac

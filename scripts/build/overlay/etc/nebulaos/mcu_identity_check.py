@@ -58,11 +58,9 @@ def main():
     fields = decision.as_dict()
 
     if decision.action == mcu_lifecycle.RESTORE_AUTHORIZED:
-        if not _is_managed():
-            fields["MCU_RESTORE_RESULT"] = "skipped_not_managed"
-            emit(fields)
-            print("MCU_GUARD_RESULT=WARN")
-            sys.exit(0)
+        # Known stock ALWAYS restores — the managed flag only prevents
+        # the boot guard from interfering with unknown (user-flashed)
+        # applications. Stock Creality recovery to native is never skipped.
         restore_result = mcu_restore.restore()
         fields.update(restore_result.as_dict())
         emit(fields)

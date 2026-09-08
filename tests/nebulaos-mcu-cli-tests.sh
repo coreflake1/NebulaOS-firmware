@@ -1,11 +1,11 @@
 #!/bin/sh
 #
-# Offline tests for nebulaos-mcu CLI tool (Phase 2 §18).
+# Offline tests for nebulaos-mcu CLI tool (Phase 2 §18, C2 correction).
 #
 # Validates the CLI script's structure, subcommand coverage, status display,
-# managed flag handling, and flash refusal logic. Does NOT require serial
-# hardware or a real MCU - all checks use mock state files and structural
-# analysis.
+# flash <file> refusal logic, and managed-as-action contract. Does NOT
+# require serial hardware or a real MCU — all checks use mock state files
+# and structural analysis.
 #
 # Usage: sh tests/nebulaos-mcu-cli-tests.sh
 
@@ -15,6 +15,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 CLI_SCRIPT="$REPO_ROOT/scripts/build/overlay/usr/bin/nebulaos-mcu"
 IDENTITY_CHECK="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_identity_check.py"
+FLASH_FILE_HELPER="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/mcu_flash_file.py"
 
 PASS=0
 FAIL=0
@@ -37,6 +38,12 @@ if [ -x "$CLI_SCRIPT" ]; then
     pass "nebulaos-mcu is executable"
 else
     fail "nebulaos-mcu is not executable"
+fi
+
+if [ -f "$FLASH_FILE_HELPER" ]; then
+    pass "mcu_flash_file.py exists"
+else
+    fail "mcu_flash_file.py does not exist at $FLASH_FILE_HELPER"
 fi
 
 # =========================================================================
@@ -88,31 +95,93 @@ else
 fi
 
 if grep -q 'mcu_identity_check' "$CLI_SCRIPT"; then
-    pass "flash delegates to mcu_identity_check.py"
+    pass "managed delegates to mcu_identity_check.py"
 else
-    fail "flash does not reference mcu_identity_check.py"
+    fail "managed does not reference mcu_identity_check.py"
+fi
+
+if grep -q 'mcu_flash_file' "$CLI_SCRIPT"; then
+    pass "flash delegates to mcu_flash_file.py"
+else
+    fail "flash does not reference mcu_flash_file.py"
 fi
 
 if grep -q 'UNKNOWN_APPLICATION' "$CLI_SCRIPT"; then
-    pass "flash handles UNKNOWN_APPLICATION explicitly"
+    pass "managed handles UNKNOWN_APPLICATION explicitly"
 else
-    fail "flash does not handle UNKNOWN_APPLICATION"
+    fail "managed does not handle UNKNOWN_APPLICATION"
 fi
 
 if grep -q 'REFUSED\|refuse' "$CLI_SCRIPT"; then
-    pass "unknown app results in REFUSED message"
+    pass "unknown app or busy printer results in REFUSED message"
 else
-    fail "unknown app does not produce REFUSED message"
+    fail "does not produce REFUSED message for refusal cases"
 fi
 
 if grep -q 'NATIVE_CANDIDATE_001' "$CLI_SCRIPT"; then
-    pass "flash recognizes NATIVE_CANDIDATE_001 (no-op)"
+    pass "managed recognizes NATIVE_CANDIDATE_001 (already native)"
 else
-    fail "flash does not recognize NATIVE_CANDIDATE_001"
+    fail "managed does not recognize NATIVE_CANDIDATE_001"
 fi
 
 # =========================================================================
-# 4. Status subcommand - mock state file
+# 4. flash <file> contract
+# =========================================================================
+
+echo ""
+echo "--- flash <file> contract ---"
+
+if grep -q 'flash requires' "$CLI_SCRIPT" || grep -q 'flash.*file' "$CLI_SCRIPT"; then
+    pass "flash requires a file argument"
+else
+    fail "flash does not require a file argument"
+fi
+
+if grep -q 'check_printer_idle' "$CLI_SCRIPT"; then
+    pass "flash checks printer state before flashing"
+else
+    fail "flash does not check printer state"
+fi
+
+if grep -q 'printing' "$CLI_SCRIPT" && grep -q 'paused' "$CLI_SCRIPT"; then
+    pass "flash refuses printing and paused states"
+else
+    fail "flash does not refuse printing/paused"
+fi
+
+if grep -q '"false".*MCU_MANAGED_FLAG\|MCU_MANAGED_FLAG.*false\|set_managed.*false' "$CLI_SCRIPT"; then
+    pass "flash sets managed=false on success"
+else
+    fail "flash does not set managed=false"
+fi
+
+# =========================================================================
+# 5. managed-as-action contract (not a toggle)
+# =========================================================================
+
+echo ""
+echo "--- managed-as-action contract ---"
+
+if grep -q 'on|true\|off|false' "$CLI_SCRIPT"; then
+    fail "managed still has on/off toggle (should be action-only)"
+else
+    pass "managed has no on/off toggle"
+fi
+
+if grep -q 'RESTORED_AND_VERIFIED' "$CLI_SCRIPT"; then
+    pass "managed checks for RESTORED_AND_VERIFIED"
+else
+    fail "managed does not check for RESTORED_AND_VERIFIED"
+fi
+
+if grep -q 'set_managed.*true' "$CLI_SCRIPT"; then
+    pass "managed sets managed=true on success"
+else
+    fail "managed does not set managed=true on success"
+fi
+
+# =========================================================================
+# 6. Status subcommand - mock state file
 # =========================================================================
 
 echo ""
@@ -168,7 +237,7 @@ else
 fi
 
 # =========================================================================
-# 5. Status subcommand - no state file
+# 7. Status subcommand - no state file
 # =========================================================================
 
 echo ""
@@ -183,58 +252,33 @@ else
 fi
 
 # =========================================================================
-# 6. Managed subcommand - default state (no flag file)
+# 8. flash requires argument
 # =========================================================================
 
 echo ""
-echo "--- Managed subcommand ---"
+echo "--- flash argument handling ---"
 
-managed_output=$(MCU_MANAGED_FLAG="$TMPDIR/nonexistent_managed" "$CLI_SCRIPT" managed 2>&1)
-
-if echo "$managed_output" | grep -q 'true'; then
-    pass "managed defaults to true when flag file missing"
+if ! "$CLI_SCRIPT" flash 2>/dev/null; then
+    pass "flash with no argument exits non-zero"
 else
-    fail "managed does not default to true (output: $managed_output)"
+    fail "flash with no argument exits zero"
+fi
+
+flash_noarg_output=$("$CLI_SCRIPT" flash 2>&1) || true
+if echo "$flash_noarg_output" | grep -q 'requires\|file'; then
+    pass "flash with no argument mentions file requirement"
+else
+    fail "flash with no argument does not mention file requirement"
+fi
+
+if ! "$CLI_SCRIPT" flash /nonexistent/file.bin 2>/dev/null; then
+    pass "flash with nonexistent file exits non-zero"
+else
+    fail "flash with nonexistent file exits zero"
 fi
 
 # =========================================================================
-# 7. Managed subcommand - set on/off
-# =========================================================================
-
-MANAGED_FLAG="$TMPDIR/managed_test"
-MANAGED_DIR="$TMPDIR"
-
-MCU_MANAGED_FLAG="$MANAGED_FLAG" MCU_MANAGED_DIR="$MANAGED_DIR" "$CLI_SCRIPT" managed off >/dev/null 2>&1
-
-if [ -f "$MANAGED_FLAG" ]; then
-    flag_val=$(cat "$MANAGED_FLAG")
-    if [ "$flag_val" = "false" ]; then
-        pass "managed off writes 'false' to flag file"
-    else
-        fail "managed off wrote '$flag_val' instead of 'false'"
-    fi
-else
-    fail "managed off did not create flag file"
-fi
-
-managed_off_output=$(MCU_MANAGED_FLAG="$MANAGED_FLAG" "$CLI_SCRIPT" managed 2>&1)
-
-if echo "$managed_off_output" | grep -q 'false'; then
-    pass "managed reads false after 'managed off'"
-else
-    fail "managed does not read false after off"
-fi
-
-MCU_MANAGED_FLAG="$MANAGED_FLAG" MCU_MANAGED_DIR="$MANAGED_DIR" "$CLI_SCRIPT" managed on >/dev/null 2>&1
-flag_val=$(cat "$MANAGED_FLAG")
-if [ "$flag_val" = "true" ]; then
-    pass "managed on writes 'true' to flag file"
-else
-    fail "managed on wrote '$flag_val' instead of 'true'"
-fi
-
-# =========================================================================
-# 8. Unknown command handling
+# 9. Unknown command handling
 # =========================================================================
 
 echo ""
@@ -259,51 +303,11 @@ else
 fi
 
 # =========================================================================
-# 9. Managed flag invalid values
+# 10. mcu_identity_check.py boot guard - stock always restores
 # =========================================================================
 
 echo ""
-echo "--- Managed flag edge cases ---"
-
-EDGE_FLAG="$TMPDIR/edge_managed"
-echo "garbage" > "$EDGE_FLAG"
-edge_output=$(MCU_MANAGED_FLAG="$EDGE_FLAG" "$CLI_SCRIPT" managed 2>&1)
-if echo "$edge_output" | grep -q 'true\|garbage'; then
-    pass "non-false flag value treated as managed (true)"
-else
-    fail "non-false flag value not handled correctly"
-fi
-
-if ! MCU_MANAGED_FLAG="$MANAGED_FLAG" MCU_MANAGED_DIR="$MANAGED_DIR" "$CLI_SCRIPT" managed invalid 2>/dev/null; then
-    pass "managed rejects invalid argument"
-else
-    fail "managed accepts invalid argument"
-fi
-
-# =========================================================================
-# 10. mcu_identity_check.py managed gate
-# =========================================================================
-
-echo ""
-echo "--- mcu_identity_check.py managed gate ---"
-
-if grep -q '_is_managed' "$IDENTITY_CHECK"; then
-    pass "mcu_identity_check.py has _is_managed() function"
-else
-    fail "mcu_identity_check.py missing _is_managed()"
-fi
-
-if grep -q 'MCU_MANAGED_FLAG' "$IDENTITY_CHECK"; then
-    pass "mcu_identity_check.py reads MCU_MANAGED_FLAG"
-else
-    fail "mcu_identity_check.py does not read MCU_MANAGED_FLAG"
-fi
-
-if grep -q 'skipped_not_managed' "$IDENTITY_CHECK"; then
-    pass "mcu_identity_check.py skips restore when not managed"
-else
-    fail "mcu_identity_check.py does not skip restore when not managed"
-fi
+echo "--- mcu_identity_check.py boot guard ---"
 
 if grep -q 'RESTORE_AUTHORIZED' "$IDENTITY_CHECK"; then
     pass "mcu_identity_check.py still checks RESTORE_AUTHORIZED"
@@ -311,8 +315,58 @@ else
     fail "mcu_identity_check.py does not check RESTORE_AUTHORIZED"
 fi
 
+# Known stock should always restore — no managed gate
+if grep -q 'skipped_not_managed' "$IDENTITY_CHECK"; then
+    fail "mcu_identity_check.py still has managed gate on stock restore (should always restore)"
+else
+    pass "mcu_identity_check.py does not skip stock restore based on managed flag"
+fi
+
+if grep -q 'Known stock ALWAYS restores\|stock.*always.*restore' "$IDENTITY_CHECK"; then
+    pass "mcu_identity_check.py documents stock-always-restores policy"
+else
+    fail "mcu_identity_check.py does not document stock-always-restores policy"
+fi
+
 # =========================================================================
-# 11. Status shows managed state
+# 11. mcu_flash_file.py structure
+# =========================================================================
+
+echo ""
+echo "--- mcu_flash_file.py structure ---"
+
+if grep -q 'creality_flash' "$FLASH_FILE_HELPER"; then
+    pass "flash helper uses creality_flash backend"
+else
+    fail "flash helper does not reference creality_flash"
+fi
+
+if grep -q 'check_identity' "$FLASH_FILE_HELPER"; then
+    pass "flash helper verifies hardware identity"
+else
+    fail "flash helper does not verify hardware identity"
+fi
+
+if grep -q 'flash_image' "$FLASH_FILE_HELPER"; then
+    pass "flash helper calls flash_image"
+else
+    fail "flash helper does not call flash_image"
+fi
+
+if grep -q 'app_start' "$FLASH_FILE_HELPER"; then
+    pass "flash helper calls app_start after flash"
+else
+    fail "flash helper does not call app_start"
+fi
+
+if grep -q 'mcu_restart' "$FLASH_FILE_HELPER"; then
+    pass "flash helper uses mcu_restart for bootloader entry"
+else
+    fail "flash helper does not use mcu_restart"
+fi
+
+# =========================================================================
+# 12. Status shows managed state
 # =========================================================================
 
 echo ""
@@ -323,6 +377,21 @@ if echo "$status_managed_output" | grep -q 'Auto-restore at boot'; then
     pass "status includes auto-restore state"
 else
     fail "status does not show auto-restore state"
+fi
+
+# =========================================================================
+# 13. Managed flag default
+# =========================================================================
+
+echo ""
+echo "--- Managed flag defaults ---"
+
+# read_managed_flag is used internally — test via status output
+status_default_output=$(MCU_GUARD_STATE="$MOCK_STATE" MCU_MANAGED_FLAG="$TMPDIR/nonexistent_managed" "$CLI_SCRIPT" status 2>&1)
+if echo "$status_default_output" | grep -q 'true'; then
+    pass "managed defaults to true when flag file missing"
+else
+    fail "managed does not default to true"
 fi
 
 # =========================================================================

@@ -176,25 +176,50 @@ LEGACY_GROUP_ID_MAP = {
     "nebulaos_recovery": "nebulaos-recovery",
 }
 
-# Groups that existed in the RC3 six-group schema but are removed in the
-# final five-group schema. Only deleted when they exactly match the known
-# NebulaOS-shipped default (never if user-modified).
-OBSOLETE_GROUPS = {
-    "nebulaos-input-shaper": {
-        "name": "Input Shaper",
-        "color": "primary",
-        "showInStandby": True,
-        "showInPause": True,
-        "showInPrinting": True,
-        "macros": [
-            {"pos": 0, "name": "NEBULAOS_INPUT_SHAPER_CALIBRATE",
-             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
-            {"pos": 1, "name": "NEBULAOS_CALIBRATION_CONTINUE",
-             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
-            {"pos": 2, "name": "NEBULAOS_CALIBRATION_CANCEL",
-             "color": "", "showInStandby": True, "showInPrinting": False, "showInPause": False},
-        ],
-    },
+SCHEMA_VERSION = 2
+
+# Frozen RC3 historical fixtures (commit e4e349a, 2026-09-07). These are
+# the exact group definitions that shipped in RC3 — used by the migration
+# to detect unmodified RC3 installs and upgrade them to the final schema.
+# Camera and Maintenance are identical in RC3 and final, but included here
+# so the fixture is a complete snapshot of what RC3 shipped.
+RC3_GROUPS = {
+    "nebulaos-calibration": _group("Calibration", [
+        _macro(0, "NEBULAOS_AUTO_CALIBRATE"),
+        _macro(1, "NEBULAOS_Z_OFFSET_CALIBRATE"),
+        _macro(2, "AXIS_TWIST_X"),
+        _macro(3, "AXIS_TWIST_Y"),
+        _macro(4, "PID_BED"),
+        _macro(5, "PID_HOTEND"),
+        _macro(6, "NEBULAOS_NOZZLE_CLEAN"),
+    ]),
+    "nebulaos-input-shaper": _group("Input Shaper", [
+        _macro(0, "NEBULAOS_INPUT_SHAPER_CALIBRATE"),
+        _macro(1, "NEBULAOS_CALIBRATION_CONTINUE"),
+        _macro(2, "NEBULAOS_CALIBRATION_CANCEL"),
+    ]),
+    "nebulaos-extruder": _group("Extruder", [
+        _macro(0, "NEBULAOS_ESTEPS_CALIBRATE"),
+        _macro(1, "LOAD_FILAMENT"),
+        _macro(2, "UNLOAD_FILAMENT"),
+        _macro(3, "M600", show_in_printing=True),
+        _macro(4, "PURGE_MORE", show_in_pause=True),
+        _macro(5, "RESUME_FILAMENT_CHANGE", show_in_pause=True),
+        _macro(6, "CANCEL_FILAMENT_CHANGE", show_in_pause=True),
+    ]),
+    "nebulaos-camera": _group("Camera", [
+        _macro(0, "SET_CAMERA_QUALITY_LOW"),
+        _macro(1, "SET_CAMERA_QUALITY_MED"),
+        _macro(2, "SET_CAMERA_QUALITY_HIGH"),
+    ]),
+    "nebulaos-maintenance": _group("Maintenance", [
+        _macro(0, "BEEP"),
+        _macro(1, "PLAY_TUNE"),
+    ]),
+    "nebulaos-recovery": _group("Recovery", [
+        _macro(0, "NEBULAOS_RESUME_POWER_LOSS"),
+        _macro(1, "NEBULAOS_CLEAR_POWER_LOSS_RECOVERY"),
+    ]),
 }
 
 MODE_KEY = "macros.mode"
@@ -423,23 +448,36 @@ def migrate_legacy_group_ids(get_status, post, delete, log,
     return results
 
 
-def remove_obsolete_groups(get_status, delete, log,
-                           obsolete_groups: dict | None = None) -> dict:
-    """Remove groups that were part of a prior NebulaOS schema but are no
-    longer in the final product surface. Only deletes when the stored value
-    EXACTLY matches the known NebulaOS default — a user who renamed,
-    reordered, or added macros to the group keeps their version untouched.
+def migrate_rc3_to_final(get_status, post, delete, log,
+                          rc3_groups: dict | None = None,
+                          final_groups: dict | None = None) -> dict:
+    """Migrates macro groups from the RC3 six-group schema to the final
+    five-group schema. For each RC3 group:
+    - Unchanged between RC3 and final (camera, maintenance): skip
+    - Removed in final (input-shaper): delete if DB matches RC3 exactly
+    - Changed in final (calibration, extruder, recovery): replace if DB
+      matches RC3 exactly
+    User-modified groups are never touched.
 
-    Returns a dict of group_id -> one of "removed", "not_present",
+    Returns a dict of group_id -> one of "migrated", "removed",
+    "already_final", "not_present", "unchanged",
     "user_modified_left_untouched", "failed".
     """
-    obsolete_groups = obsolete_groups if obsolete_groups is not None else OBSOLETE_GROUPS
+    rc3_groups = rc3_groups if rc3_groups is not None else RC3_GROUPS
+    final_groups = final_groups if final_groups is not None else DEFAULT_GROUPS
     results = {}
-    for group_id, known_default in obsolete_groups.items():
+
+    for group_id, rc3_def in rc3_groups.items():
+        final_def = final_groups.get(group_id)
+
+        if final_def is not None and final_def == rc3_def:
+            results[group_id] = "unchanged"
+            continue
+
         try:
             existing = get_group(get_status, group_id)
         except TransportError as exc:
-            log(f"obsolete cleanup: could not check {group_id!r} ({exc}) - skipping")
+            log(f"rc3 migration: could not check {group_id!r} ({exc}) - skipping")
             results[group_id] = "failed"
             continue
 
@@ -447,21 +485,48 @@ def remove_obsolete_groups(get_status, delete, log,
             results[group_id] = "not_present"
             continue
 
-        if existing != known_default:
-            log(f"obsolete cleanup: {group_id!r} exists but differs from the known "
-                "NebulaOS default — user-modified, leaving untouched")
-            results[group_id] = "user_modified_left_untouched"
+        if existing != rc3_def:
+            if final_def is not None and existing == final_def:
+                log(f"rc3 migration: {group_id!r} already matches final schema")
+                results[group_id] = "already_final"
+            else:
+                log(f"rc3 migration: {group_id!r} differs from RC3 default — "
+                    "user-modified, leaving untouched")
+                results[group_id] = "user_modified_left_untouched"
             continue
 
-        log(f"obsolete cleanup: removing {group_id!r} (matches known NebulaOS default exactly)")
-        try:
-            delete_item(delete, f"macros.macrogroups.{group_id}")
-        except TransportError as exc:
-            log(f"obsolete cleanup: deleting {group_id!r} failed ({exc})")
-            results[group_id] = "failed"
-            continue
-
-        results[group_id] = "removed"
+        if final_def is None:
+            log(f"rc3 migration: removing obsolete group {group_id!r}")
+            try:
+                delete_item(delete, f"macros.macrogroups.{group_id}")
+            except TransportError as exc:
+                log(f"rc3 migration: deleting {group_id!r} failed ({exc})")
+                results[group_id] = "failed"
+                continue
+            results[group_id] = "removed"
+        else:
+            log(f"rc3 migration: updating {group_id!r} from RC3 to final schema")
+            try:
+                post("/server/database/item", {
+                    "namespace": "mainsail",
+                    "key": f"macros.macrogroups.{group_id}",
+                    "value": final_def,
+                })
+            except Exception as exc:  # noqa: BLE001
+                log(f"rc3 migration: updating {group_id!r} failed ({exc})")
+                results[group_id] = "failed"
+                continue
+            try:
+                verify = get_group(get_status, group_id)
+            except TransportError as exc:
+                log(f"rc3 migration: could not verify {group_id!r} after update ({exc})")
+                results[group_id] = "failed"
+                continue
+            if verify != final_def:
+                log(f"rc3 migration: {group_id!r} verification mismatch after update")
+                results[group_id] = "failed"
+                continue
+            results[group_id] = "migrated"
 
     return results
 
@@ -554,7 +619,7 @@ def run(
     log=print,
     groups: dict | None = None,
     legacy_map: dict | None = None,
-    obsolete_groups: dict | None = None,
+    rc3_groups: dict | None = None,
     mode_key: str = MODE_KEY,
     default_mode: str = DEFAULT_MODE,
     retry_attempts: int = RETRY_ATTEMPTS,
@@ -576,7 +641,7 @@ def run(
 
     migration_results = migrate_legacy_group_ids(get_status, post, delete, log, legacy_map)
 
-    obsolete_results = remove_obsolete_groups(get_status, delete, log, obsolete_groups)
+    rc3_results = migrate_rc3_to_final(get_status, post, delete, log, rc3_groups, groups)
 
     created = []
     already_present = []
@@ -633,23 +698,24 @@ def run(
 
     migration_failed = [k for k, v in migration_results.items()
                         if v in ("failed", "ambiguous_left_untouched")]
-    obsolete_failed = [k for k, v in obsolete_results.items() if v == "failed"]
+    rc3_failed = [k for k, v in rc3_results.items() if v == "failed"]
 
     write_marker_atomic(marker_path, {
+        "schema_version": SCHEMA_VERSION,
         "checked_at": _now(),
         "created": created,
         "already_present": already_present,
         "failed": failed,
         "migration": migration_results,
-        "obsolete_cleanup": obsolete_results,
+        "rc3_migration": rc3_results,
         "mode_default": mode_result,
     })
-    log(f"marker written ({marker_path}): created={created} "
-        f"already_present={already_present} failed={failed} "
-        f"migration={migration_results} obsolete_cleanup={obsolete_results} "
+    log(f"marker written ({marker_path}): schema_version={SCHEMA_VERSION} "
+        f"created={created} already_present={already_present} failed={failed} "
+        f"migration={migration_results} rc3_migration={rc3_results} "
         f"mode_default={mode_result}")
 
-    return 1 if (failed or migration_failed or obsolete_failed or mode_result == "failed") else 0
+    return 1 if (failed or migration_failed or rc3_failed or mode_result == "failed") else 0
 
 
 if __name__ == "__main__":

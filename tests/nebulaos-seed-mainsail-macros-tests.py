@@ -342,9 +342,9 @@ def test_default_groups_are_well_formed():
 #     real key in DEFAULT_GROUPS, every key is the exact pre-2026-09-06
 #     underscore form, and no accidental self-mapping. ---
 def test_legacy_group_id_map_is_well_formed():
-    valid_targets = set(seed.DEFAULT_GROUPS.keys()) | set(seed.OBSOLETE_GROUPS.keys())
+    valid_targets = set(seed.DEFAULT_GROUPS.keys()) | set(seed.RC3_GROUPS.keys())
     for old_id, new_id in seed.LEGACY_GROUP_ID_MAP.items():
-        check(f"legacy map: {old_id!r} -> {new_id!r} target exists in DEFAULT_GROUPS or OBSOLETE_GROUPS",
+        check(f"legacy map: {old_id!r} -> {new_id!r} target exists in DEFAULT_GROUPS or RC3_GROUPS",
               new_id in valid_targets)
         check(f"legacy map: {old_id!r} is a real underscore id (differs from its target)",
               old_id != new_id)
@@ -601,92 +601,285 @@ def test_m600_macro_visibility():
     check("M600: showInPause=False", m600["showInPause"] is False)
 
 
-# --- Test 22: obsolete group removal — exact default match is removed ---
-def test_obsolete_group_exact_match_removed():
+# --- Test 22: RC3 migration — input-shaper exact match is removed ---
+def test_rc3_input_shaper_exact_match_removed():
     def body(marker_path):
-        obsolete_default = seed.OBSOLETE_GROUPS["nebulaos-input-shaper"]
+        rc3_is = seed.RC3_GROUPS["nebulaos-input-shaper"]
         moon = FakeMoonrakerDb(existing={
-            group_key("nebulaos-input-shaper"): obsolete_default,
+            group_key("nebulaos-input-shaper"): rc3_is,
         })
         rc, logs = run_seed(marker_path, moon, groups={},
-                            obsolete_groups=seed.OBSOLETE_GROUPS)
-        check("obsolete exact: group removed from store",
+                            rc3_groups={"nebulaos-input-shaper": rc3_is})
+        check("rc3 input-shaper exact: group removed from store",
               group_key("nebulaos-input-shaper") not in moon.store)
         with open(marker_path) as f:
             marker = json.load(f)
-        check("obsolete exact: marker records removed",
-              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "removed")
+        check("rc3 input-shaper exact: marker records removed",
+              marker.get("rc3_migration", {}).get("nebulaos-input-shaper") == "removed")
 
     with_marker_dir(body)
 
 
-# --- Test 23: obsolete group removal — user-modified version is left untouched ---
-def test_obsolete_group_user_modified_left_untouched():
+# --- Test 23: RC3 migration — user-modified input-shaper left untouched ---
+def test_rc3_input_shaper_user_modified_left_untouched():
     def body(marker_path):
         user_modified = {"name": "My Input Shaper", "macros": [{"pos": 0, "name": "CUSTOM"}]}
+        rc3_is = seed.RC3_GROUPS["nebulaos-input-shaper"]
         moon = FakeMoonrakerDb(existing={
             group_key("nebulaos-input-shaper"): user_modified,
         })
         rc, logs = run_seed(marker_path, moon, groups={},
-                            obsolete_groups=seed.OBSOLETE_GROUPS)
-        check("obsolete user-modified: group still in store",
+                            rc3_groups={"nebulaos-input-shaper": rc3_is})
+        check("rc3 input-shaper user-modified: group still in store",
               group_key("nebulaos-input-shaper") in moon.store)
-        check("obsolete user-modified: content unchanged",
+        check("rc3 input-shaper user-modified: content unchanged",
               moon.store[group_key("nebulaos-input-shaper")] == user_modified)
         with open(marker_path) as f:
             marker = json.load(f)
-        check("obsolete user-modified: marker records user_modified_left_untouched",
-              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "user_modified_left_untouched")
+        check("rc3 input-shaper user-modified: marker records user_modified_left_untouched",
+              marker.get("rc3_migration", {}).get("nebulaos-input-shaper") == "user_modified_left_untouched")
 
     with_marker_dir(body)
 
 
-# --- Test 24: obsolete group not present — no-op ---
-def test_obsolete_group_not_present():
+# --- Test 24: RC3 migration — input-shaper not present is a no-op ---
+def test_rc3_input_shaper_not_present():
     def body(marker_path):
+        rc3_is = seed.RC3_GROUPS["nebulaos-input-shaper"]
         moon = FakeMoonrakerDb(existing={})
         rc, logs = run_seed(marker_path, moon, groups={},
-                            obsolete_groups=seed.OBSOLETE_GROUPS)
-        check("obsolete not present: rc==0", rc == 0)
+                            rc3_groups={"nebulaos-input-shaper": rc3_is})
+        check("rc3 input-shaper not present: rc==0", rc == 0)
         with open(marker_path) as f:
             marker = json.load(f)
-        check("obsolete not present: marker records not_present",
-              marker.get("obsolete_cleanup", {}).get("nebulaos-input-shaper") == "not_present")
+        check("rc3 input-shaper not present: marker records not_present",
+              marker.get("rc3_migration", {}).get("nebulaos-input-shaper") == "not_present")
 
     with_marker_dir(body)
 
 
-# --- Test 25: full six-to-five migration scenario ---
-def test_full_six_to_five_migration():
-    """Simulates an RC3 install that has all six groups with NebulaOS defaults.
-    After migration: Input Shaper group removed, five final groups present."""
+# --- Test 25: RC3 migration — calibration group updated from RC3 to final ---
+def test_rc3_calibration_migrated_to_final():
     def body(marker_path):
-        # Build the old six-group state as it would have been seeded
-        old_groups = {}
-        for gid, gdef in seed.DEFAULT_GROUPS.items():
-            old_groups[group_key(gid)] = gdef
-        # Add the now-obsolete Input Shaper group
-        old_groups[group_key("nebulaos-input-shaper")] = seed.OBSOLETE_GROUPS["nebulaos-input-shaper"]
-
-        moon = FakeMoonrakerDb(existing=old_groups)
-        # Also seed the mode
-        moon.store[seed.MODE_KEY] = "expert"
-
+        rc3_cal = seed.RC3_GROUPS["nebulaos-calibration"]
+        final_cal = seed.DEFAULT_GROUPS["nebulaos-calibration"]
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-calibration"): rc3_cal,
+        })
         rc, logs = run_seed(marker_path, moon,
-                            obsolete_groups=seed.OBSOLETE_GROUPS)
-        check("six-to-five: rc==0", rc == 0)
-        check("six-to-five: Input Shaper group removed",
-              group_key("nebulaos-input-shaper") not in moon.store)
-        check("six-to-five: all five final groups present",
-              all(group_key(gid) in moon.store for gid in seed.DEFAULT_GROUPS))
-        check("six-to-five: mode still expert",
-              moon.store[seed.MODE_KEY] == "expert")
+                            groups={"nebulaos-calibration": final_cal},
+                            rc3_groups={"nebulaos-calibration": rc3_cal})
+        check("rc3 cal migrated: rc==0", rc == 0)
+        check("rc3 cal migrated: group now matches final",
+              moon.store[group_key("nebulaos-calibration")] == final_cal)
+        check("rc3 cal migrated: final has 8 macros (including INPUT_SHAPER)",
+              len(final_cal["macros"]) == 8)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("rc3 cal migrated: marker records migrated",
+              marker.get("rc3_migration", {}).get("nebulaos-calibration") == "migrated")
 
     with_marker_dir(body)
+
+
+# --- Test 26: RC3 migration — extruder group updated (helpers removed) ---
+def test_rc3_extruder_migrated_to_final():
+    def body(marker_path):
+        rc3_ext = seed.RC3_GROUPS["nebulaos-extruder"]
+        final_ext = seed.DEFAULT_GROUPS["nebulaos-extruder"]
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-extruder"): rc3_ext,
+        })
+        rc, logs = run_seed(marker_path, moon,
+                            groups={"nebulaos-extruder": final_ext},
+                            rc3_groups={"nebulaos-extruder": rc3_ext})
+        check("rc3 ext migrated: rc==0", rc == 0)
+        check("rc3 ext migrated: group now matches final",
+              moon.store[group_key("nebulaos-extruder")] == final_ext)
+        check("rc3 ext migrated: final has 4 macros (no helpers)",
+              len(final_ext["macros"]) == 4)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("rc3 ext migrated: marker records migrated",
+              marker.get("rc3_migration", {}).get("nebulaos-extruder") == "migrated")
+
+    with_marker_dir(body)
+
+
+# --- Test 27: RC3 migration — recovery group visibility updated ---
+def test_rc3_recovery_migrated_to_final():
+    def body(marker_path):
+        rc3_rec = seed.RC3_GROUPS["nebulaos-recovery"]
+        final_rec = seed.DEFAULT_GROUPS["nebulaos-recovery"]
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-recovery"): rc3_rec,
+        })
+        rc, logs = run_seed(marker_path, moon,
+                            groups={"nebulaos-recovery": final_rec},
+                            rc3_groups={"nebulaos-recovery": rc3_rec})
+        check("rc3 rec migrated: rc==0", rc == 0)
+        check("rc3 rec migrated: group now matches final",
+              moon.store[group_key("nebulaos-recovery")] == final_rec)
+        check("rc3 rec migrated: printing=False in final",
+              final_rec["showInPrinting"] is False)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("rc3 rec migrated: marker records migrated",
+              marker.get("rc3_migration", {}).get("nebulaos-recovery") == "migrated")
+
+    with_marker_dir(body)
+
+
+# --- Test 28: RC3 migration — user-modified calibration left alone ---
+def test_rc3_user_modified_calibration_left_alone():
+    def body(marker_path):
+        rc3_cal = seed.RC3_GROUPS["nebulaos-calibration"]
+        final_cal = seed.DEFAULT_GROUPS["nebulaos-calibration"]
+        user_cal = {"name": "My Calibration", "macros": [{"pos": 0, "name": "CUSTOM"}]}
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-calibration"): user_cal,
+        })
+        rc, logs = run_seed(marker_path, moon,
+                            groups={"nebulaos-calibration": final_cal},
+                            rc3_groups={"nebulaos-calibration": rc3_cal})
+        check("rc3 user cal: group unchanged",
+              moon.store[group_key("nebulaos-calibration")] == user_cal)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("rc3 user cal: marker records user_modified_left_untouched",
+              marker.get("rc3_migration", {}).get("nebulaos-calibration") == "user_modified_left_untouched")
+
+    with_marker_dir(body)
+
+
+# --- Test 29: RC3 migration — already-final group is recognized ---
+def test_rc3_already_final_is_recognized():
+    def body(marker_path):
+        rc3_cal = seed.RC3_GROUPS["nebulaos-calibration"]
+        final_cal = seed.DEFAULT_GROUPS["nebulaos-calibration"]
+        moon = FakeMoonrakerDb(existing={
+            group_key("nebulaos-calibration"): final_cal,
+        })
+        rc, logs = run_seed(marker_path, moon,
+                            groups={"nebulaos-calibration": final_cal},
+                            rc3_groups={"nebulaos-calibration": rc3_cal})
+        check("rc3 already final: rc==0", rc == 0)
+        check("rc3 already final: group unchanged",
+              moon.store[group_key("nebulaos-calibration")] == final_cal)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("rc3 already final: marker records already_final",
+              marker.get("rc3_migration", {}).get("nebulaos-calibration") == "already_final")
+
+    with_marker_dir(body)
+
+
+# --- Test 30: RC3 migration — unchanged groups (camera, maintenance) are skipped ---
+def test_rc3_unchanged_groups_skipped():
+    def body(marker_path):
+        moon = FakeMoonrakerDb(existing={})
+        rc, logs = run_seed(marker_path, moon,
+                            groups=seed.DEFAULT_GROUPS,
+                            rc3_groups=seed.RC3_GROUPS)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        rc3_mig = marker.get("rc3_migration", {})
+        check("rc3 unchanged: camera skipped",
+              rc3_mig.get("nebulaos-camera") == "unchanged")
+        check("rc3 unchanged: maintenance skipped",
+              rc3_mig.get("nebulaos-maintenance") == "unchanged")
+
+    with_marker_dir(body)
+
+
+# --- Test 31: full RC3 six-to-five migration scenario ---
+def test_full_rc3_six_to_five_migration():
+    """Simulates an RC3 install with all six RC3 groups. After migration:
+    input-shaper removed, calibration/extruder/recovery updated to final,
+    camera/maintenance unchanged, all five final groups present."""
+    def body(marker_path):
+        existing = {}
+        for gid, gdef in seed.RC3_GROUPS.items():
+            existing[group_key(gid)] = gdef
+        existing[seed.MODE_KEY] = "expert"
+
+        moon = FakeMoonrakerDb(existing=existing)
+        rc, logs = run_seed(marker_path, moon,
+                            groups=seed.DEFAULT_GROUPS,
+                            rc3_groups=seed.RC3_GROUPS)
+        check("full rc3 migration: rc==0", rc == 0)
+        check("full rc3 migration: input-shaper removed",
+              group_key("nebulaos-input-shaper") not in moon.store)
+        check("full rc3 migration: all five final groups present",
+              all(group_key(gid) in moon.store for gid in seed.DEFAULT_GROUPS))
+        check("full rc3 migration: calibration matches final",
+              moon.store[group_key("nebulaos-calibration")] == seed.DEFAULT_GROUPS["nebulaos-calibration"])
+        check("full rc3 migration: extruder matches final",
+              moon.store[group_key("nebulaos-extruder")] == seed.DEFAULT_GROUPS["nebulaos-extruder"])
+        check("full rc3 migration: recovery matches final",
+              moon.store[group_key("nebulaos-recovery")] == seed.DEFAULT_GROUPS["nebulaos-recovery"])
+        check("full rc3 migration: mode still expert",
+              moon.store[seed.MODE_KEY] == "expert")
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("full rc3 migration: schema_version present",
+              marker.get("schema_version") == seed.SCHEMA_VERSION)
+
+    with_marker_dir(body)
+
+
+# --- Test 32: schema_version is in marker on fresh install ---
+def test_schema_version_in_marker():
+    def body(marker_path):
+        moon = FakeMoonrakerDb(existing={})
+        rc, logs = run_seed(marker_path, moon)
+        with open(marker_path) as f:
+            marker = json.load(f)
+        check("schema version: present in marker",
+              marker.get("schema_version") == seed.SCHEMA_VERSION)
+        check("schema version: is integer 2",
+              marker.get("schema_version") == 2)
+
+    with_marker_dir(body)
+
+
+# --- Test 33: RC3_GROUPS has exactly 6 groups ---
+def test_rc3_groups_has_six_groups():
+    check("RC3_GROUPS count is exactly 6",
+          len(seed.RC3_GROUPS) == 6,
+          f"got {len(seed.RC3_GROUPS)}: {list(seed.RC3_GROUPS.keys())}")
+    expected_ids = {"nebulaos-calibration", "nebulaos-input-shaper", "nebulaos-extruder",
+                    "nebulaos-recovery", "nebulaos-maintenance", "nebulaos-camera"}
+    check("RC3_GROUPS IDs match historical RC3",
+          set(seed.RC3_GROUPS.keys()) == expected_ids)
+
+
+# --- Test 34: RC3 calibration has 7 macros, final has 8 ---
+def test_rc3_vs_final_calibration_macro_counts():
+    rc3_cal = seed.RC3_GROUPS["nebulaos-calibration"]
+    final_cal = seed.DEFAULT_GROUPS["nebulaos-calibration"]
+    check("RC3 calibration has 7 macros", len(rc3_cal["macros"]) == 7)
+    check("final calibration has 8 macros", len(final_cal["macros"]) == 8)
+    rc3_names = {m["name"] for m in rc3_cal["macros"]}
+    final_names = {m["name"] for m in final_cal["macros"]}
+    check("INPUT_SHAPER_CALIBRATE added in final",
+          "NEBULAOS_INPUT_SHAPER_CALIBRATE" in final_names - rc3_names)
+
+
+# --- Test 35: RC3 extruder has 7 macros, final has 4 ---
+def test_rc3_vs_final_extruder_macro_counts():
+    rc3_ext = seed.RC3_GROUPS["nebulaos-extruder"]
+    final_ext = seed.DEFAULT_GROUPS["nebulaos-extruder"]
+    check("RC3 extruder has 7 macros", len(rc3_ext["macros"]) == 7)
+    check("final extruder has 4 macros", len(final_ext["macros"]) == 4)
+    removed = {m["name"] for m in rc3_ext["macros"]} - {m["name"] for m in final_ext["macros"]}
+    check("PURGE_MORE removed in final", "PURGE_MORE" in removed)
+    check("RESUME_FILAMENT_CHANGE removed in final", "RESUME_FILAMENT_CHANGE" in removed)
+    check("CANCEL_FILAMENT_CHANGE removed in final", "CANCEL_FILAMENT_CHANGE" in removed)
 
 
 def run_seed(marker_path, moon, groups=None, legacy_map=None,
-             obsolete_groups=None, retry_attempts=3, retry_delay=0):
+             rc3_groups=None, retry_attempts=3, retry_delay=0):
     logs = []
     rc = seed.run(
         get_status=moon.get_status,
@@ -696,7 +889,7 @@ def run_seed(marker_path, moon, groups=None, legacy_map=None,
         log=logs.append,
         groups=groups if groups is not None else TWO_GROUPS,
         legacy_map=legacy_map if legacy_map is not None else {},
-        obsolete_groups=obsolete_groups if obsolete_groups is not None else {},
+        rc3_groups=rc3_groups if rc3_groups is not None else {},
         retry_attempts=retry_attempts,
         retry_delay=retry_delay,
         sleep=lambda _s: None,
@@ -726,10 +919,20 @@ def main():
     test_no_workflow_helpers_in_dashboard()
     test_group_visibility_flags()
     test_m600_macro_visibility()
-    test_obsolete_group_exact_match_removed()
-    test_obsolete_group_user_modified_left_untouched()
-    test_obsolete_group_not_present()
-    test_full_six_to_five_migration()
+    test_rc3_input_shaper_exact_match_removed()
+    test_rc3_input_shaper_user_modified_left_untouched()
+    test_rc3_input_shaper_not_present()
+    test_rc3_calibration_migrated_to_final()
+    test_rc3_extruder_migrated_to_final()
+    test_rc3_recovery_migrated_to_final()
+    test_rc3_user_modified_calibration_left_alone()
+    test_rc3_already_final_is_recognized()
+    test_rc3_unchanged_groups_skipped()
+    test_full_rc3_six_to_five_migration()
+    test_schema_version_in_marker()
+    test_rc3_groups_has_six_groups()
+    test_rc3_vs_final_calibration_macro_counts()
+    test_rc3_vs_final_extruder_macro_counts()
 
     print()
     print(f"=== {PASS} passed, {FAIL} failed ===")
