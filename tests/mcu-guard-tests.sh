@@ -553,6 +553,57 @@ else
     fail "state file does not record WARN when helper is missing"
 fi
 
+echo "--- state file MCU_GUARD_DETAIL survives . sourcing with shell metacharacters (Phase 2 overnight convergence, 2026-09-09) ---"
+# Real device found live: MCU_GUARD_RESULT=WARN with a detail message
+# containing parentheses and a semicolon
+# ("application_identify_failed (identify_handshake_timeout);
+# hardware_check_also_unreachable (version_query_failed_after_bootloader_
+# entry)"). Writing that unquoted made `nebulaos-mcu status`'s own
+# `. "$state"` sourcing fail with a hard shell syntax error, hiding a
+# guard result (WARN, not blocking) that had already correctly let
+# Klipper proceed.
+mock_metachar="$WORK/mock_metachar.py"
+cat > "$mock_metachar" <<'MOCK_EOF'
+#!/usr/bin/env python3
+print("MCU_GUARD_RESULT=WARN")
+print("MCU_IDENTITY=unknown")
+print("MCU_LIFECYCLE_DETAIL=application_identify_failed (identify_handshake_timeout); hardware_check_also_unreachable (version_query_failed_after_bootloader_entry)")
+print("MCU_LIFECYCLE_STATE=MCU_UNREACHABLE")
+MOCK_EOF
+chmod +x "$mock_metachar"
+
+mock_state6="$WORK/mock6.state"
+MCU_GUARD_STATE="$mock_state6" \
+MCU_IDENTITY_CHECK="$mock_metachar" \
+    sh "$GUARD_SCRIPT" start > "$WORK/mock_metachar_stdout.txt" 2>&1
+mock_metachar_exit=$?
+
+if [ "$mock_metachar_exit" -eq 0 ]; then
+    pass "guard exits 0 for a detail message containing parentheses/semicolons"
+else
+    fail "guard exits $mock_metachar_exit for a detail message containing parentheses/semicolons (expected 0)"
+fi
+
+if [ -f "$mock_state6" ]; then
+    source_output=$(sh -c ". '$mock_state6'; echo \"RESULT=\$MCU_GUARD_RESULT|DETAIL=\$MCU_GUARD_DETAIL|STATE=\$MCU_LIFECYCLE_STATE\"" 2>&1)
+    source_rc=$?
+    if [ "$source_rc" -eq 0 ]; then
+        pass "state file sources cleanly with sh's own '.' builtin despite parentheses/semicolons in DETAIL"
+    else
+        fail "state file failed to source cleanly ($source_output)"
+    fi
+    case "$source_output" in
+        *'RESULT=WARN|DETAIL=application_identify_failed (identify_handshake_timeout); hardware_check_also_unreachable (version_query_failed_after_bootloader_entry)|STATE=MCU_UNREACHABLE'*)
+            pass "sourced values round-trip exactly, parentheses/semicolons intact, no truncation"
+            ;;
+        *)
+            fail "sourced values did not round-trip exactly (got: $source_output)"
+            ;;
+    esac
+else
+    fail "state file was not written for the metachar test case"
+fi
+
 # Test with helper that produces empty output - should exit 0 with WARN.
 mock_empty="$WORK/mock_empty.py"
 cat > "$mock_empty" <<'MOCK_EOF'

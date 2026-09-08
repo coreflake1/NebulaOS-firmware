@@ -52,6 +52,28 @@ log() {
     echo "S50nebulaos-mcu-guard: $1"
 }
 
+# Phase 2 overnight convergence mission (2026-09-09): MCU_GUARD_DETAIL is
+# the one field here that carries mcu_identity_check.py's free-text
+# MCU_LIFECYCLE_DETAIL message, which legitimately contains shell
+# metacharacters - a real device found live with MCU_GUARD_RESULT=WARN
+# carried the detail "application_identify_failed
+# (identify_handshake_timeout); hardware_check_also_unreachable
+# (version_query_failed_after_bootloader_entry)". Writing that unquoted
+# made `nebulaos-mcu status`'s `. "$state"` sourcing fail outright with a
+# shell syntax error - not a warning, a hard crash, on a device where the
+# MCU guard itself had already correctly recorded a WARN and let Klipper
+# proceed. Every OTHER field here is one of this project's own fixed,
+# enum-like tokens (PASS/WARN/FAIL, a version string, a lifecycle-state
+# name) with no metacharacters ever observed or expected, and existing
+# tooling (tests/mcu-guard-tests.sh, nebulaos-mcu itself) greps/sources
+# them unquoted - only MCU_GUARD_DETAIL is quoted, to fix the real bug
+# without changing the format of every other field. single_quote() is the
+# same `'\''`-splice technique used throughout this project's other shell
+# scripts for a value that must round-trip through `.` sourcing.
+single_quote() {
+    printf "%s" "$1" | sed "s/'/'\\\\''/g"
+}
+
 write_state() {
     _result="$1"
     _identity="${2:-unknown}"
@@ -60,7 +82,7 @@ write_state() {
     cat > "$MCU_GUARD_STATE" <<-EOF
 	MCU_GUARD_RESULT=$_result
 	MCU_IDENTITY=$_identity
-	MCU_GUARD_DETAIL=$_detail
+	MCU_GUARD_DETAIL='$(single_quote "$_detail")'
 	MCU_GUARD_TIMESTAMP=$_ts
 	MCU_GUARD_EXPECTED=$EXPECTED_HW_ID
 	MCU_LIFECYCLE_STATE=${_lifecycle_state:-unknown}
