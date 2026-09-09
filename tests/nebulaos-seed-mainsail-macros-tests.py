@@ -878,6 +878,170 @@ def test_rc3_vs_final_extruder_macro_counts():
     check("CANCEL_FILAMENT_CHANGE removed in final", "CANCEL_FILAMENT_CHANGE" in removed)
 
 
+# --- reset_to_defaults() tests (Phase 2 final live convergence mission,
+#     2026-09-09): the explicit, user-invoked counterpart to run() above.
+#     run() never overwrites; reset_to_defaults() always overwrites the
+#     five canonical groups and mode_key, and nothing else. ------------
+
+def run_reset(moon, groups=None, obsolete_ids=None):
+    logs = []
+    result = seed.reset_to_defaults(
+        get_status=moon.get_status,
+        post=moon.post,
+        delete=moon.delete,
+        log=logs.append,
+        groups=groups if groups is not None else seed.DEFAULT_GROUPS,
+        obsolete_ids=obsolete_ids if obsolete_ids is not None else set(),
+    )
+    return result, logs
+
+
+def test_reset_six_group_custom_state_produces_exact_five():
+    custom_six = {
+        group_key("nebulaos-calibration"): {"name": "My Calibration", "macros": [{"pos": 0, "name": "SOMETHING_CUSTOM"}]},
+        group_key("nebulaos-extruder"): {"name": "Extruder", "macros": []},
+        group_key("nebulaos-input-shaper"): {"name": "Input Shaper", "macros": [{"pos": 0, "name": "NEBULAOS_INPUT_SHAPER_CALIBRATE"}]},
+        group_key("nebulaos-recovery"): {"name": "Recovery", "macros": []},
+        group_key("nebulaos-maintenance"): {"name": "Maintenance", "macros": []},
+        group_key("nebulaos-camera"): {"name": "Camera reordered", "macros": []},
+        "macros.mode": "simple",
+    }
+    moon = FakeMoonrakerDb(existing=custom_six)
+    result, logs = run_reset(moon, obsolete_ids={"nebulaos-input-shaper"})
+
+    remaining_group_keys = [k for k in moon.store if k.startswith("macros.macrogroups.")]
+    check("reset: exactly five groups remain after resetting a customized six-group state",
+          sorted(remaining_group_keys) == sorted(group_key(g) for g in seed.DEFAULT_GROUPS),
+          f"got {sorted(remaining_group_keys)}")
+    check("reset: standalone Input Shaper group is gone",
+          group_key("nebulaos-input-shaper") not in moon.store)
+    check("reset: reports success for all five canonical groups",
+          all(v == "reset" for v in result["groups"].values()), result["groups"])
+
+
+def test_reset_produces_exact_canonical_contents():
+    moon = FakeMoonrakerDb(existing={
+        group_key("nebulaos-calibration"): {"name": "custom", "macros": []},
+    })
+    result, logs = run_reset(moon)
+    for group_id, definition in seed.DEFAULT_GROUPS.items():
+        check(f"reset: {group_id!r} content matches canonical definition exactly",
+              moon.store[group_key(group_id)] == definition)
+
+
+def test_reset_produces_exact_visibility_metadata():
+    moon = FakeMoonrakerDb()
+    run_reset(moon)
+    calib = moon.store[group_key("nebulaos-calibration")]
+    check("reset: Calibration group visibility (standby only)",
+          (calib["showInStandby"], calib["showInPrinting"], calib["showInPause"]) == (True, False, False))
+    extruder = moon.store[group_key("nebulaos-extruder")]
+    check("reset: Extruder group visibility (standby + printing)",
+          (extruder["showInStandby"], extruder["showInPrinting"], extruder["showInPause"]) == (True, True, False))
+    recovery = moon.store[group_key("nebulaos-recovery")]
+    check("reset: Recovery group visibility (standby only)",
+          (recovery["showInStandby"], recovery["showInPrinting"], recovery["showInPause"]) == (True, False, False))
+    for gid in ("nebulaos-maintenance", "nebulaos-camera"):
+        g = moon.store[group_key(gid)]
+        check(f"reset: {gid!r} visibility (all states)",
+              (g["showInStandby"], g["showInPrinting"], g["showInPause"]) == (True, True, True))
+    m600 = next(m for m in extruder["macros"] if m["name"] == "M600")
+    check("reset: M600 individual visibility (printing only)",
+          (m600["showInStandby"], m600["showInPrinting"], m600["showInPause"]) == (False, True, False))
+    esteps = next(m for m in extruder["macros"] if m["name"] == "NEBULAOS_ESTEPS_CALIBRATE")
+    check("reset: E-Steps individual visibility (standby only)",
+          (esteps["showInStandby"], esteps["showInPrinting"], esteps["showInPause"]) == (True, False, False))
+
+
+def test_reset_restores_expert_mode_default():
+    moon = FakeMoonrakerDb(existing={"macros.mode": "simple"})
+    result, logs = run_reset(moon)
+    check("reset: macros.mode reset to expert", moon.store.get("macros.mode") == "expert")
+    check("reset: mode result reported as 'reset'", result["mode"] == "reset")
+
+
+def test_reset_from_hidden_reordered_state_produces_exact_default():
+    reordered = {
+        group_key("nebulaos-camera"): {"name": "Camera", "color": "primary", "macros": [
+            {"pos": 2, "name": "SET_CAMERA_QUALITY_HIGH", "color": "", "showInStandby": True, "showInPrinting": True, "showInPause": True},
+        ], "showInStandby": False, "showInPrinting": True, "showInPause": True},  # hidden in standby by user
+    }
+    moon = FakeMoonrakerDb(existing=reordered)
+    run_reset(moon)
+    check("reset: hidden/reordered Camera group restored to exact canonical default",
+          moon.store[group_key("nebulaos-camera")] == seed.DEFAULT_GROUPS["nebulaos-camera"])
+
+
+def test_reset_is_idempotent():
+    moon = FakeMoonrakerDb()
+    result1, _ = run_reset(moon)
+    snapshot1 = dict(moon.store)
+    result2, _ = run_reset(moon)
+    check("reset: repeated invocation produces identical final state",
+          moon.store == snapshot1)
+    check("reset: repeated invocation reports success both times",
+          all(v == "reset" for v in result1["groups"].values()) and
+          all(v == "reset" for v in result2["groups"].values()))
+
+
+def test_reset_transport_failure_on_one_group_is_reported_failed():
+    moon = FakeMoonrakerDb()
+    real_post = moon.post
+    def flaky_post(path, payload):
+        if "nebulaos-extruder" in payload.get("key", ""):
+            raise ConnectionError("simulated transport failure")
+        return real_post(path, payload)
+    logs = []
+    result = seed.reset_to_defaults(
+        get_status=moon.get_status, post=flaky_post, delete=moon.delete,
+        log=logs.append, groups=seed.DEFAULT_GROUPS, obsolete_ids=set(),
+    )
+    check("reset: the failing group is reported failed",
+          result["groups"]["nebulaos-extruder"] == "failed")
+    check("reset: other groups still succeed despite one failure",
+          result["groups"]["nebulaos-calibration"] == "reset")
+    check("reset: a failed group is deleted but not left with stale content",
+          group_key("nebulaos-extruder") not in moon.store)
+
+
+def test_reset_never_touches_unrelated_namespace_keys():
+    moon = FakeMoonrakerDb(existing={
+        "dashboard": {"nonExpandPanels": []},
+        "view": {"configfiles": {"showHiddenFiles": False}},
+        "gcodeViewer": {"someSetting": True},
+        "initVersion": "2.18.2",
+    })
+    run_reset(moon)
+    for key in ("dashboard", "view", "gcodeViewer", "initVersion"):
+        check(f"reset: unrelated mainsail-namespace key {key!r} is untouched",
+              moon.store.get(key) == {"dashboard": {"nonExpandPanels": []},
+                                       "view": {"configfiles": {"showHiddenFiles": False}},
+                                       "gcodeViewer": {"someSetting": True},
+                                       "initVersion": "2.18.2"}[key])
+
+
+def test_reset_never_touches_a_users_own_extra_group():
+    moon = FakeMoonrakerDb(existing={
+        group_key("my-own-shortcuts"): {"name": "My Shortcuts", "macros": []},
+    })
+    run_reset(moon)
+    check("reset: a user's own non-NebulaOS group id survives untouched",
+          moon.store.get(group_key("my-own-shortcuts")) == {"name": "My Shortcuts", "macros": []})
+
+
+def test_reset_then_normal_seed_run_does_not_reset_again():
+    """After a reset, run() (normal boot-time seeding) must treat the
+    freshly-reset canonical groups as already-present and leave them
+    alone - proving reset-state and ordinary seeding compose correctly
+    and a later boot never silently re-resets a user's post-reset edit."""
+    moon = FakeMoonrakerDb()
+    run_reset(moon)
+    moon.store[group_key("nebulaos-camera")]["name"] = "User renamed this after reset"
+    with_marker_dir(lambda marker: run_seed(marker, moon, groups=seed.DEFAULT_GROUPS))
+    check("reset: a user edit made after reset survives a normal seed run",
+          moon.store[group_key("nebulaos-camera")]["name"] == "User renamed this after reset")
+
+
 def run_seed(marker_path, moon, groups=None, legacy_map=None,
              rc3_groups=None, retry_attempts=3, retry_delay=0):
     logs = []
@@ -933,6 +1097,17 @@ def main():
     test_rc3_groups_has_six_groups()
     test_rc3_vs_final_calibration_macro_counts()
     test_rc3_vs_final_extruder_macro_counts()
+
+    test_reset_six_group_custom_state_produces_exact_five()
+    test_reset_produces_exact_canonical_contents()
+    test_reset_produces_exact_visibility_metadata()
+    test_reset_restores_expert_mode_default()
+    test_reset_from_hidden_reordered_state_produces_exact_default()
+    test_reset_is_idempotent()
+    test_reset_transport_failure_on_one_group_is_reported_failed()
+    test_reset_never_touches_unrelated_namespace_keys()
+    test_reset_never_touches_a_users_own_extra_group()
+    test_reset_then_normal_seed_run_does_not_reset_again()
 
     print()
     print(f"=== {PASS} passed, {FAIL} failed ===")

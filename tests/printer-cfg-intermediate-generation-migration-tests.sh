@@ -149,7 +149,9 @@ run_fn "$t1" "$WORK/system1b" "$WORK/log1b"
 sum_b=$(md5sum "$f1" | cut -d' ' -f1)
 [ "$sum_a" = "$sum_b" ] && pass "case 1: second run is a true no-op" || fail "case 1: second run modified the file further"
 
-# --- Case 2: the real device's exact fixture, WITH the safety override -----
+# --- Case 2: an UNRECOGNIZED axis-twist override (the pre-correction,
+#     found-unsafe value 200) - must still safely refuse, never silently
+#     deleted or silently promoted -----------------------------------------
 
 t2="$WORK/case2"; mkdir -p "$t2"; f2="$t2/printer.cfg"
 {
@@ -168,9 +170,9 @@ log2="$WORK/log2"
 run_fn "$t2" "$WORK/system2" "$log2"
 
 if cmp -s "$f2" "$f2.orig"; then
-	pass "case 2 (real device, with safety override): left completely untouched - safe refusal"
+	pass "case 2 (unrecognized override, value 200): left completely untouched - safe refusal"
 else
-	fail "case 2 (real device, with safety override): file was modified - a mid-block safety override could have been silently deleted"
+	fail "case 2 (unrecognized override, value 200): file was modified - a mid-block safety override could have been silently deleted"
 fi
 if [ "$(rc_of "$log2")" != "0" ]; then
 	pass "case 2: migrate_printer_cfg reports failure (correctly refuses rather than guesses)"
@@ -188,6 +190,73 @@ if [ -n "$refused_backup" ] && cmp -s "$refused_backup" "$f2.orig"; then
 else
 	fail "case 2: no matching backup found in the refused-migration directory"
 fi
+
+# --- Case 3 (Phase 2 final live convergence mission, 2026-09-09): the
+#     CORRECTED, canonical-matching axis-twist override (value 190) - now
+#     that machine.cfg's own default is also 190, this exact historical
+#     override is genuinely redundant and migration should proceed,
+#     consuming it, exactly like the clean case-1 fixture -----------------
+
+t3="$WORK/case3"; mkdir -p "$t3"; f3="$t3/printer.cfg"
+{
+	printf '%s' "$INTERMEDIATE_GEN_HEADER"
+	echo ''
+	echo '# LIVE QUALIFICATION HOTFIX: overrides machine.cfg calibrate_end_y=200'
+	echo '# (probe-frame Y=227 exceeds real axis_maximum=223 by 4mm - unsafe).'
+	echo '# 190 gives an explicit 6mm safety margin (probe-frame Y=217).'
+	echo '[axis_twist_compensation]'
+	echo 'calibrate_end_y: 190'
+	printf '%s' "$INTERMEDIATE_GEN_MIDDLE"
+	printf '%s' "$INTERMEDIATE_GEN_TRAILER"
+} > "$f3"
+
+log3="$WORK/log3"
+run_fn "$t3" "$WORK/system3" "$log3"
+
+if grep -qxF '[include /etc/nebulaos/klipper/filament.cfg]' "$f3" \
+	&& grep -qxF '[include /etc/nebulaos/klipper/homing.cfg]' "$f3"; then
+	pass "case 3 (recognized override, value 190): migration proceeds, upgraded to the full Phase 2 include set"
+else
+	fail "case 3 (recognized override, value 190): migration did not proceed despite the override matching the canonical default"
+fi
+[ "$(rc_of "$log3")" = "0" ] && pass "case 3: reports success" || fail "case 3: reported failure ($(cat "$log3"))"
+if ! grep -qF '[axis_twist_compensation]' "$f3"; then
+	pass "case 3: the now-redundant override block is consumed, not carried forward as dead config"
+else
+	fail "case 3: the redundant override block was left behind after migration"
+fi
+if grep -qF 'tri_expand_mm: 0.10' "$f3" && grep -qF '#*# z_offset = 1.755' "$f3"; then
+	pass "case 3: unrelated trailing user/calibration content still preserved"
+else
+	fail "case 3: unrelated trailing content lost"
+fi
+
+# --- Case 4: value 190 (recognized) but with an EXTRA, genuinely custom
+#     axis-twist option alongside it - the per-line check must still
+#     refuse, since customization beyond the exact known override is not
+#     something this migration may silently discard --------------------
+
+t4="$WORK/case4"; mkdir -p "$t4"; f4="$t4/printer.cfg"
+{
+	printf '%s' "$INTERMEDIATE_GEN_HEADER"
+	echo ''
+	echo '[axis_twist_compensation]'
+	echo 'calibrate_end_y: 190'
+	echo 'speed: 25'
+	printf '%s' "$INTERMEDIATE_GEN_MIDDLE"
+	printf '%s' "$INTERMEDIATE_GEN_TRAILER"
+} > "$f4"
+cp "$f4" "$f4.orig"
+
+log4="$WORK/log4"
+run_fn "$t4" "$WORK/system4" "$log4"
+
+if cmp -s "$f4" "$f4.orig"; then
+	pass "case 4 (recognized value plus a genuine extra option): left completely untouched - safe refusal"
+else
+	fail "case 4 (recognized value plus a genuine extra option): file was modified despite real customization beyond the known override"
+fi
+[ "$(rc_of "$log4")" != "0" ] && pass "case 4: migrate_printer_cfg reports failure" || fail "case 4: migrate_printer_cfg reported success despite unrecognized extra content"
 
 echo ""
 echo "printer-cfg-intermediate-generation-migration-tests: $PASS passed, $FAIL failed"

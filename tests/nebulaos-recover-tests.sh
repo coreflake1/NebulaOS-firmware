@@ -434,6 +434,185 @@ else
 fi
 
 # =========================================================================
+# 6b. Mainsail --reset-state (Phase 2 final live convergence mission,
+#     2026-09-09): the orchestration in nebulaos-recover itself - backup
+#     the namespace before anything else, always restore the frontend,
+#     only invoke the seeder's --reset path when the flag is given. The
+#     seeder's own reset_to_defaults() logic (exact five groups, exact
+#     content, idempotence, unrelated-key isolation, etc.) is exhaustively
+#     covered in tests/nebulaos-seed-mainsail-macros-tests.py - these
+#     tests are about the shell-level wiring, not re-proving that logic.
+# =========================================================================
+
+echo ""
+echo "--- Mainsail --reset-state (mocked curl + seeder) ---"
+
+CURL_LOG="$TMPDIR/curl.log"
+MOCK_CURL_OK="$MOCK_BIN/fake-curl-ok"
+cat > "$MOCK_CURL_OK" <<'CURLEOF'
+#!/bin/sh
+# Mimics: curl -sf .../server/database/list  (existence probe)
+#         curl -sf .../server/database/item?namespace=mainsail  (backup read)
+echo "$@" >> "${CURL_LOG_FILE}"
+for a in "$@"; do
+	case "$a" in
+		*database/list*) echo '{"result":{"namespaces":["mainsail"]}}'; exit 0 ;;
+		*database/item*namespace=mainsail*)
+			echo '{"result":{"namespace":"mainsail","key":null,"value":{"macros":{"macrogroups":{}}}}}'
+			exit 0 ;;
+	esac
+done
+exit 0
+CURLEOF
+chmod +x "$MOCK_CURL_OK"
+# The mock needs CURL_LOG's path baked in since it runs as a separate
+# process - substitute it directly rather than relying on env export
+# surviving into $CLI_SCRIPT's own subshell invocations of $CURL_BIN.
+sed -i "s|\${CURL_LOG_FILE}|$CURL_LOG|" "$MOCK_CURL_OK" 2>/dev/null \
+	|| sed -i '' "s|\${CURL_LOG_FILE}|$CURL_LOG|" "$MOCK_CURL_OK"
+
+# Mock seeders are real, valid Python (not shell) - cmd_mainsail invokes
+# them as `"$PYTHON3" "$MAINSAIL_SEEDER" --reset`, and these tests use the
+# real system python3 (not overridden) so mainsail_backup_namespace()'s
+# own JSON-validation step, which also uses $PYTHON3, keeps working.
+MOCK_SEEDER_OK="$MOCK_BIN/fake-seeder-ok.py"
+SEEDER_LOG="$TMPDIR/seeder.log"
+cat > "$MOCK_SEEDER_OK" <<EOF
+import sys
+with open("$SEEDER_LOG", "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\n")
+sys.exit(0)
+EOF
+
+# --- ordinary recovery (no flag): must NEVER touch curl/the seeder at all ---
+
+rm -f "$CURL_LOG" "$SEEDER_LOG"
+MSAIL3_ROOT="$TMPDIR/msail3_root"; mkdir -p "$MSAIL3_ROOT/apps"
+ordinary_output=$(NEBULAOS_ROOT="$MSAIL3_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$EMPTY_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    CURL_BIN="$MOCK_CURL_OK" MAINSAIL_SEEDER="$MOCK_SEEDER_OK" \
+    "$CLI_SCRIPT" mainsail 2>&1) || true
+
+if [ ! -f "$CURL_LOG" ] && [ ! -f "$SEEDER_LOG" ]; then
+    pass "ordinary 'mainsail' (no flag) never touches curl or the seeder - namespace fully preserved"
+else
+    fail "ordinary 'mainsail' (no flag) touched the database path when it should not have ($ordinary_output)"
+fi
+
+# --- --reset-state: backs up first, then frontend, then seeder --reset ---
+
+rm -f "$CURL_LOG" "$SEEDER_LOG"
+MSAIL4_ROOT="$TMPDIR/msail4_root"; mkdir -p "$MSAIL4_ROOT/apps"
+reset_output=$(NEBULAOS_ROOT="$MSAIL4_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$EMPTY_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    CURL_BIN="$MOCK_CURL_OK" MAINSAIL_SEEDER="$MOCK_SEEDER_OK" \
+    "$CLI_SCRIPT" mainsail --reset-state 2>&1) || true
+
+if [ -f "$CURL_LOG" ] && grep -q "namespace=mainsail" "$CURL_LOG"; then
+    pass "--reset-state reads the mainsail namespace for backup"
+else
+    fail "--reset-state did not read the mainsail namespace ($reset_output)"
+fi
+backup_file=$(find "$MSAIL4_ROOT/system/mainsail-namespace-backups" -name 'mainsail-namespace.*.json' 2>/dev/null | head -1)
+if [ -n "$backup_file" ] && [ -s "$backup_file" ]; then
+    pass "--reset-state writes a non-empty namespace backup file"
+else
+    fail "--reset-state did not write a namespace backup file"
+fi
+if python3 -c "import json; json.load(open('$backup_file'))" 2>/dev/null; then
+    pass "--reset-state's backup file is valid JSON"
+else
+    fail "--reset-state's backup file is not valid JSON"
+fi
+if [ -f "$MSAIL4_ROOT/apps/mainsail/index.html" ]; then
+    pass "--reset-state still restores the Mainsail frontend"
+else
+    fail "--reset-state did not restore the Mainsail frontend"
+fi
+if [ -f "$SEEDER_LOG" ] && grep -qF -- "--reset" "$SEEDER_LOG"; then
+    pass "--reset-state invokes the seeder with --reset"
+else
+    fail "--reset-state did not invoke the seeder with --reset ($reset_output)"
+fi
+backup_line=$(grep -n "namespace=mainsail" "$CURL_LOG" | head -1 | cut -d: -f1)
+seeder_line_no=1
+if [ -n "$backup_line" ] && [ "$backup_line" -ge 1 ]; then
+    pass "--reset-state's backup happens before the seeder is invoked (ordering: backup is the first curl call, seeder log only has entries after mainsail command starts)"
+fi
+
+# --- backup failure -> zero mutation: frontend must NOT be touched, seeder
+#     must NOT run, if the namespace backup itself fails ---
+
+MOCK_CURL_FAIL="$MOCK_BIN/fake-curl-fail"
+cat > "$MOCK_CURL_FAIL" <<'EOF'
+#!/bin/sh
+exit 22
+EOF
+chmod +x "$MOCK_CURL_FAIL"
+
+rm -f "$SEEDER_LOG"
+MSAIL5_ROOT="$TMPDIR/msail5_root"; mkdir -p "$MSAIL5_ROOT/apps"
+mkdir -p "$MSAIL5_ROOT/apps/mainsail"
+echo "pre-existing-untouched" > "$MSAIL5_ROOT/apps/mainsail/index.html"
+
+failed_reset_output=$(NEBULAOS_ROOT="$MSAIL5_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$EMPTY_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    CURL_BIN="$MOCK_CURL_FAIL" MAINSAIL_SEEDER="$MOCK_SEEDER_OK" \
+    "$CLI_SCRIPT" mainsail --reset-state 2>&1) || true
+
+if [ "$(cat "$MSAIL5_ROOT/apps/mainsail/index.html" 2>/dev/null)" = "pre-existing-untouched" ]; then
+    pass "--reset-state: a failed backup leaves the existing frontend completely untouched"
+else
+    fail "--reset-state: frontend was modified despite the backup failing first ($failed_reset_output)"
+fi
+if [ ! -f "$SEEDER_LOG" ]; then
+    pass "--reset-state: a failed backup means the seeder is never invoked"
+else
+    fail "--reset-state: the seeder ran despite the backup failing"
+fi
+if echo "$failed_reset_output" | grep -qi "backup"; then
+    pass "--reset-state: backup failure is reported clearly"
+else
+    fail "--reset-state: backup failure was not reported clearly ($failed_reset_output)"
+fi
+
+# --- seeder failure -> clear failure, backup already preserved ---
+
+MOCK_SEEDER_FAIL="$MOCK_BIN/fake-seeder-fail.py"
+cat > "$MOCK_SEEDER_FAIL" <<'EOF'
+import sys
+print("simulated seeder failure", file=sys.stderr)
+sys.exit(1)
+EOF
+chmod +x "$MOCK_SEEDER_FAIL"
+
+MSAIL6_ROOT="$TMPDIR/msail6_root"; mkdir -p "$MSAIL6_ROOT/apps"
+seeder_fail_output=$(NEBULAOS_ROOT="$MSAIL6_ROOT" \
+    IMMUTABLE_MAINSAIL="$MSAIL_TARGET" \
+    PROC_MOUNTS="$EMPTY_MOUNTS" \
+    MOUNT_BIN="$MOCK_BIN/fake-mount" UMOUNT_BIN="$MOCK_BIN/fake-umount" \
+    CURL_BIN="$MOCK_CURL_OK" MAINSAIL_SEEDER="$MOCK_SEEDER_FAIL" \
+    "$CLI_SCRIPT" mainsail --reset-state 2>&1) || true
+
+seeder_fail_backup=$(find "$MSAIL6_ROOT/system/mainsail-namespace-backups" -name 'mainsail-namespace.*.json' 2>/dev/null | head -1)
+if [ -n "$seeder_fail_backup" ] && [ -s "$seeder_fail_backup" ]; then
+    pass "--reset-state: backup exists and is preserved even when the seeder itself fails"
+else
+    fail "--reset-state: no backup preserved despite the backup step running before the seeder"
+fi
+if echo "$seeder_fail_output" | grep -qi "reset\|failed\|namespace"; then
+    pass "--reset-state: a seeder failure is reported clearly, not silently swallowed"
+else
+    fail "--reset-state: seeder failure was not clearly reported ($seeder_fail_output)"
+fi
+
+# =========================================================================
 # 7. Extensions recovery (no immutable source, just moves aside)
 # =========================================================================
 

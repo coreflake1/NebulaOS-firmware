@@ -46,6 +46,11 @@ SEEDS="${SEEDS:-/opt/nebulaos-seeds}"
 MOUNT_BIN="${MOUNT_BIN:-mount}"
 UMOUNT_BIN="${UMOUNT_BIN:-umount}"
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/mounts}"
+MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
+CURL_BIN="${CURL_BIN:-curl}"
+PYTHON3="${PYTHON3:-/usr/bin/python3}"
+MAINSAIL_SEEDER="${MAINSAIL_SEEDER:-/usr/libexec/nebulaos-seed-mainsail-macros}"
+MAINSAIL_NAMESPACE_BACKUP_DIR="${MAINSAIL_NAMESPACE_BACKUP_DIR:-$NEBULAOS_ROOT/system/mainsail-namespace-backups}"
 
 # Immutable source paths (on the read-only squashfs). Used ONLY by
 # cmd_status's bind-mount display and by cmd_mainsail (see its own
@@ -241,14 +246,71 @@ cmd_moonraker() {
 # path, then re-binds the fresh persistent copy so Mainsail keeps
 # serving for the remainder of this boot (a reboot re-does this anyway
 # via S05, matching every other component here).
+# Phase 2 final live convergence mission (2026-09-09) - frozen product
+# semantics, see docs/NEBULAOS_MAINSAIL_RESET.md (or this function's own
+# comment if that doc does not exist yet):
+#
+#   nebulaos-recover mainsail                repair/restore the immutable
+#                                             Mainsail FRONTEND FILES only.
+#                                             PRESERVES the user's
+#                                             Moonraker `mainsail` DB
+#                                             namespace (macro groups,
+#                                             mode, dashboard layout,
+#                                             everything) - never touches
+#                                             it, exactly like every other
+#                                             `nebulaos-recover` component
+#                                             recovery never touches
+#                                             runtime data belonging to
+#                                             the component it restores.
+#
+#   nebulaos-recover mainsail --reset-state  the above, PLUS an explicit,
+#                                             intentionally destructive
+#                                             reset of Mainsail's
+#                                             NebulaOS-owned database
+#                                             state (the five macro groups
+#                                             and macros.mode) back to the
+#                                             shipped qualified defaults.
+#                                             Only ever runs because the
+#                                             user explicitly asked for
+#                                             it via this flag - never a
+#                                             side effect of plain
+#                                             recovery, never automatic.
+#
+# This distinction exists because "restore Mainsail's code from the
+# immutable image" and "reset Mainsail's user data to factory defaults"
+# are two different operations that happen to share a frontend-restore
+# step - conflating them would mean a user recovering a corrupted
+# Mainsail install after, say, a failed self-update also loses every
+# macro-panel customization they ever made, which nothing about "my
+# frontend files got corrupted" implies they wanted.
 cmd_mainsail() {
+    _reset_state=0
+    case "${1:-}" in
+        --reset-state) _reset_state=1 ;;
+        "") ;;
+        *) die "unknown option '$1' for mainsail. Usage: nebulaos-recover mainsail [--reset-state]" ;;
+    esac
+
     _target="$IMMUTABLE_MAINSAIL"
     _persistent_dst="$APPS_DIR/mainsail"
     _backup_dst="${_persistent_dst}.pre-recovery.$(date +%Y%m%d-%H%M%S)"
     _was_bind_mounted=0
 
-    echo "Recovering mainsail from the immutable squashfs at $_target"
+    if [ "$_reset_state" = "1" ]; then
+        echo "Recovering mainsail (frontend + explicit --reset-state) from the immutable squashfs at $_target"
+    else
+        echo "Recovering mainsail from the immutable squashfs at $_target"
+    fi
     echo ""
+
+    # --reset-state's namespace backup happens BEFORE anything else is
+    # touched, frontend restore included - "if backup fails: do not
+    # mutate" applies to the whole operation, not just the DB half of it.
+    if [ "$_reset_state" = "1" ]; then
+        _namespace_backup_path=$(mainsail_backup_namespace) || die "mainsail --reset-state: namespace backup failed - refusing to proceed, nothing has been touched"
+        echo "Mainsail namespace backed up to $_namespace_backup_path before any change"
+        echo ""
+    fi
 
     if awk -v t="$_target" '$2==t {found=1} END{exit !found}' "$PROC_MOUNTS" 2>/dev/null; then
         echo "Unmounting the persistent bind mount at $_target to reveal the immutable copy underneath..."
@@ -273,9 +335,70 @@ cmd_mainsail() {
             || warn "could not re-bind $_target - a reboot will fix this (S05nebulaos-activate re-binds on every boot)"
     fi
 
+    if [ "$_reset_state" = "1" ]; then
+        echo ""
+        echo "Resetting Mainsail's NebulaOS-owned database state (macro groups + mode) to shipped defaults..."
+        if [ ! -f "$MAINSAIL_SEEDER" ]; then
+            die "mainsail --reset-state: seeder not found at $MAINSAIL_SEEDER - frontend was restored, but the namespace was NOT reset. Backup remains at $_namespace_backup_path"
+        fi
+        if ! NEBULAOS_MOONRAKER_BASE="$MOONRAKER_URL" "$PYTHON3" "$MAINSAIL_SEEDER" --reset; then
+            die "mainsail --reset-state: namespace reset reported failure - see output above for exactly which group(s) or the mode key failed. Frontend was restored; namespace may be PARTIALLY reset. Backup remains at $_namespace_backup_path - do not assume success"
+        fi
+        echo "Namespace reset reported success for all five groups and macros.mode."
+        echo "Backup of the pre-reset namespace remains at $_namespace_backup_path"
+    fi
+
     echo ""
     echo "Recovery complete for mainsail."
     echo "A reboot is required for S05nebulaos-activate to re-bind."
+}
+
+# Backs up ONLY the `mainsail` Moonraker database namespace (never the
+# whole database) to a timestamped JSON file under
+# $MAINSAIL_NAMESPACE_BACKUP_DIR, verifies the write by reading it back
+# and confirming it round-trips as valid, non-empty JSON, and prints the
+# backup's path on success. Any failure - Moonraker unreachable, empty/
+# malformed response, write failure, readback mismatch - is a hard
+# failure (non-zero exit, nothing printed to stdout) so a caller using
+# `path=$(mainsail_backup_namespace) || die ...` never mistakes a failed
+# backup for a real one.
+mainsail_backup_namespace() {
+    if ! "$CURL_BIN" -sf "${MOONRAKER_URL}/server/database/list" >/dev/null 2>&1; then
+        echo "mainsail_backup_namespace: Moonraker unreachable at $MOONRAKER_URL" >&2
+        return 1
+    fi
+
+    _body=$("$CURL_BIN" -sf "${MOONRAKER_URL}/server/database/item?namespace=mainsail" 2>/dev/null)
+    if [ -z "$_body" ]; then
+        echo "mainsail_backup_namespace: empty response reading the mainsail namespace" >&2
+        return 1
+    fi
+    if ! echo "$_body" | "$PYTHON3" -c 'import json,sys; d=json.load(sys.stdin); assert "result" in d and "value" in d["result"]' 2>/dev/null; then
+        echo "mainsail_backup_namespace: response did not parse as a valid namespace item" >&2
+        return 1
+    fi
+
+    mkdir -p "$MAINSAIL_NAMESPACE_BACKUP_DIR"
+    _ts=$(date -u +%Y%m%dT%H%M%SZ)
+    _out="$MAINSAIL_NAMESPACE_BACKUP_DIR/mainsail-namespace.$_ts.json"
+    _tmp="$_out.partial"
+    echo "$_body" > "$_tmp"
+    sync
+
+    if [ ! -s "$_tmp" ]; then
+        echo "mainsail_backup_namespace: backup file empty after write" >&2
+        rm -f "$_tmp"
+        return 1
+    fi
+    if ! "$PYTHON3" -c "import json; json.load(open('$_tmp'))" 2>/dev/null; then
+        echo "mainsail_backup_namespace: backup file failed readback verification (not valid JSON)" >&2
+        rm -f "$_tmp"
+        return 1
+    fi
+
+    mv "$_tmp" "$_out"
+    echo "$_out"
+    return 0
 }
 
 cmd_klipper_extensions() {
@@ -317,14 +440,20 @@ cmd_klipper_extensions() {
 # ---------- main ----------
 
 usage() {
-    echo "Usage: nebulaos-recover <command>"
+    echo "Usage: nebulaos-recover <command> [options]"
     echo ""
     echo "Commands:"
-    echo "  status              Show activation state of all components"
-    echo "  klipper             Restore Klipper from immutable copy"
-    echo "  moonraker           Restore Moonraker from immutable copy"
-    echo "  mainsail            Restore Mainsail from immutable copy"
-    echo "  klipper-extensions  Restore extensions (remove persistent copy)"
+    echo "  status                    Show activation state of all components"
+    echo "  klipper                   Restore Klipper from immutable copy"
+    echo "  moonraker                 Restore Moonraker from immutable copy"
+    echo "  mainsail                  Restore Mainsail frontend from immutable copy"
+    echo "                            (preserves the user's macro/mode DB state)"
+    echo "  mainsail --reset-state    The above, PLUS reset Mainsail's macro groups"
+    echo "                            and mode to the shipped defaults (destructive"
+    echo "                            to that state only - backed up automatically"
+    echo "                            first; other Mainsail/Moonraker settings and"
+    echo "                            any of the user's own custom groups untouched)"
+    echo "  klipper-extensions        Restore extensions (remove persistent copy)"
     exit 1
 }
 
@@ -339,7 +468,7 @@ case "$command" in
     status)             cmd_status ;;
     klipper)            cmd_klipper ;;
     moonraker)          cmd_moonraker ;;
-    mainsail)           cmd_mainsail ;;
+    mainsail)           cmd_mainsail "$@" ;;
     klipper-extensions) cmd_klipper_extensions ;;
     -h|--help|help)     usage ;;
     *) die "unknown command '$command'. Run 'nebulaos-recover help' for usage." ;;

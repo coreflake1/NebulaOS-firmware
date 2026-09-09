@@ -585,6 +585,110 @@ def seed_default_mode(get_status, post, log,
     return "seeded"
 
 
+def reset_to_defaults(get_status, post, delete, log,
+                       groups: dict | None = None,
+                       obsolete_ids: set | None = None,
+                       mode_key: str = MODE_KEY,
+                       default_mode: str = DEFAULT_MODE) -> dict:
+    """Phase 2 final live convergence mission (2026-09-09): the explicit,
+    user-invoked counterpart to run() above. run() is boot-time seeding -
+    it NEVER overwrites an existing group, by design, so a user's own
+    customization always survives. This function is the opposite: it
+    unconditionally deletes and recreates every canonical NebulaOS group
+    plus `mode_key`, discarding whatever currently exists there. It must
+    only ever be called in response to an explicit user request
+    (`nebulaos-recover mainsail --reset-state`) - never from boot-time
+    seeding, never as a side effect of anything else.
+
+    Scope is deliberately narrow: only the known group keys
+    (`macros.macrogroups.<id>` for each id in `groups`) and `mode_key`
+    are touched. Every other key in the `mainsail` namespace - dashboard
+    panel layout, gcodeViewer/gcodehistory settings, initVersion, or a
+    user's own custom group under an id NebulaOS doesn't own - is never
+    read, written, or deleted by this function. A user's own additional
+    group (an id not in `groups`) is left completely alone; only the
+    five canonical NebulaOS ids are ever touched here.
+
+    `obsolete_ids` are known NebulaOS-owned group ids that existed in an
+    earlier schema generation but are not part of the current `groups` -
+    the standalone "nebulaos-input-shaper" RC3 group is the only one that
+    has ever existed. A reset deletes these too (if present) so the
+    result is genuinely exactly five groups even starting from a stale
+    six-group RC3 install, not "five plus whatever obsolete groups
+    happened to survive." Unlike the canonical groups, obsolete ids are
+    only ever deleted, never recreated. Defaults to the one real
+    historical case; explicit override exists for testing.
+
+    Returns {"groups": {group_id: "reset"|"failed"}, "mode": "reset"|"failed"}.
+    Never raises - every failure is caught, logged, and reflected in the
+    returned dict so a caller can report exactly what did and did not
+    succeed rather than inferring it from an exit code alone.
+    """
+    groups = groups if groups is not None else DEFAULT_GROUPS
+    obsolete_ids = obsolete_ids if obsolete_ids is not None else {"nebulaos-input-shaper"}
+    group_results = {}
+
+    for obsolete_id in obsolete_ids:
+        if obsolete_id in groups:
+            continue  # never obsolete if it's also a current canonical id
+        try:
+            delete_item(delete, f"macros.macrogroups.{obsolete_id}")
+            log(f"reset: removed obsolete group {obsolete_id!r} (not part of the current five-group schema)")
+        except TransportError as exc:
+            log(f"reset: could not remove obsolete group {obsolete_id!r} ({exc}) - it may still be present")
+            group_results[obsolete_id] = "failed"
+
+    for group_id, definition in groups.items():
+        try:
+            delete_item(delete, f"macros.macrogroups.{group_id}")
+        except TransportError as exc:
+            log(f"reset: could not delete existing group {group_id!r} ({exc}) - leaving it untouched, not reset")
+            group_results[group_id] = "failed"
+            continue
+
+        try:
+            post("/server/database/item", {
+                "namespace": "mainsail",
+                "key": f"macros.macrogroups.{group_id}",
+                "value": definition,
+            })
+        except Exception as exc:  # noqa: BLE001
+            log(f"reset: creating canonical group {group_id!r} failed ({exc}) - group is now DELETED, not recreated (retry the reset)")
+            group_results[group_id] = "failed"
+            continue
+
+        try:
+            verify = get_group(get_status, group_id)
+        except TransportError as exc:
+            log(f"reset: could not verify group {group_id!r} after reset ({exc})")
+            group_results[group_id] = "failed"
+            continue
+
+        if verify != definition:
+            log(f"reset: group {group_id!r} verification mismatch after reset (creation reported success but stored content differs)")
+            group_results[group_id] = "failed"
+            continue
+
+        log(f"reset: group {group_id!r} reset to canonical default ({definition['name']!r}, {len(definition['macros'])} macros) and verified")
+        group_results[group_id] = "reset"
+
+    try:
+        delete_item(delete, mode_key)
+    except TransportError as exc:
+        log(f"reset: could not delete existing {mode_key!r} ({exc}) - mode not reset")
+        mode_result = "failed"
+    else:
+        # Reuse seed_default_mode() rather than a parallel post+verify -
+        # having just deleted the key, its own "only set if absent" check
+        # is now exactly the "set to the canonical default" behavior this
+        # reset needs, so there's only one code path that ever writes
+        # macros.mode across the whole seeder.
+        mode_seed_result = seed_default_mode(get_status, post, log, mode_key, default_mode)
+        mode_result = "reset" if mode_seed_result == "seeded" else "failed"
+
+    return {"groups": group_results, "mode": mode_result}
+
+
 def read_marker(path: str):
     if not os.path.exists(path):
         return None
@@ -718,5 +822,34 @@ def run(
     return 1 if (failed or migration_failed or rc3_failed or mode_result == "failed") else 0
 
 
+def run_reset(
+    get_status=real_http_get_status,
+    post=real_http_post_json,
+    delete=real_http_delete_status,
+    log=print,
+    groups: dict | None = None,
+    mode_key: str = MODE_KEY,
+    default_mode: str = DEFAULT_MODE,
+    retry_attempts: int = RETRY_ATTEMPTS,
+    retry_delay: float = RETRY_DELAY_S,
+    sleep=time.sleep,
+) -> int:
+    """CLI entry point for `nebulaos-seed-mainsail-macros --reset`, called
+    by `nebulaos-recover mainsail --reset-state` (scripts/build/overlay/
+    usr/bin/nebulaos-recover) after it has already backed up the mainsail
+    namespace and restored the Mainsail frontend from the immutable
+    baseline. Returns 0 only if every group and the mode key were reset
+    and verified; 1 on any failure, with per-item detail already logged
+    by reset_to_defaults() itself."""
+    if not wait_for_moonraker(get_status, log, retry_attempts, retry_delay, sleep):
+        return 1
+    result = reset_to_defaults(get_status, post, delete, log, groups, mode_key, default_mode)
+    log(f"reset complete: groups={result['groups']} mode={result['mode']}")
+    failed_groups = [g for g, r in result["groups"].items() if r == "failed"]
+    return 1 if (failed_groups or result["mode"] == "failed") else 0
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--reset":
+        sys.exit(run_reset())
     sys.exit(run())

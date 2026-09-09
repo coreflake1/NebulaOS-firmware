@@ -617,15 +617,44 @@ _PCFG_GEN3_KNOWN_MIDDLE_INCLUDES='[include GuppyScreen/guppy_cmd.cfg]
 [include simpleaf/client.cfg]
 [include simpleaf/start_end.cfg]
 [include simpleaf/Line_Purge.cfg]
-[include simpleaf/Smart_Park.cfg]'
+[include simpleaf/Smart_Park.cfg]
+[axis_twist_compensation]
+calibrate_end_y: 190'
+# The last two lines above are the exact historical live-qualification
+# safety override (Phase 2 final live convergence mission, 2026-09-09):
+# a real device found live had
+#   [axis_twist_compensation]
+#   calibrate_end_y: 190
+# sitting in this same middle region, overriding machine.cfg's own
+# axis_twist_compensation default at the time - see machine.cfg's own
+# comment on calibrate_end_y for the full physical-safety derivation
+# (probe-frame Y must stay under stepper_y's position_max once
+# [bltouch]'s y_offset is added; 190 gives a deliberate 6mm margin, the
+# pre-correction default of 200 exceeded real Y travel by 4mm). Recognizing
+# these two exact lines here is only correct because machine.cfg's own
+# canonical default is now ALSO 190 (corrected in this same mission) - the
+# override has become genuinely redundant, not just tolerated. Comment
+# lines around it need no special handling: the generic
+# `$0 ~ /^[ \t]*(#.*)?$/` rule below already accepts any comment text in
+# this region unconditionally, so this recognizes the override by its
+# two structural lines regardless of exactly how a given device's own
+# copy of the explanatory comment reads.
+#
+# Deliberately narrow, per-line: a device with calibrate_end_y set to
+# anything else, or with additional axis_twist_compensation options
+# beyond this one, has at least one line that does NOT match this list -
+# that still correctly fails _pcfg_gen3_middle_region_is_narrow below and
+# falls through to refusal, exactly like any other real customization.
+# Only a bare [axis_twist_compensation] section containing EXACTLY this
+# one recognized option is treated as redundant-with-canonical.
 
 # 0 if the region of $1 strictly between calibration.cfg's include line and
 # the anchor line contains only blank lines, comments, and the exact known
-# include lines listed above (in any order/count - a technician may have
-# commented one out, which still counts as "recognized", just inert); 1 if
-# anything else is present (a real option, a section header, an include
-# this generation never shipped). Klipper's own include resolution doesn't
-# care about surrounding blank lines/comments, so those are always safe to
+# lines listed above (in any order/count - a technician may have commented
+# one out, which still counts as "recognized", just inert); 1 if anything
+# else is present (a real option, a section header, an include this
+# generation never shipped). Klipper's own include resolution doesn't care
+# about surrounding blank lines/comments, so those are always safe to
 # discard either way - this only guards against discarding a real
 # configuration change.
 _pcfg_gen3_middle_region_is_narrow() {
