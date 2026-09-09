@@ -843,7 +843,20 @@ def run_reset(
     by reset_to_defaults() itself."""
     if not wait_for_moonraker(get_status, log, retry_attempts, retry_delay, sleep):
         return 1
-    result = reset_to_defaults(get_status, post, delete, log, groups, mode_key, default_mode)
+    # Keyword args only past the first 4: reset_to_defaults()'s positional
+    # order is (groups, obsolete_ids, mode_key, default_mode) - a prior
+    # positional call here (groups, mode_key, default_mode) silently
+    # shifted mode_key into the obsolete_ids slot and default_mode into
+    # the mode_key slot. Never caught by unit tests, since every existing
+    # test called reset_to_defaults() directly with keyword args, never
+    # through run_reset() itself. Reproduced live (Phase 2 final live
+    # convergence mission, 2026-09-09): a real --reset-state run tried to
+    # delete obsolete groups named 'm', 'a', 'c', ... - iterating the
+    # characters of the string "macros.mode" passed in place of the
+    # obsolete_ids set.
+    result = reset_to_defaults(get_status, post, delete, log,
+                                groups=groups, mode_key=mode_key,
+                                default_mode=default_mode)
     log(f"reset complete: groups={result['groups']} mode={result['mode']}")
     failed_groups = [g for g, r in result["groups"].items() if r == "failed"]
     return 1 if (failed_groups or result["mode"] == "failed") else 0

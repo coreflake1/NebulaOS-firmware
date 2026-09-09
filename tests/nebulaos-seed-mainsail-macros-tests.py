@@ -1029,6 +1029,62 @@ def test_reset_never_touches_a_users_own_extra_group():
           moon.store.get(group_key("my-own-shortcuts")) == {"name": "My Shortcuts", "macros": []})
 
 
+def test_run_reset_cli_entry_point_matches_reset_to_defaults():
+    """Phase 2 final live convergence mission (2026-09-09): every test
+    above calls this file's own local run_reset() helper, which invokes
+    seed.reset_to_defaults() directly with keyword arguments - it never
+    exercises the real seed.run_reset() CLI entry point (the one
+    `nebulaos-seed-mainsail-macros --reset` / `__main__` actually calls).
+    A real device found live: seed.run_reset() called
+    reset_to_defaults(get_status, post, delete, log, groups, mode_key,
+    default_mode) POSITIONALLY, but reset_to_defaults()'s real parameter
+    order is (..., groups, obsolete_ids, mode_key, default_mode) - this
+    silently passed mode_key ("macros.mode") into the obsolete_ids slot
+    (iterated character-by-character: 'm','a','c','r','o','s','.', ...,
+    each treated as a real obsolete group id to delete) and default_mode
+    ("expert") into the mode_key slot (silently writing/checking a
+    bogus top-level "expert" key instead of the real "macros.mode" key -
+    the real mode key was never touched at all). The five canonical
+    groups themselves still got reset correctly (groups was the 5th
+    positional arg in both signatures, so it landed right by accident) -
+    only obsolete-id cleanup and the mode key were affected, which is
+    exactly why the local reset_to_defaults()-only tests above never
+    caught it: none of them call through run_reset() itself."""
+    moon = FakeMoonrakerDb(existing={
+        group_key("nebulaos-calibration"): {"name": "old", "macros": []},
+        group_key("nebulaos-extruder"): {"name": "old", "macros": []},
+        group_key("nebulaos-recovery"): {"name": "old", "macros": []},
+        group_key("nebulaos-maintenance"): {"name": "old", "macros": []},
+        group_key("nebulaos-camera"): {"name": "old", "macros": []},
+        group_key("nebulaos-input-shaper"): {"name": "Input Shaper", "macros": []},
+        "macros.mode": "simple",
+    })
+    logs = []
+    rc = seed.run_reset(
+        get_status=moon.get_status,
+        post=moon.post,
+        delete=moon.delete,
+        log=logs.append,
+        retry_attempts=1,
+        retry_delay=0,
+        sleep=lambda _s: None,
+    )
+    check("run_reset(): returns 0 on success", rc == 0, f"logs={logs}")
+    check("run_reset(): the real obsolete Input Shaper group is deleted",
+          group_key("nebulaos-input-shaper") not in moon.store, sorted(moon.store))
+    check("run_reset(): exactly the five canonical group keys remain",
+          sorted(k for k in moon.store if k.startswith("macros.macrogroups.")) ==
+          sorted(group_key(g) for g in seed.DEFAULT_GROUPS),
+          sorted(moon.store))
+    check("run_reset(): the real macros.mode key is reset to 'expert'",
+          moon.store.get("macros.mode") == "expert", moon.store.get("macros.mode"))
+    check("run_reset(): no stray single-character keys were created (the exact live bug)",
+          not any(len(k) == 1 for k in moon.store),
+          sorted(moon.store))
+    check("run_reset(): no stray 'expert' key was created outside macros.mode",
+          "expert" not in moon.store, sorted(moon.store))
+
+
 def test_reset_then_normal_seed_run_does_not_reset_again():
     """After a reset, run() (normal boot-time seeding) must treat the
     freshly-reset canonical groups as already-present and leave them
@@ -1107,6 +1163,7 @@ def main():
     test_reset_transport_failure_on_one_group_is_reported_failed()
     test_reset_never_touches_unrelated_namespace_keys()
     test_reset_never_touches_a_users_own_extra_group()
+    test_run_reset_cli_entry_point_matches_reset_to_defaults()
     test_reset_then_normal_seed_run_does_not_reset_again()
 
     print()
