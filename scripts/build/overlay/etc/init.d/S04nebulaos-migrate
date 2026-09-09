@@ -617,36 +617,70 @@ _PCFG_GEN3_KNOWN_MIDDLE_INCLUDES='[include GuppyScreen/guppy_cmd.cfg]
 [include simpleaf/client.cfg]
 [include simpleaf/start_end.cfg]
 [include simpleaf/Line_Purge.cfg]
-[include simpleaf/Smart_Park.cfg]
-[axis_twist_compensation]
-calibrate_end_y: 190'
-# The last two lines above are the exact historical live-qualification
-# safety override (Phase 2 final live convergence mission, 2026-09-09):
-# a real device found live had
+[include simpleaf/Smart_Park.cfg]'
+
+# Real path to the DEPLOYED, immutable klipper config directory on THIS
+# device - overridable for tests, same convention as every other path in
+# this script.
+NEBULAOS_KLIPPER_CFG_DIR="${NEBULAOS_KLIPPER_CFG_DIR:-/etc/nebulaos/klipper}"
+
+# The exact historical live-qualification safety override (Phase 2 final
+# live convergence mission, 2026-09-09): a real device found live had
 #   [axis_twist_compensation]
 #   calibrate_end_y: 190
-# sitting in this same middle region, overriding machine.cfg's own
+# sitting in the gen3 middle region, overriding machine.cfg's own
 # axis_twist_compensation default at the time - see machine.cfg's own
 # comment on calibrate_end_y for the full physical-safety derivation
 # (probe-frame Y must stay under stepper_y's position_max once
 # [bltouch]'s y_offset is added; 190 gives a deliberate 6mm margin, the
-# pre-correction default of 200 exceeded real Y travel by 4mm). Recognizing
-# these two exact lines here is only correct because machine.cfg's own
-# canonical default is now ALSO 190 (corrected in this same mission) - the
-# override has become genuinely redundant, not just tolerated. Comment
-# lines around it need no special handling: the generic
-# `$0 ~ /^[ \t]*(#.*)?$/` rule below already accepts any comment text in
-# this region unconditionally, so this recognizes the override by its
-# two structural lines regardless of exactly how a given device's own
-# copy of the explanatory comment reads.
+# pre-correction default of 200 exceeded real Y travel by 4mm).
 #
-# Deliberately narrow, per-line: a device with calibrate_end_y set to
-# anything else, or with additional axis_twist_compensation options
-# beyond this one, has at least one line that does NOT match this list -
-# that still correctly fails _pcfg_gen3_middle_region_is_narrow below and
-# falls through to refusal, exactly like any other real customization.
-# Only a bare [axis_twist_compensation] section containing EXACTLY this
-# one recognized option is treated as redundant-with-canonical.
+# Recognizing these two lines as redundant (safe to discard) is only
+# correct if THIS DEVICE's own deployed machine.cfg - not merely the
+# fixed source tree the migration script itself was staged from - has
+# already been rebuilt with the corrected 190 default. A real device
+# found live (this same mission, same day): the migration script can be
+# fixed and staged onto a device ahead of an actual image rebuild (e.g.
+# to prove/apply a fix without a full flash), which discarded this
+# override while the device's OWN machine.cfg still shipped the unsafe
+# 200 - the printer was left with NO override and an unsafe EFFECTIVE
+# calibrate_end_y of 200 until caught and manually restored. Fixed by
+# reading the actual deployed machine.cfg's own calibrate_end_y at
+# migration time (_pcfg_deployed_calibrate_end_y_is_190 below) and only
+# ever treating the override as redundant when that real, current value
+# already matches - never assumed from source alone. When it does not yet
+# match, the region is correctly NOT narrow, and migration safely REFUSES
+# (backs up, logs, leaves the file untouched) rather than silently
+# dropping a still-load-bearing safety override - the same "refuse rather
+# than guess" outcome as any other genuine customization in this region.
+#
+# Deliberately narrow, per-line otherwise: a device with calibrate_end_y
+# set to anything else, or with additional axis_twist_compensation options
+# beyond this one, has at least one line that does NOT match - that still
+# correctly fails _pcfg_gen3_middle_region_is_narrow below and falls
+# through to refusal, exactly like any other real customization. Only a
+# bare [axis_twist_compensation] section containing EXACTLY this one
+# recognized option, AND matching the device's own live default, is
+# treated as redundant-with-canonical.
+_PCFG_GEN3_AXIS_TWIST_OVERRIDE_LINES='[axis_twist_compensation]
+calibrate_end_y: 190'
+
+# 0 if $NEBULAOS_KLIPPER_CFG_DIR/machine.cfg's own [axis_twist_compensation]
+# calibrate_end_y is exactly 190 (i.e. this device has actually been
+# rebuilt with the corrected default, so the printer.cfg override above is
+# genuinely redundant); 1 otherwise (missing file, different value, or
+# anything else this check cannot confidently confirm - refuse rather than
+# guess, same as every other check in this file).
+_pcfg_deployed_calibrate_end_y_is_190() {
+	_mcfg="$NEBULAOS_KLIPPER_CFG_DIR/machine.cfg"
+	[ -f "$_mcfg" ] || return 1
+	awk '
+		/^\[axis_twist_compensation\]/ { in_section = 1; next }
+		/^\[/ { in_section = 0 }
+		in_section && $0 ~ /^calibrate_end_y[ \t]*:[ \t]*190([ \t]|$)/ { found = 1 }
+		END { exit found ? 0 : 1 }
+	' "$_mcfg"
+}
 
 # 0 if the region of $1 strictly between calibration.cfg's include line and
 # the anchor line contains only blank lines, comments, and the exact known
@@ -658,7 +692,12 @@ calibrate_end_y: 190'
 # discard either way - this only guards against discarding a real
 # configuration change.
 _pcfg_gen3_middle_region_is_narrow() {
-	awk -v known="$_PCFG_GEN3_KNOWN_MIDDLE_INCLUDES" -v calib='[include /etc/nebulaos/klipper/calibration.cfg]' -v anchor="$_MIGRATE_PCFG_ANCHOR" '
+	_known="$_PCFG_GEN3_KNOWN_MIDDLE_INCLUDES"
+	if _pcfg_deployed_calibrate_end_y_is_190; then
+		_known="$_known
+$_PCFG_GEN3_AXIS_TWIST_OVERRIDE_LINES"
+	fi
+	awk -v known="$_known" -v calib='[include /etc/nebulaos/klipper/calibration.cfg]' -v anchor="$_MIGRATE_PCFG_ANCHOR" '
 		BEGIN {
 			n = split(known, arr, "\n")
 			for (i = 1; i <= n; i++) is_known[arr[i]] = 1

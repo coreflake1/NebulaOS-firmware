@@ -74,10 +74,29 @@ SEEDS_SANDBOX="$WORK/seeds"
 mkdir -p "$SEEDS_SANDBOX/printer_data-config"
 cp "$REAL_PRINTER_CFG" "$SEEDS_SANDBOX/printer_data-config/printer.cfg"
 
+# Deployed-klipper-cfg-dir sandbox (Phase 2 final live convergence mission,
+# 2026-09-09): _pcfg_deployed_calibrate_end_y_is_190() reads THIS device's
+# own machine.cfg, not source - the default sandbox here mirrors "already
+# rebuilt with the fix" (a real copy of the real, corrected machine.cfg,
+# which has calibrate_end_y: 190) since that is the expected steady state.
+# Case 6 below builds a SEPARATE sandbox with the pre-fix value 200 to
+# reproduce the exact live bug: migrating with source-staged fixes ahead of
+# an actual image rebuild must REFUSE, not silently drop a still-load-
+# bearing safety override.
+REAL_MACHINE_CFG="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/machine.cfg"
+KLIPPER_CFG_SANDBOX_REBUILT="$WORK/klipper-cfg-rebuilt"
+mkdir -p "$KLIPPER_CFG_SANDBOX_REBUILT"
+if [ -f "$REAL_MACHINE_CFG" ]; then
+	cp "$REAL_MACHINE_CFG" "$KLIPPER_CFG_SANDBOX_REBUILT/machine.cfg"
+else
+	printf '[axis_twist_compensation]\ncalibrate_end_y: 190\n' > "$KLIPPER_CFG_SANDBOX_REBUILT/machine.cfg"
+fi
+
 run_fn() {
-	pdc="$1"; sysdir="$2"; log="$3"
+	pdc="$1"; sysdir="$2"; log="$3"; kcfgdir="${4:-$KLIPPER_CFG_SANDBOX_REBUILT}"
 	mkdir -p "$sysdir/diagnostics"
 	env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 PRINTER_DATA_CONFIG="$pdc" SYSTEM="$sysdir" SEEDS="$SEEDS_SANDBOX" \
+		NEBULAOS_KLIPPER_CFG_DIR="$kcfgdir" \
 		sh -c ". '$MIGRATE_SCRIPT'; rc=0; migrate_printer_cfg || rc=\$?; echo \"RC=\$rc\"" \
 		> "$log" 2>&1
 }
@@ -257,6 +276,64 @@ else
 	fail "case 4 (recognized value plus a genuine extra option): file was modified despite real customization beyond the known override"
 fi
 [ "$(rc_of "$log4")" != "0" ] && pass "case 4: migrate_printer_cfg reports failure" || fail "case 4: migrate_printer_cfg reported success despite unrecognized extra content"
+
+# --- Case 6 (Phase 2 final live convergence mission, 2026-09-09): value 190
+#     (recognized text), but THIS DEVICE's own deployed machine.cfg has NOT
+#     actually been rebuilt with the corrected default yet (still 200) -
+#     reproduces the exact live bug: a first version of this fix assumed
+#     "the override text matches 190" meant "machine.cfg's own default is
+#     already 190 too", which is only true once a real image rebuild
+#     ships the fix. Migrating with just the source-staged script fix
+#     (ahead of any rebuild) against a real device silently dropped the
+#     override, leaving the device with NO override and an EFFECTIVE
+#     calibrate_end_y of 200 - the unsafe value the override existed to
+#     prevent. Must safely REFUSE instead, exactly like an unrecognized
+#     value, until the device's own machine.cfg genuinely says 190. -----
+
+t6="$WORK/case6"; mkdir -p "$t6"; f6="$t6/printer.cfg"
+{
+	printf '%s' "$INTERMEDIATE_GEN_HEADER"
+	echo ''
+	echo '# LIVE QUALIFICATION HOTFIX: overrides machine.cfg calibrate_end_y=200'
+	echo '[axis_twist_compensation]'
+	echo 'calibrate_end_y: 190'
+	printf '%s' "$INTERMEDIATE_GEN_MIDDLE"
+	printf '%s' "$INTERMEDIATE_GEN_TRAILER"
+} > "$f6"
+cp "$f6" "$f6.orig"
+
+KLIPPER_CFG_SANDBOX_NOT_REBUILT="$WORK/klipper-cfg-not-rebuilt"
+mkdir -p "$KLIPPER_CFG_SANDBOX_NOT_REBUILT"
+printf '[axis_twist_compensation]\ncalibrate_end_y: 200\n' > "$KLIPPER_CFG_SANDBOX_NOT_REBUILT/machine.cfg"
+
+log6="$WORK/log6"
+run_fn "$t6" "$WORK/system6" "$log6" "$KLIPPER_CFG_SANDBOX_NOT_REBUILT"
+
+if cmp -s "$f6" "$f6.orig"; then
+	pass "case 6 (override text matches 190, but deployed machine.cfg is still 200): left completely untouched - safe refusal"
+else
+	fail "case 6 (override text matches 190, but deployed machine.cfg is still 200): file was modified - a still-load-bearing safety override could have been silently dropped, reproducing the exact live bug"
+fi
+[ "$(rc_of "$log6")" != "0" ] && pass "case 6: migrate_printer_cfg reports failure" || fail "case 6: migrate_printer_cfg reported success despite the deployed machine.cfg not yet matching"
+
+# Sanity check the other direction too: the SAME override, against a
+# sandbox where machine.cfg genuinely already says 190, must still succeed
+# (this is exactly case 3, re-run through the explicit kcfgdir param
+# rather than run_fn's implicit default, to prove the parameter itself
+# works both ways).
+t6b="$WORK/case6b"; mkdir -p "$t6b"; f6b="$t6b/printer.cfg"
+{
+	printf '%s' "$INTERMEDIATE_GEN_HEADER"
+	echo ''
+	echo '[axis_twist_compensation]'
+	echo 'calibrate_end_y: 190'
+	printf '%s' "$INTERMEDIATE_GEN_MIDDLE"
+	printf '%s' "$INTERMEDIATE_GEN_TRAILER"
+} > "$f6b"
+log6b="$WORK/log6b"
+run_fn "$t6b" "$WORK/system6b" "$log6b" "$KLIPPER_CFG_SANDBOX_REBUILT"
+[ "$(rc_of "$log6b")" = "0" ] && pass "case 6b: the same override against an already-rebuilt machine.cfg (190) still succeeds" \
+	|| fail "case 6b: reported failure even though the deployed machine.cfg already matches ($(cat "$log6b"))"
 
 # --- Case 5 (Phase 2 final live convergence mission, 2026-09-09): a device
 #     whose OWN trailing content already carries a real, full SAVE_CONFIG
