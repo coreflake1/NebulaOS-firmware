@@ -35,15 +35,21 @@ A dedicated branch, `production`, that this project fast-forwards to match
 `KLIPPER_EXTENSIONS_PIN` (`manifests/dependencies.conf`) on every qualified
 release:
 
-- `main` stays untouched - reserved for an eventual public/1.0 promotion,
-  exactly as every other mission on this repo has already established.
+- `main` is the canonical qualified source (updated by the Phase 2
+  repository consolidation mission, 2026-09-09 - superseding this doc's
+  original "main stays untouched" model, which predates that
+  consolidation). Feature branches merge into `main`; `main` itself is
+  never developed on directly.
 - `production` always has the currently-pinned, currently-deployed commit
   as its tip, so Moonraker's update_manager always has a real remote branch
-  to compare the local checkout against, and reports `is_valid: true`.
-- `phase2/calibration-framework` (and future phase branches) remain the
-  actual working branches where development happens; `production` is
-  fast-forwarded from whichever phase branch is currently qualified,
-  never developed on directly.
+  to compare the local checkout against, and reports `is_valid: true`. In
+  steady state `production` is exactly `main` - see "Maintaining this going
+  forward" below.
+- `phase2/calibration-framework` and the other in-development phase
+  branches that predate the repository consolidation have been merged into
+  `main` and deleted - they no longer exist as separate branches. Any
+  future development branch follows the same path: branch from `main`,
+  merge back into `main` once qualified, then fast-forward `production`.
 
 ## What changed
 
@@ -74,12 +80,14 @@ release:
 
 ## Maintaining this going forward
 
-Whenever `KLIPPER_EXTENSIONS_PIN` advances to a new qualified commit:
+Whenever `KLIPPER_EXTENSIONS_PIN` advances to a new qualified commit that has
+already been merged into `main`:
 
 ```
 git -C NebulaOS-klipper-extensions push origin <new-pin-sha>:production
 ```
 
-(a plain fast-forward push of the pin commit onto `production`). Never
-force-push `production` unless deliberately rolling back a pin - a normal
-pin advance is always a fast-forward from the previous pin's own history.
+(a plain fast-forward push of the pin commit onto `production` - in steady
+state this is the same commit `main` already points at). Never force-push
+`production` unless deliberately rolling back a pin - a normal pin advance
+is always a fast-forward from the previous pin's own history.
