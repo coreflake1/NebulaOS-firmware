@@ -780,7 +780,25 @@ klipper_is_shallow=$(git -C "$VENDOR/klipper" rev-parse --is-shallow-repository)
 # repository is about thirty small Python files, so neither the extraction
 # time nor the footprint that motivated Klipper's "/lib/" exclusion applies.
 extensions_origin="https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
-extensions_seed_commit=$(make_seed_archive "$VENDOR/nebulaos-klipper-extensions" main \
+# Phase 2 final software closure mission, 2026-09-09: was a hardcoded
+# "main" literal here - completely separate from, and overriding, the
+# clone_pinned() fix in 00-fetch-vendor-sources.sh that correctly attaches
+# vendor/nebulaos-klipper-extensions to $KLIPPER_EXTENSIONS_BRANCH
+# ("production") during the clone. make_seed_archive()'s own
+# `git checkout -B "$active_branch"` (see that function's own comment)
+# unconditionally force-renames the LOCAL branch in the archived copy to
+# whatever this argument says, regardless of what branch the source
+# checkout was already on - so this literal silently undid that fix,
+# shipping a seed archive on branch "main" again. Confirmed live: a real
+# build with the clone_pinned() fix in place still failed 06-verify's
+# check_seed_archive() ("archive is on branch \"main\", expected
+# production"). Unlike klipper/moonraker just below (which correctly stay
+# hardcoded to "master" - a Moonraker-RESERVED slot per BASE_CONFIG in
+# update_manager/common.py, not configurable at all), extensions is "an
+# ordinary, non-reserved git_repo section" (klipper-pin.conf's own words) -
+# its branch is exactly $KLIPPER_EXTENSIONS_BRANCH, never a second,
+# independently-hardcoded literal.
+extensions_seed_commit=$(make_seed_archive "$VENDOR/nebulaos-klipper-extensions" "$KLIPPER_EXTENSIONS_BRANCH" \
 	"$extensions_origin" "$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" "" \
 	"$HOST_PYTHON3" "/usr/data/nebulaos/apps/nebulaos-klipper-extensions")
 extensions_is_shallow=$(git -C "$VENDOR/nebulaos-klipper-extensions" rev-parse --is-shallow-repository)

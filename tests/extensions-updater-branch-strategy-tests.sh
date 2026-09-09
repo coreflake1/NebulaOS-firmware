@@ -81,6 +81,21 @@ else
 	fail "00-fetch-vendor-sources.sh: extensions clone_pinned call site does not pass local_branch"
 fi
 
+# A real device found live: clone_pinned() alone (checked above) was
+# correctly fixed and passed every unit test, but a real build still
+# shipped a seed archive on branch "main" - make_seed_archive()'s own
+# `git checkout -B "$active_branch"` unconditionally re-renames the
+# ARCHIVED copy's local branch, and the extensions call site in
+# 04-cross-compile-app-stack.sh had a second, completely independent
+# hardcoded "main" literal there. This static check exists so that
+# specific literal can never silently reappear; section 4 below exercises
+# the full chain end to end to prove the actual archived output.
+if grep -qF 'make_seed_archive "$VENDOR/nebulaos-klipper-extensions" "$KLIPPER_EXTENSIONS_BRANCH"' "$COMPILE_SCRIPT"; then
+	pass "04-cross-compile-app-stack.sh: extensions make_seed_archive call site passes \$KLIPPER_EXTENSIONS_BRANCH, not a hardcoded literal"
+else
+	fail "04-cross-compile-app-stack.sh: extensions make_seed_archive call site does not pass \$KLIPPER_EXTENSIONS_BRANCH (the exact live bug: a hardcoded branch literal here silently overrides clone_pinned()'s correct local_branch)"
+fi
+
 # --- Section 2: clone_pinned() end-to-end, against a fake remote that ---
 #     reproduces the exact live scenario (configured branch's tip is
 #     BEHIND the pin, i.e. the pin is ahead of it, not merely different)
@@ -175,6 +190,79 @@ case "$old_shape_branch" in
 		fail "sanity: the pre-fix call shape did not reproduce a detached HEAD (got '$old_shape_branch') - this test may not be exercising the real bug"
 		;;
 esac
+
+# --- Section 4: full chain (clone_pinned + make_seed_archive) - the -----
+#     ACTUAL live bug: clone_pinned() alone was fixed and unit-tested
+#     correctly (section 2 above), but a real build still shipped a seed
+#     archive on branch "main". Root cause: 04-cross-compile-app-stack.sh's
+#     extensions call to make_seed_archive() passed a second, completely
+#     independent hardcoded "main" literal - that function's own
+#     `git checkout -B "$active_branch"` unconditionally force-renames the
+#     LOCAL branch in the ARCHIVED copy to whatever it is given, silently
+#     undoing clone_pinned()'s already-correct "production" attachment.
+#     Neither fix alone is sufficient; this test exercises both functions
+#     in the same sequence a real build does, and would have caught this
+#     before it reached a real build.
+
+MAKE_SEED_ARCHIVE_LIB="$REPO_ROOT/scripts/build/lib/make-seed-archive.sh"
+if [ -f "$MAKE_SEED_ARCHIVE_LIB" ]; then
+	(
+		cd "$WORK"
+		. ./clone_pinned_fn.sh
+		clone_pinned chain_target "$WORK/remote.git" "$PIN" "" "" "production" > "$WORK/chain_clone.log" 2>&1
+		. "$MAKE_SEED_ARCHIVE_LIB"
+		make_seed_archive "$WORK/chain_target" "production" "$WORK/remote.git" "$WORK/chain-seed.tar" "" \
+			> "$WORK/chain_archive.log" 2>&1
+	)
+
+	if [ -f "$WORK/chain-seed.tar" ]; then
+		pass "chain: make_seed_archive produced a seed tar"
+	else
+		fail "chain: make_seed_archive did not produce a seed tar ($(cat "$WORK/chain_archive.log" 2>/dev/null))"
+	fi
+
+	rm -rf "$WORK/chain-extracted"; mkdir -p "$WORK/chain-extracted"
+	tar -xf "$WORK/chain-seed.tar" -C "$WORK/chain-extracted" 2>/dev/null
+
+	chain_branch=$(git -C "$WORK/chain-extracted" symbolic-ref --short HEAD 2>/dev/null)
+	if [ "$chain_branch" = "production" ]; then
+		pass "chain: the ARCHIVED seed tar's local branch is 'production' (the actual live-checked property - clone_pinned() alone is not enough)"
+	else
+		fail "chain: the archived seed tar is on branch '$chain_branch', expected 'production' - this is the exact live bug (06-verify's check_seed_archive would report MISS)"
+	fi
+
+	chain_head=$(git -C "$WORK/chain-extracted" rev-parse HEAD 2>/dev/null)
+	if [ "$chain_head" = "$PIN" ]; then
+		pass "chain: the archived seed tar's content is still the correct pinned commit"
+	else
+		fail "chain: the archived seed tar's HEAD is $chain_head, expected the pin $PIN"
+	fi
+else
+	fail "scripts/build/lib/make-seed-archive.sh not found - cannot test the full clone_pinned+make_seed_archive chain"
+fi
+
+# Sanity check the other direction: reproduce the exact live bug by
+# passing the OLD hardcoded "main" literal to make_seed_archive() even
+# though clone_pinned() correctly attached "production" - confirms this
+# test suite actually distinguishes the two, not just checking they agree.
+if [ -f "$MAKE_SEED_ARCHIVE_LIB" ]; then
+	(
+		cd "$WORK"
+		. ./clone_pinned_fn.sh
+		clone_pinned chain_target_bug "$WORK/remote.git" "$PIN" "" "" "production" > "$WORK/chain_clone_bug.log" 2>&1
+		. "$MAKE_SEED_ARCHIVE_LIB"
+		make_seed_archive "$WORK/chain_target_bug" "main" "$WORK/remote.git" "$WORK/chain-seed-bug.tar" "" \
+			> "$WORK/chain_archive_bug.log" 2>&1
+	)
+	rm -rf "$WORK/chain-extracted-bug"; mkdir -p "$WORK/chain-extracted-bug"
+	tar -xf "$WORK/chain-seed-bug.tar" -C "$WORK/chain-extracted-bug" 2>/dev/null
+	chain_bug_branch=$(git -C "$WORK/chain-extracted-bug" symbolic-ref --short HEAD 2>/dev/null)
+	if [ "$chain_bug_branch" = "main" ]; then
+		pass "sanity: passing the old hardcoded \"main\" literal to make_seed_archive reproduces the exact live bug, confirming this test suite catches it"
+	else
+		fail "sanity: passing \"main\" to make_seed_archive did not reproduce the bug (got '$chain_bug_branch') - this test may not be exercising the real issue"
+	fi
+fi
 
 echo ""
 echo "extensions-updater-branch-strategy-tests: $PASS passed, $FAIL failed"
