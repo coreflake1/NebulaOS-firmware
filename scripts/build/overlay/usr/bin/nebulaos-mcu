@@ -32,6 +32,12 @@ MCU_MANAGED_DIR="${MCU_MANAGED_DIR:-/usr/data/nebulaos/mcu}"
 MCU_MANAGED_FLAG="${MCU_MANAGED_FLAG:-${MCU_MANAGED_DIR}/managed}"
 MCU_IDENTITY_CHECK="${MCU_IDENTITY_CHECK:-/etc/nebulaos/mcu_identity_check.py}"
 MCU_FLASH_FILE="${MCU_FLASH_FILE:-/etc/nebulaos/mcu_flash_file.py}"
+# Phase 2 final software closure mission, 2026-09-09: user uploads
+# arbitrary compatible MCU application firmware here through Mainsail's
+# ordinary Config Files browser - see docs/NEBULAOS_CONFIG_MATERIALIZATION.md.
+# Internal MCU lifecycle state (MCU_MANAGED_DIR above) stays separate and
+# is never moved here.
+MCU_UPLOAD_DIR="${MCU_UPLOAD_DIR:-/opt/printer_data/config/firmware/mcu}"
 MOONRAKER_URL="${MOONRAKER_URL:-http://127.0.0.1:7125}"
 PYTHON3="${MCU_GUARD_PYTHON3:-/usr/bin/python3}"
 
@@ -155,6 +161,20 @@ cmd_flash() {
         die "flash requires a firmware file. Usage: nebulaos-mcu flash <file>"
     fi
     FIRMWARE_FILE="$1"
+
+    # Absolute paths are used exactly as given, unchanged (an explicit
+    # full path always means what it says). A bare filename - no leading
+    # "/" - resolves against MCU_UPLOAD_DIR, so a user who uploaded
+    # firmware.bin through Mainsail's Config Files browser (which lands
+    # in firmware/mcu/ under their printer_data/config/) can just run
+    # `nebulaos-mcu flash firmware.bin` without typing the full path.
+    # Deliberately narrow: no glob expansion, no search path beyond this
+    # one directory - this is a convenience for the common case, not a
+    # general path-resolution feature.
+    case "$FIRMWARE_FILE" in
+        /*) ;;
+        *) FIRMWARE_FILE="$MCU_UPLOAD_DIR/$FIRMWARE_FILE" ;;
+    esac
 
     if [ ! -f "$FIRMWARE_FILE" ]; then
         die "firmware file not found: $FIRMWARE_FILE"

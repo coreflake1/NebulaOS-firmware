@@ -686,7 +686,7 @@ if [ -n "$SEED_MAINSAIL_MACROS_CONTENT" ]; then
 		echo "OK   nebulaos-seed-mainsail-macros's DEFAULT_GROUPS declares no underscore-style managed group ID"
 	fi
 	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -qE '"nebulaos-(calibration|input-shaper|extruder|camera|maintenance|recovery)"'; then
-		echo "OK   nebulaos-seed-mainsail-macros declares all six hyphenated managed group IDs"
+		echo "OK   nebulaos-seed-mainsail-macros declares the expected hyphenated managed group IDs"
 	else
 		echo "MISS nebulaos-seed-mainsail-macros is missing one or more expected hyphenated group IDs"
 	fi
@@ -1388,5 +1388,184 @@ print('IMPORT_CHAIN_OK')
 	fi
 fi
 rm -rf "${MCU_SMOKE_DIR}"
+
+echo "=== Phase 2 final software closure (2026-09-09) ==="
+
+# --- Guppy-only backend adapters absent (section 2A) ---------------------
+CALIBRATION_CFG_CONTENT=$(debugfs -R "cat /etc/nebulaos/klipper/calibration.cfg" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$CALIBRATION_CFG_CONTENT" ]; then
+	if echo "$CALIBRATION_CFG_CONTENT" | grep -qxF '[gcode_macro Z_OFFSET_CALIBRATION]' \
+		|| echo "$CALIBRATION_CFG_CONTENT" | grep -qxF '[gcode_macro CRTENSE_NOZZLE_CLEAR]'; then
+		echo "MISS calibration.cfg still contains a GuppyScreen-only backend adapter (Z_OFFSET_CALIBRATION or CRTENSE_NOZZLE_CLEAR)"
+	else
+		echo "OK   no GuppyScreen-only backend adapters in calibration.cfg"
+	fi
+	if echo "$CALIBRATION_CFG_CONTENT" | grep -qxF '[gcode_macro NEBULAOS_Z_OFFSET_CALIBRATE]' \
+		&& echo "$CALIBRATION_CFG_CONTENT" | grep -qxF '[gcode_macro NEBULAOS_NOZZLE_CLEAN]'; then
+		echo "OK   canonical NEBULAOS_Z_OFFSET_CALIBRATE/NEBULAOS_NOZZLE_CLEAN present"
+	else
+		echo "MISS canonical NEBULAOS_Z_OFFSET_CALIBRATE/NEBULAOS_NOZZLE_CLEAN missing from calibration.cfg"
+	fi
+else
+	echo "MISS could not read /etc/nebulaos/klipper/calibration.cfg from the built image"
+fi
+
+# --- Extensions updater configured validly (section 2B) -------------------
+if [ -n "$KLIPPER_PIN_CONF_CONTENT" ]; then
+	if echo "$KLIPPER_PIN_CONF_CONTENT" | grep -qxF 'primary_branch: production'; then
+		echo "OK   klipper-pin.conf: nebulaos_klipper_extensions primary_branch is 'production', not 'main'"
+	else
+		echo "MISS klipper-pin.conf: nebulaos_klipper_extensions primary_branch is not 'production'"
+	fi
+else
+	echo "MISS could not read klipper-pin.conf from the built image"
+fi
+
+# --- Backup cleanup installed (section 2D) --------------------------------
+RETENTION_CONTENT=$(debugfs -R "cat /etc/nebulaos-retention.sh" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$RETENTION_CONTENT" ]; then
+	for fn in clean_migration_backups clean_mainsail_namespace_backups clean_stray_bak_files; do
+		if echo "$RETENTION_CONTENT" | grep -q "^${fn}()"; then
+			echo "OK   nebulaos-retention.sh defines $fn"
+		else
+			echo "MISS nebulaos-retention.sh is missing $fn"
+		fi
+	done
+else
+	echo "MISS could not read /etc/nebulaos-retention.sh from the built image"
+fi
+
+# --- Config materialization machinery installed (sections 3-6) -----------
+check /etc/nebulaos/config-materialize.sh
+CONFIG_MANIFEST_CONTENT=$(debugfs -R "cat /etc/nebulaos/klipper/.manifest.json" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$CONFIG_MANIFEST_CONTENT" ] && echo "$CONFIG_MANIFEST_CONTENT" | grep -q '"generation"[[:space:]]*:[[:space:]]*"[0-9a-f]\{64\}"'; then
+	echo "OK   /etc/nebulaos/klipper/.manifest.json has a valid generation hash"
+else
+	echo "MISS /etc/nebulaos/klipper/.manifest.json missing or has no valid generation hash"
+fi
+if [ -n "$CONFIG_MANIFEST_CONTENT" ]; then
+	_manifest_files_ok=1
+	for cfg_name in platform.cfg machine.cfg prtouch.cfg z_offset_probe.cfg calibration.cfg homing.cfg print.cfg filament.cfg camera.cfg beeper.cfg; do
+		echo "$CONFIG_MANIFEST_CONTENT" | grep -q "\"$cfg_name\"" || _manifest_files_ok=0
+	done
+	if [ "$_manifest_files_ok" = "1" ]; then
+		echo "OK   /etc/nebulaos/klipper/.manifest.json lists all ten managed config files"
+	else
+		echo "MISS /etc/nebulaos/klipper/.manifest.json is missing one or more of the ten managed config files"
+	fi
+fi
+
+S04_MIGRATE_CONTENT=$(debugfs -R "cat /etc/init.d/S04nebulaos-migrate" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$S04_MIGRATE_CONTENT" ]; then
+	for fn in materialize_active_config migrate_printer_cfg_to_managed_tree; do
+		if echo "$S04_MIGRATE_CONTENT" | grep -q "^${fn}()"; then
+			echo "OK   S04nebulaos-migrate defines $fn"
+		else
+			echo "MISS S04nebulaos-migrate is missing $fn"
+		fi
+	done
+	if echo "$S04_MIGRATE_CONTENT" | grep -qF 'materialize_active_config' \
+		&& echo "$S04_MIGRATE_CONTENT" | grep -qF 'migrate_printer_cfg_to_managed_tree'; then
+		_materialize_line=$(echo "$S04_MIGRATE_CONTENT" | grep -n '^	materialize_active_config$' | head -1 | cut -d: -f1)
+		_managed_tree_line=$(echo "$S04_MIGRATE_CONTENT" | grep -n '^	migrate_printer_cfg_to_managed_tree$' | head -1 | cut -d: -f1)
+		if [ -n "$_materialize_line" ] && [ -n "$_managed_tree_line" ] && [ "$_materialize_line" -lt "$_managed_tree_line" ]; then
+			echo "OK   S04nebulaos-migrate calls materialize_active_config before migrate_printer_cfg_to_managed_tree"
+		else
+			echo "MISS S04nebulaos-migrate does not call materialize_active_config before migrate_printer_cfg_to_managed_tree"
+		fi
+	fi
+	if echo "$S04_MIGRATE_CONTENT" | grep -qF 'mkdir -p "$PRINTER_DATA_CONFIG/macros"'; then
+		echo "OK   migrate_printer_cfg_to_managed_tree creates the macros/ directory"
+	else
+		echo "MISS migrate_printer_cfg_to_managed_tree does not create the macros/ directory"
+	fi
+else
+	echo "MISS could not read /etc/init.d/S04nebulaos-migrate from the built image"
+fi
+
+# --- nebulaos-recover config installed (section 12) -----------------------
+RECOVER_CONTENT=$(debugfs -R "cat /usr/bin/nebulaos-recover" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$RECOVER_CONTENT" ]; then
+	if echo "$RECOVER_CONTENT" | grep -q "^cmd_config()" && echo "$RECOVER_CONTENT" | grep -qE '^[[:space:]]*config\)'; then
+		echo "OK   nebulaos-recover has a working 'config' subcommand"
+	else
+		echo "MISS nebulaos-recover is missing the 'config' subcommand"
+	fi
+else
+	echo "MISS could not read /usr/bin/nebulaos-recover from the built image"
+fi
+
+# --- macros/ and guppyscreen/ and firmware/mcu/ (sections 7-9) -----------
+if [ -n "$S01_CONTENT" ]; then
+	if echo "$S01_CONTENT" | grep -qF 'mount --bind "$GUPPY_STATE/guppyconfig.json" "$PDATA/config/guppyscreen/guppyconfig.json"'; then
+		echo "OK   S01persistent-datastore exposes guppyconfig.json under printer_data/config/guppyscreen/"
+	else
+		echo "MISS S01persistent-datastore does not expose guppyconfig.json under printer_data/config/guppyscreen/"
+	fi
+	if echo "$S01_CONTENT" | grep -qF 'mkdir -p "$PDATA/config/firmware/mcu"'; then
+		echo "OK   S01persistent-datastore creates printer_data/config/firmware/mcu/"
+	else
+		echo "MISS S01persistent-datastore does not create printer_data/config/firmware/mcu/"
+	fi
+else
+	echo "MISS could not read /etc/init.d/S01persistent-datastore from the built image"
+fi
+
+NEBULAOS_MCU_CONTENT=$(debugfs -R "cat /usr/bin/nebulaos-mcu" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$NEBULAOS_MCU_CONTENT" ]; then
+	if echo "$NEBULAOS_MCU_CONTENT" | grep -qF 'MCU_UPLOAD_DIR="${MCU_UPLOAD_DIR:-/opt/printer_data/config/firmware/mcu}"'; then
+		echo "OK   nebulaos-mcu flash resolves bare filenames against printer_data/config/firmware/mcu/"
+	else
+		echo "MISS nebulaos-mcu flash does not resolve bare filenames against printer_data/config/firmware/mcu/"
+	fi
+else
+	echo "MISS could not read /usr/bin/nebulaos-mcu from the built image"
+fi
+
+# --- canonical calibrate_end_y = 190 (physical safety) --------------------
+if [ -n "$MACHINE_CFG_CONTENT" ]; then
+	if echo "$MACHINE_CFG_CONTENT" | grep -qE '^calibrate_end_y:[[:space:]]*190([[:space:]]|$)'; then
+		echo "OK   machine.cfg's own axis_twist_compensation default is the safety-qualified calibrate_end_y=190"
+	else
+		echo "MISS machine.cfg's axis_twist_compensation calibrate_end_y is not 190"
+	fi
+else
+	echo "MISS could not read machine.cfg from the built image"
+fi
+
+# --- canonical filament sensor = filament_sensor / !PC15 ------------------
+FILAMENT_CFG_CONTENT=$(debugfs -R "cat /etc/nebulaos/klipper/filament.cfg" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -n "$FILAMENT_CFG_CONTENT" ]; then
+	_fss_count=$(echo "$FILAMENT_CFG_CONTENT" | grep -c '^\[filament_switch_sensor filament_sensor\]')
+	if [ "$_fss_count" = "1" ] && echo "$FILAMENT_CFG_CONTENT" | grep -qE '^switch_pin:[[:space:]]*!PC15[[:space:]]*$'; then
+		echo "OK   canonical [filament_switch_sensor filament_sensor] with switch_pin !PC15, exactly once"
+	else
+		echo "MISS canonical filament_sensor (switch_pin !PC15) not found exactly once (count=$_fss_count)"
+	fi
+else
+	echo "MISS could not read filament.cfg from the built image"
+fi
+
+# --- Mainsail 5-group seeder (final schema, no obsolete input-shaper) -----
+if [ -n "$SEED_MAINSAIL_MACROS_CONTENT" ]; then
+	_5group_ok=1
+	for g in nebulaos-calibration nebulaos-extruder nebulaos-recovery nebulaos-maintenance nebulaos-camera; do
+		echo "$DEFAULT_GROUPS_BLOCK" | grep -q "\"$g\":" || _5group_ok=0
+	done
+	if echo "$DEFAULT_GROUPS_BLOCK" | grep -q '"nebulaos-input-shaper":'; then
+		_5group_ok=0
+	fi
+	if [ "$_5group_ok" = "1" ]; then
+		echo "OK   nebulaos-seed-mainsail-macros DEFAULT_GROUPS declares exactly the five canonical groups (no obsolete nebulaos-input-shaper)"
+	else
+		echo "MISS nebulaos-seed-mainsail-macros DEFAULT_GROUPS does not declare exactly the five canonical groups"
+	fi
+	if echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -q "^def reset_to_defaults" \
+		&& echo "$SEED_MAINSAIL_MACROS_CONTENT" | grep -q "^def run_reset"; then
+		echo "OK   nebulaos-seed-mainsail-macros ships reset_to_defaults/run_reset (--reset-state support)"
+	else
+		echo "MISS nebulaos-seed-mainsail-macros is missing reset_to_defaults/run_reset"
+	fi
+fi
 
 echo "== verification complete - review any MISS lines above =="

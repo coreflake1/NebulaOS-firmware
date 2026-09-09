@@ -74,6 +74,13 @@ start() {
 	seed_once /opt/printer_data "$PDATA"
 	mkdir -p "$PDATA/config/GuppyScreen/scripts"
 	seed_once /opt/guppyscreen/guppyconfig.json "$GUPPY_STATE/guppyconfig.json"
+	# Phase 2 final software closure mission (2026-09-09): user MCU
+	# application-firmware upload area, browsable through Mainsail's
+	# ordinary Config Files view (nebulaos-mcu flash resolves a bare
+	# filename against this same directory) - see
+	# docs/NEBULAOS_CONFIG_MATERIALIZATION.md. Deliberately just an empty
+	# directory here; nothing seeds content into it.
+	mkdir -p "$PDATA/config/firmware/mcu"
 
 	# /opt/printer_data ships baked-in defaults on the read-only squashfs
 	# (printer.cfg, moonraker.conf) for the seed step above - bind-mounting
@@ -92,6 +99,20 @@ start() {
 	# actually save - not just "resets every boot," writes fail outright,
 	# which is why GuppyScreen was stuck showing the recalibration wizard.
 	mount --bind "$GUPPY_STATE/guppyconfig.json" /opt/guppyscreen/guppyconfig.json
+
+	# Phase 2 final software closure mission (2026-09-09): the SAME real
+	# file, bind-mounted a second time onto printer_data/config/
+	# guppyscreen/guppyconfig.json, so it is also visible and editable
+	# through Mainsail's ordinary Config Files browser - both paths are
+	# the identical persistent inode at $GUPPY_STATE/guppyconfig.json, so
+	# an edit through either one is immediately visible through the
+	# other. Deliberately only this one file, never the guppyscreen/
+	# guppybeep binaries or themes/ - those are image-owned, not user
+	# config, and do not belong under printer_data/config/ at all (see
+	# docs/NEBULAOS_CONFIG_MATERIALIZATION.md's ownership model).
+	mkdir -p "$PDATA/config/guppyscreen"
+	[ -e "$PDATA/config/guppyscreen/guppyconfig.json" ] || touch "$PDATA/config/guppyscreen/guppyconfig.json"
+	mount --bind "$GUPPY_STATE/guppyconfig.json" "$PDATA/config/guppyscreen/guppyconfig.json"
 
 	# Phase 1.5 persistent-namespace mission (2026-08): the two top-level
 	# compatibility symlinks that used to live here

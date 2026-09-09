@@ -99,6 +99,10 @@ MIGRATE_CONFIG_OWNERSHIP_TOOL="${MIGRATE_CONFIG_OWNERSHIP_TOOL:-/opt/nebulaos/to
 # Overridable for tests (points fixtures at the same real, tracked shared
 # gate this script actually ships - see that file's own header).
 GATE_LIB="${GATE_LIB:-/etc/nebulaos-maintenance-gate.sh}"
+# Phase 2 final software closure mission, 2026-09-09 - see
+# config-materialize.sh's own header for what this provides
+# (materialize_config_tree, config_materialization_needed).
+CONFIG_MATERIALIZE_LIB="${CONFIG_MATERIALIZE_LIB:-/etc/nebulaos/config-materialize.sh}"
 
 echo 500 > "/proc/self/oom_score_adj" 2>/dev/null
 
@@ -905,6 +909,162 @@ migrate_printer_cfg() {
 # safety reasoning: never touches a section that already has real user
 # data, refuses-and-backs-up rather than guessing on anything it cannot
 # confidently parse).
+# Sources config-materialize.sh (if present - an older image predating
+# this mission simply has no such file, and this function is a correct
+# no-op in that case) and materializes /etc/nebulaos/klipper/*.cfg onto
+# persistent storage at $PRINTER_DATA_CONFIG/nebulaos/ ONLY when the
+# currently-booted image's own config generation differs from what is
+# already materialized there (ordinary reboot on the same image: no-op,
+# by design - see config-materialize.sh's own header). MUST run before
+# migrate_printer_cfg_to_managed_tree() below, which rewrites printer.cfg
+# to include files from exactly this materialized tree.
+materialize_active_config() {
+	[ -f "$CONFIG_MATERIALIZE_LIB" ] || return 0
+	NEBULAOS_KLIPPER_CFG_DIR="${NEBULAOS_KLIPPER_CFG_DIR:-/etc/nebulaos/klipper}" \
+		. "$CONFIG_MATERIALIZE_LIB"
+	if ! config_materialization_needed; then
+		return 0
+	fi
+	if materialize_config_tree "boot-materialization"; then
+		return 0
+	fi
+	log "ERROR: materialize_active_config: materialize_config_tree failed - printer.cfg's managed-tree migration (if applicable) will be skipped this boot, retried next boot"
+	return 1
+}
+
+# The exact, literal include lines this project's printer.cfg has shipped
+# since the Phase 2 upstream-first config refactor (commit 8889ef0) through
+# tonight's own live convergence missions - the CURRENT final generation,
+# pointing directly at the immutable squashfs. Phase 2 final software
+# closure mission (2026-09-09) introduces one more generation: these same
+# ten files, materialized onto persistent storage at
+# $PRINTER_DATA_CONFIG/nebulaos/ (see config-materialize.sh), included by
+# RELATIVE path instead, plus a permanently user-owned macros/ directory.
+_PCFG_MANAGED_TREE_OLD_INCLUDES='[include /etc/nebulaos/klipper/platform.cfg]
+[include /etc/nebulaos/klipper/machine.cfg]
+[include /etc/nebulaos/klipper/prtouch.cfg]
+[include /etc/nebulaos/klipper/z_offset_probe.cfg]
+[include /etc/nebulaos/klipper/calibration.cfg]
+[include /etc/nebulaos/klipper/homing.cfg]
+[include /etc/nebulaos/klipper/print.cfg]
+[include /etc/nebulaos/klipper/filament.cfg]
+[include /etc/nebulaos/klipper/camera.cfg]
+[include /etc/nebulaos/klipper/beeper.cfg]'
+
+_PCFG_MANAGED_TREE_NEW_INCLUDES='[include nebulaos/platform.cfg]
+[include nebulaos/machine.cfg]
+[include nebulaos/prtouch.cfg]
+[include nebulaos/z_offset_probe.cfg]
+[include nebulaos/calibration.cfg]
+[include nebulaos/homing.cfg]
+[include nebulaos/print.cfg]
+[include nebulaos/filament.cfg]
+[include nebulaos/camera.cfg]
+[include nebulaos/beeper.cfg]
+
+[include macros/*.cfg]'
+
+# One-time, idempotent: rewrites printer.cfg's ten direct
+# /etc/nebulaos/klipper/*.cfg includes to point at the materialized
+# nebulaos/*.cfg copy instead (see materialize_active_config() below,
+# which MUST have already run this same boot - Klipper would fail to find
+# nebulaos/*.cfg otherwise), and adds [include macros/*.cfg] for the new
+# permanently-user-owned macros directory. Deliberately narrow: only
+# recognizes the file as a match when ALL TEN old include lines are
+# present, contiguous, and in the exact known order - anything else
+# (a technician's own reordering, an extra include spliced in between,
+# a partially-hand-migrated file) falls through to a safe refusal
+# (backed up, logged) rather than guessing, same discipline as
+# migrate_printer_cfg() above.
+migrate_printer_cfg_to_managed_tree() {
+	f="$PRINTER_DATA_CONFIG/printer.cfg"
+	[ -f "$f" ] || return 0
+
+	# Idempotent: already on the new managed-tree shape.
+	grep -qxF '[include nebulaos/platform.cfg]' "$f" && return 0
+
+	# Never rewrite printer.cfg to include files that do not actually
+	# exist yet - materialize_active_config() must have already
+	# successfully materialized $PRINTER_DATA_CONFIG/nebulaos/ this same
+	# boot (or an earlier one) before this function may proceed. If it
+	# hasn't (materialization failed, or this image predates
+	# config-materialize.sh entirely), retry next boot rather than break
+	# Klipper's config load now.
+	for _managed_f in platform.cfg machine.cfg prtouch.cfg z_offset_probe.cfg calibration.cfg homing.cfg print.cfg filament.cfg camera.cfg beeper.cfg; do
+		if [ ! -f "$PRINTER_DATA_CONFIG/nebulaos/$_managed_f" ]; then
+			log "printer.cfg managed-tree migration: $PRINTER_DATA_CONFIG/nebulaos/$_managed_f does not exist yet - skipping this boot, will retry once materialization has completed"
+			return 0
+		fi
+	done
+
+	# Only proceed if the exact ten old includes are present, contiguous,
+	# in order - located as one literal block via awk rather than ten
+	# separate greps, so "contiguous and in order" is actually enforced,
+	# not just "all ten present somewhere".
+	if ! awk -v want="$_PCFG_MANAGED_TREE_OLD_INCLUDES" '
+		BEGIN { n = split(want, arr, "\n"); i = 0 }
+		{
+			if (i < n && $0 == arr[i + 1]) {
+				i++
+				if (i == n) { found = 1; exit }
+			} else if (i > 0 && $0 != arr[i + 1]) {
+				i = ($0 == arr[1]) ? 1 : 0
+			}
+		}
+		END { exit found ? 0 : 1 }
+	' "$f"; then
+		ts=$(date -u +%Y%m%dT%H%M%SZ)
+		mkdir -p "$BACKUP_ROOT/printer-cfg-managed-tree-migration-refused"
+		cp -a "$f" "$BACKUP_ROOT/printer-cfg-managed-tree-migration-refused/printer.cfg.$ts" 2>/dev/null
+		log "ERROR: printer.cfg does not contain the expected ten contiguous /etc/nebulaos/klipper/*.cfg includes in order - refusing to migrate to the managed-tree layout, backed up to $BACKUP_ROOT/printer-cfg-managed-tree-migration-refused/printer.cfg.$ts, LEFT UNTOUCHED. Manual migration required."
+		return 1
+	fi
+
+	ts=$(date -u +%Y%m%dT%H%M%SZ)
+	mkdir -p "$BACKUP_ROOT/printer-cfg-managed-tree-migration"
+	backup="$BACKUP_ROOT/printer-cfg-managed-tree-migration/printer.cfg.pre-migration.$ts"
+	if ! cp -a "$f" "$backup"; then
+		log "ERROR: could not create pre-migration backup of printer.cfg - refusing to migrate without one"
+		return 1
+	fi
+	if ! cmp -s "$f" "$backup"; then
+		log "ERROR: pre-migration backup of printer.cfg does not match the original - refusing to proceed"
+		return 1
+	fi
+
+	tmp="$f.migrate-managed-tree-tmp.$$"
+	awk -v old="$_PCFG_MANAGED_TREE_OLD_INCLUDES" -v new="$_PCFG_MANAGED_TREE_NEW_INCLUDES" '
+		BEGIN { n = split(old, arr, "\n"); i = 0 }
+		{
+			if (i < n && $0 == arr[i + 1]) {
+				i++
+				if (i == n) { print new; next }
+				next
+			} else if (i > 0) {
+				i = ($0 == arr[1]) ? 1 : 0
+			}
+			print
+		}
+	' "$f" > "$tmp"
+
+	if ! grep -qxF '[include nebulaos/platform.cfg]' "$tmp" || ! grep -qxF '[include macros/*.cfg]' "$tmp"; then
+		log "ERROR: managed-tree rewrite of printer.cfg failed a basic sanity check - leaving the original untouched (backup at $backup)"
+		rm -f "$tmp"
+		return 1
+	fi
+	if grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tmp"; then
+		log "ERROR: managed-tree rewrite of printer.cfg still contains an old absolute include after rewrite - leaving the original untouched (backup at $backup)"
+		rm -f "$tmp"
+		return 1
+	fi
+
+	mkdir -p "$PRINTER_DATA_CONFIG/macros"
+
+	mv "$tmp" "$f"
+	log "printer.cfg: migrated from direct /etc/nebulaos/klipper/*.cfg includes to the materialized nebulaos/*.cfg managed tree, plus [include macros/*.cfg] (original backed up at $backup)"
+	return 0
+}
+
 migrate_config_ownership() {
 	f="$PRINTER_DATA_CONFIG/printer.cfg"
 	[ -f "$f" ] || return 0
@@ -993,6 +1153,8 @@ start() {
 	migrate_moonraker_pin_include
 	migrate_updater_channels
 	migrate_printer_cfg
+	materialize_active_config
+	migrate_printer_cfg_to_managed_tree
 	migrate_config_ownership
 	migrate_guppy_stale_modules
 

@@ -1160,4 +1160,47 @@ cat > "$PRINTER_DATA_SEED_DEST/../printer-data-config-manifest.json" <<EOF
 EOF
 echo "== printer_data config seed created: $(ls -la "$PRINTER_DATA_SEED_DEST/") =="
 
+# Phase 2 final software closure mission, 2026-09-09: the config
+# materialization architecture (see docs/NEBULAOS_CONFIG_MATERIALIZATION.md)
+# needs a way to tell "the immutable /etc/nebulaos/klipper/ tree this image
+# ships" apart from "the tree an older or newer image shipped", without
+# using the firmware's own git SHA (which changes on every commit, even
+# ones that never touch these 10 files - that would force a rematerialize/
+# backup cycle on every single build regardless of whether the config tree
+# itself actually changed). A dedicated manifest, generated here from the
+# exact files this build is about to ship, keyed by their own content:
+# same 10 files' content -> same generation hash, byte-for-byte, across
+# any number of otherwise-unrelated firmware commits; any real change to
+# any one of them -> a new hash. Per-file hashes let a live device verify
+# (or later diagnose - see nebulaos-recover config) individual files
+# against this exact manifest, not just an opaque aggregate.
+NEBULAOS_KLIPPER_CFG_DIR_BUILD="$OVERLAY/etc/nebulaos/klipper"
+if [ -d "$NEBULAOS_KLIPPER_CFG_DIR_BUILD" ]; then
+	_cfg_manifest_files_json=""
+	_cfg_manifest_hash_input=""
+	for _cfg_f in $(cd "$NEBULAOS_KLIPPER_CFG_DIR_BUILD" && ls -1 *.cfg | sort); do
+		_cfg_sha=$(sha256sum "$NEBULAOS_KLIPPER_CFG_DIR_BUILD/$_cfg_f" | cut -d' ' -f1)
+		_cfg_manifest_files_json="$_cfg_manifest_files_json    \"$_cfg_f\": \"$_cfg_sha\",
+"
+		_cfg_manifest_hash_input="$_cfg_manifest_hash_input$_cfg_f:$_cfg_sha
+"
+	done
+	_cfg_manifest_files_json=$(printf '%s' "$_cfg_manifest_files_json" | sed '$ s/,$//')
+	_cfg_generation=$(printf '%s' "$_cfg_manifest_hash_input" | sha256sum | cut -d' ' -f1)
+	cat > "$NEBULAOS_KLIPPER_CFG_DIR_BUILD/.manifest.json" <<EOF
+{
+  "schema_version": 1,
+  "generation": "$_cfg_generation",
+  "build_date": "$build_date",
+  "files": {
+$_cfg_manifest_files_json
+  }
+}
+EOF
+	echo "== /etc/nebulaos/klipper/.manifest.json generation=$_cfg_generation =="
+else
+	echo "FATAL: $NEBULAOS_KLIPPER_CFG_DIR_BUILD missing - cannot generate the config materialization manifest" >&2
+	exit 1
+fi
+
 echo "== app-stack overlay assembled at $OVERLAY =="

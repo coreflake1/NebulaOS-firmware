@@ -51,6 +51,13 @@ CURL_BIN="${CURL_BIN:-curl}"
 PYTHON3="${PYTHON3:-/usr/bin/python3}"
 MAINSAIL_SEEDER="${MAINSAIL_SEEDER:-/usr/libexec/nebulaos-seed-mainsail-macros}"
 MAINSAIL_NAMESPACE_BACKUP_DIR="${MAINSAIL_NAMESPACE_BACKUP_DIR:-$NEBULAOS_ROOT/system/mainsail-namespace-backups}"
+# Phase 2 final software closure mission, 2026-09-09 - see
+# config-materialize.sh's own header.
+SYSTEM="${SYSTEM:-$NEBULAOS_ROOT/system}"
+BACKUP_ROOT="${BACKUP_ROOT:-$SYSTEM/migration-backups}"
+PRINTER_DATA_CONFIG="${PRINTER_DATA_CONFIG:-$NEBULAOS_ROOT/printer_data/config}"
+NEBULAOS_KLIPPER_CFG_DIR="${NEBULAOS_KLIPPER_CFG_DIR:-/etc/nebulaos/klipper}"
+CONFIG_MATERIALIZE_LIB="${CONFIG_MATERIALIZE_LIB:-/etc/nebulaos/config-materialize.sh}"
 
 # Immutable source paths (on the read-only squashfs). Used ONLY by
 # cmd_status's bind-mount display and by cmd_mainsail (see its own
@@ -65,6 +72,9 @@ IMMUTABLE_MAINSAIL="${IMMUTABLE_MAINSAIL:-/usr/share/mainsail}"
 
 die() { echo "nebulaos-recover: error: $1" >&2; exit 1; }
 warn() { echo "nebulaos-recover: warning: $1" >&2; }
+# config-materialize.sh's own functions call log() - this script doesn't
+# otherwise need one, but must define it before sourcing that library.
+log() { echo "$1"; }
 
 # ---------- status ----------
 
@@ -437,6 +447,53 @@ cmd_klipper_extensions() {
     echo "A reboot is required for changes to take effect."
 }
 
+# ---------- config (Phase 2 final software closure mission, 2026-09-09) --
+
+# Restores ONLY the NebulaOS-managed active config tree
+# ($PRINTER_DATA_CONFIG/nebulaos/) from the immutable /etc/nebulaos/klipper/
+# source, via the same materialize_config_tree() both this command and
+# S04nebulaos-migrate's own boot-time materialization use - see
+# config-materialize.sh's own header and
+# docs/NEBULAOS_CONFIG_MATERIALIZATION.md.
+#
+# Deliberately narrow: this is a reset of the managed tree ONLY. It must
+# NEVER touch printer.cfg's own user-owned region, SAVE_CONFIG, moonraker.conf,
+# macros/, guppyscreen/, firmware/mcu/, the Moonraker database, Mainsail's
+# layout, PLR state, or MCU state - materialize_config_tree()'s own inputs
+# and outputs are exactly $NEBULAOS_KLIPPER_CFG_DIR (read) and
+# $PRINTER_DATA_CONFIG/nebulaos (the only thing written), so this command
+# has no way to reach any of those even by accident.
+#
+# Unlike boot-time materialization (which is a no-op when the generation
+# already matches - an ordinary reboot must not rewrite anything), this
+# command always rematerializes when invoked: it exists specifically for a
+# technician to recover from LOCAL corruption of the managed tree itself,
+# which config_materialization_needed()'s generation comparison alone
+# cannot detect (the generation marker can still say "correct" even if a
+# file underneath has since been corrupted or deleted).
+cmd_config() {
+    if [ ! -f "$CONFIG_MATERIALIZE_LIB" ]; then
+        die "config materialization library not found at $CONFIG_MATERIALIZE_LIB - cannot recover config"
+    fi
+
+    echo "Recovering the NebulaOS-managed config tree from $NEBULAOS_KLIPPER_CFG_DIR"
+    echo ""
+
+    # shellcheck disable=SC1090
+    . "$CONFIG_MATERIALIZE_LIB"
+
+    if materialize_config_tree "recover-config"; then
+        echo ""
+        echo "Recovery complete for config."
+        echo "printer.cfg's own user-owned region, SAVE_CONFIG, macros/,"
+        echo "guppyscreen/, firmware/mcu/, and moonraker.conf are all untouched."
+        echo "No reboot is required - Klipper reads the managed tree fresh on its"
+        echo "next restart; run FIRMWARE_RESTART if you want it to pick this up now."
+    else
+        die "materialize_config_tree failed - see the log lines above for exactly why. The existing managed tree (if any) was left untouched."
+    fi
+}
+
 # ---------- main ----------
 
 usage() {
@@ -454,6 +511,11 @@ usage() {
     echo "                            first; other Mainsail/Moonraker settings and"
     echo "                            any of the user's own custom groups untouched)"
     echo "  klipper-extensions        Restore extensions (remove persistent copy)"
+    echo "  config                    Restore the NebulaOS-managed config tree"
+    echo "                            (printer_data/config/nebulaos/) from the"
+    echo "                            immutable image - never touches printer.cfg's"
+    echo "                            own user-owned region, SAVE_CONFIG, macros/,"
+    echo "                            guppyscreen/, firmware/mcu/, or moonraker.conf"
     exit 1
 }
 
@@ -470,6 +532,7 @@ case "$command" in
     moonraker)          cmd_moonraker ;;
     mainsail)           cmd_mainsail "$@" ;;
     klipper-extensions) cmd_klipper_extensions ;;
+    config)              cmd_config ;;
     -h|--help|help)     usage ;;
     *) die "unknown command '$command'. Run 'nebulaos-recover help' for usage." ;;
 esac

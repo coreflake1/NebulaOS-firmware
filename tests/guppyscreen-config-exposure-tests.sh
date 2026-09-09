@@ -1,0 +1,88 @@
+#!/bin/sh
+#
+# Offline, structural tests for S01persistent-datastore's new second bind
+# mount of guppyconfig.json onto printer_data/config/guppyscreen/ (Phase 2
+# final software closure mission, 2026-09-09, section 8).
+#
+# S01persistent-datastore does real `mount`/`mount --bind` calls requiring
+# root and a real block device - it has no existing offline test harness at
+# all (a pre-existing gap this mission does not fully close). This file
+# proves the SOURCE is structurally correct (both bind mounts target the
+# exact same real file, the new mount point is created before being bound
+# onto, nothing else under guppyscreen/ - binaries, themes/ - is exposed);
+# full functional proof (the file really is visible and editable through
+# Mainsail after a real boot) happens live during first-boot acceptance.
+#
+# Usage: sh tests/guppyscreen-config-exposure-tests.sh
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+S01_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S01persistent-datastore"
+
+[ -f "$S01_SCRIPT" ] || { echo "SKIP: $S01_SCRIPT not present"; exit 0; }
+
+PASS=0
+FAIL=0
+fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
+pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
+
+sh -n "$S01_SCRIPT" && pass "S01persistent-datastore has valid shell syntax" \
+	|| fail "S01persistent-datastore has a shell syntax error"
+
+if grep -qF 'mount --bind "$GUPPY_STATE/guppyconfig.json" "$PDATA/config/guppyscreen/guppyconfig.json"' "$S01_SCRIPT"; then
+	pass "a bind mount from \$GUPPY_STATE/guppyconfig.json onto printer_data/config/guppyscreen/guppyconfig.json exists"
+else
+	fail "the expected new bind mount line is missing"
+fi
+
+original_bind_count=$(grep -cF 'mount --bind "$GUPPY_STATE/guppyconfig.json"' "$S01_SCRIPT")
+if [ "$original_bind_count" = "2" ]; then
+	pass "exactly two bind mounts of the same real \$GUPPY_STATE/guppyconfig.json source exist (the original + the new config-visible one)"
+else
+	fail "expected exactly 2 bind mounts of \$GUPPY_STATE/guppyconfig.json, found $original_bind_count"
+fi
+
+# The new mount point must be created (mkdir + touch) before the bind
+# mount line that targets it - bind-mounting a file onto a path that does
+# not exist yet fails outright.
+new_bind_line=$(grep -n 'mount --bind "\$GUPPY_STATE/guppyconfig.json" "\$PDATA/config/guppyscreen/guppyconfig.json"' "$S01_SCRIPT" | cut -d: -f1)
+mkdir_line=$(grep -n 'mkdir -p "\$PDATA/config/guppyscreen"' "$S01_SCRIPT" | cut -d: -f1)
+touch_line=$(grep -n 'touch "\$PDATA/config/guppyscreen/guppyconfig.json"' "$S01_SCRIPT" | cut -d: -f1)
+if [ -n "$mkdir_line" ] && [ -n "$touch_line" ] && [ -n "$new_bind_line" ] \
+	&& [ "$mkdir_line" -lt "$new_bind_line" ] && [ "$touch_line" -lt "$new_bind_line" ]; then
+	pass "the mount point (directory + placeholder file) is created before the bind mount that targets it"
+else
+	fail "the mount point is not correctly created before the bind mount (mkdir=$mkdir_line touch=$touch_line bind=$new_bind_line)"
+fi
+
+# Only guppyconfig.json - never the binaries or themes/ - may be exposed
+# under printer_data/config/guppyscreen/.
+if grep -qE '(cp|mount).*(guppyscreen"|guppybeep|themes)[^.].*config/guppyscreen' "$S01_SCRIPT"; then
+	fail "something other than guppyconfig.json appears to be exposed under config/guppyscreen/ - binaries/themes/ must never be copied there"
+else
+	pass "nothing besides guppyconfig.json is exposed under config/guppyscreen/ (no binaries, no themes/)"
+fi
+
+# The placeholder-touch must be idempotent (never overwrite an existing
+# file with an empty one on a later boot - the bind mount source is what
+# actually matters, but the placeholder guard itself must stay a no-op
+# once real content is bound over it).
+if grep -qF '[ -e "$PDATA/config/guppyscreen/guppyconfig.json" ] ||' "$S01_SCRIPT"; then
+	pass "the placeholder file creation is guarded (only touches if not already present)"
+else
+	fail "the placeholder file creation is not guarded against overwriting existing content"
+fi
+
+# Section 9 (firmware/mcu/ upload area) is small enough to live in this
+# same S01 structural test file rather than a separate one.
+if grep -qF 'mkdir -p "$PDATA/config/firmware/mcu"' "$S01_SCRIPT"; then
+	pass "printer_data/config/firmware/mcu/ is created at boot"
+else
+	fail "printer_data/config/firmware/mcu/ creation line is missing"
+fi
+
+echo ""
+echo "guppyscreen-config-exposure-tests: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]

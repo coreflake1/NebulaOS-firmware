@@ -250,7 +250,16 @@ if require_stage "case C"; then
 		fail "case C: the user's own added include was lost ($(cat "$logC"))"
 	fi
 
-	last_standard_line=$(grep -n '^\[include simpleaf/bltouch_macro.cfg\]$' "$tC/config/printer.cfg" | tail -1 | cut -d: -f1)
+	# Phase 2 final software closure mission, 2026-09-09: was checking
+	# position against [include simpleaf/bltouch_macro.cfg] - the OLD
+	# anchor line migrate_printer_cfg() itself discards as part of its own
+	# anchor cut (that is the anchor's entire job; it never appears in the
+	# migrated output). This assertion always failed regardless of the
+	# real position, since last_standard_line was always empty. The
+	# correct post-migration "last standard include" is the actual last
+	# line migrate_printer_cfg() itself produces - beeper.cfg's include -
+	# not a line that is guaranteed to be gone by design.
+	last_standard_line=$(grep -n '^\[include /etc/nebulaos/klipper/beeper.cfg\]$' "$tC/config/printer.cfg" | tail -1 | cut -d: -f1)
 	custom_line=$(grep -n '^\[include my_custom_macros.cfg\]$' "$tC/config/printer.cfg" | tail -1 | cut -d: -f1)
 	if [ -n "$last_standard_line" ] && [ -n "$custom_line" ] && [ "$custom_line" -gt "$last_standard_line" ]; then
 		pass "case C: the custom include stays in the same relative position, after the standard includes"

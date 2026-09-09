@@ -278,6 +278,46 @@ else
 fi
 
 # =========================================================================
+# 8b. flash <bare-filename> resolves against MCU_UPLOAD_DIR (Phase 2
+#     final software closure mission, 2026-09-09) - a user who uploaded
+#     firmware through Mainsail's Config Files browser can run
+#     `nebulaos-mcu flash firmware.bin` without typing the full path.
+# =========================================================================
+
+echo ""
+echo "--- flash <bare-filename> resolution against MCU_UPLOAD_DIR ---"
+
+MCU_UPLOAD_TEST_DIR="$TMPDIR/mcu-upload-test"
+mkdir -p "$MCU_UPLOAD_TEST_DIR"
+
+abs_missing_output=$(MCU_UPLOAD_DIR="$MCU_UPLOAD_TEST_DIR" "$CLI_SCRIPT" flash /elsewhere/explicit.bin 2>&1) || true
+if echo "$abs_missing_output" | grep -qF '/elsewhere/explicit.bin'; then
+    pass "flash with an absolute path uses it exactly as given, never prefixed with MCU_UPLOAD_DIR"
+else
+    fail "flash with an absolute path did not report the expected path ($abs_missing_output)"
+fi
+if echo "$abs_missing_output" | grep -qF "$MCU_UPLOAD_TEST_DIR"; then
+    fail "flash with an absolute path incorrectly prefixed it with MCU_UPLOAD_DIR"
+fi
+
+bare_missing_output=$(MCU_UPLOAD_DIR="$MCU_UPLOAD_TEST_DIR" "$CLI_SCRIPT" flash bare-firmware.bin 2>&1) || true
+if echo "$bare_missing_output" | grep -qF "$MCU_UPLOAD_TEST_DIR/bare-firmware.bin"; then
+    pass "flash with a bare filename resolves it against MCU_UPLOAD_DIR in the not-found error"
+else
+    fail "flash with a bare filename did not resolve against MCU_UPLOAD_DIR ($bare_missing_output)"
+fi
+
+echo "fake firmware content" > "$MCU_UPLOAD_TEST_DIR/real-firmware.bin"
+found_output=$(MCU_UPLOAD_DIR="$MCU_UPLOAD_TEST_DIR" MOONRAKER_URL="http://127.0.0.1:1" \
+    MCU_FLASH_FILE="/definitely/does/not/exist.py" \
+    "$CLI_SCRIPT" flash real-firmware.bin 2>&1) || true
+if echo "$found_output" | grep -q 'firmware file not found'; then
+    fail "flash with a bare filename that DOES exist under MCU_UPLOAD_DIR was still reported as not found"
+else
+    pass "flash with a bare filename that exists under MCU_UPLOAD_DIR is found (fails later, at the flash-helper stage, not file lookup)"
+fi
+
+# =========================================================================
 # 8b. Klipper stop/restart wrapping around flash/managed (Phase 2
 #     overnight convergence mission, 2026-09-09): real device found live
 #     that cmd_flash/cmd_managed never stopped the Klipper SERVICE before

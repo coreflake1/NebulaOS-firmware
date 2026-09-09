@@ -669,6 +669,98 @@ fi
 # =========================================================================
 
 echo ""
+# =========================================================================
+# 7. `config` subcommand (Phase 2 final software closure mission,
+#    2026-09-09) - restores ONLY the materialized nebulaos/ managed tree,
+#    via the same config-materialize.sh library S04nebulaos-migrate's own
+#    boot-time materialization uses. materialize_config_tree()'s own
+#    verify/backup/atomic-replace properties are exhaustively covered in
+#    tests/config-materialization-tests.sh - these tests are about the
+#    CLI-level wiring (dispatch, missing-lib handling, and that a real
+#    invocation through the real binary reaches the real library
+#    correctly), not re-proving that logic.
+# =========================================================================
+
+echo ""
+echo "--- config subcommand ---"
+
+if grep -q "cmd_config" "$CLI_SCRIPT"; then
+    pass "subcommand function cmd_config exists"
+else
+    fail "subcommand function cmd_config missing"
+fi
+
+if grep -q '^[[:space:]]*config)' "$CLI_SCRIPT"; then
+    pass "dispatch handles 'config'"
+else
+    fail "dispatch does not handle 'config'"
+fi
+
+CONFIG_LIB_DIR="$TMPDIR/config-lib-test"
+mkdir -p "$CONFIG_LIB_DIR"
+CONFIG_LIB_REAL="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/config-materialize.sh"
+
+if [ -f "$CONFIG_LIB_REAL" ]; then
+    CFG_IMMUTABLE="$TMPDIR/cfg-immutable"; mkdir -p "$CFG_IMMUTABLE"
+    echo "# platform test content" > "$CFG_IMMUTABLE/platform.cfg"
+    sha=$(sha256sum "$CFG_IMMUTABLE/platform.cfg" | cut -d' ' -f1)
+    generation=$(printf 'platform.cfg:%s\n' "$sha" | sha256sum | cut -d' ' -f1)
+    cat > "$CFG_IMMUTABLE/.manifest.json" <<EOF
+{"schema_version": 1, "generation": "$generation", "build_date": "test", "files": {"platform.cfg": "$sha"}}
+EOF
+
+    CFG_ROOT="$TMPDIR/cfg_recover_root"; mkdir -p "$CFG_ROOT"
+    # printer.cfg and macros must never be touched by `config` recovery -
+    # planted here to prove it.
+    mkdir -p "$CFG_ROOT/printer_data/config/macros"
+    echo "printer.cfg content" > "$CFG_ROOT/printer_data/config/printer.cfg"
+    echo "[gcode_macro USER]" > "$CFG_ROOT/printer_data/config/macros/user.cfg"
+    before_sum=$(sha256sum "$CFG_ROOT/printer_data/config/printer.cfg" "$CFG_ROOT/printer_data/config/macros/user.cfg" | sort)
+
+    config_output=$(NEBULAOS_ROOT="$CFG_ROOT" \
+        NEBULAOS_KLIPPER_CFG_DIR="$CFG_IMMUTABLE" \
+        CONFIG_MATERIALIZE_LIB="$CONFIG_LIB_REAL" \
+        "$CLI_SCRIPT" config 2>&1) || true
+
+    if [ -f "$CFG_ROOT/printer_data/config/nebulaos/platform.cfg" ]; then
+        pass "'config' recovery materializes the managed tree"
+    else
+        fail "'config' recovery did not materialize anything ($config_output)"
+    fi
+
+    materialized_content=$(cat "$CFG_ROOT/printer_data/config/nebulaos/platform.cfg" 2>/dev/null)
+    [ "$materialized_content" = "# platform test content" ] && \
+        pass "'config' recovery's materialized content matches the immutable source" || \
+        fail "'config' recovery's materialized content is wrong ($materialized_content)"
+
+    after_sum=$(sha256sum "$CFG_ROOT/printer_data/config/printer.cfg" "$CFG_ROOT/printer_data/config/macros/user.cfg" | sort)
+    [ "$before_sum" = "$after_sum" ] && \
+        pass "'config' recovery never touches printer.cfg or macros/" || \
+        fail "'config' recovery modified printer.cfg or macros/ - it must only ever touch nebulaos/"
+
+    # A second invocation with a NON-existent manifest must refuse
+    # cleanly and leave the already-materialized tree untouched.
+    before_second=$(find "$CFG_ROOT/printer_data/config/nebulaos" -type f -exec sha256sum {} \; | sort)
+    broken_immutable="$TMPDIR/cfg-immutable-broken"; mkdir -p "$broken_immutable"
+    NEBULAOS_ROOT="$CFG_ROOT" NEBULAOS_KLIPPER_CFG_DIR="$broken_immutable" \
+        CONFIG_MATERIALIZE_LIB="$CONFIG_LIB_REAL" \
+        "$CLI_SCRIPT" config >/dev/null 2>&1
+    broken_rc=$?
+    after_second=$(find "$CFG_ROOT/printer_data/config/nebulaos" -type f -exec sha256sum {} \; | sort)
+    [ "$broken_rc" -ne 0 ] && pass "'config' recovery exits non-zero when the immutable source has no manifest" \
+        || fail "'config' recovery did not report failure for a missing manifest"
+    [ "$before_second" = "$after_second" ] && pass "'config' recovery leaves the existing managed tree untouched on refusal" \
+        || fail "'config' recovery modified the managed tree despite refusing"
+else
+    fail "config-materialize.sh library not found - cannot test 'config' recovery end to end"
+fi
+
+if CONFIG_MATERIALIZE_LIB="$TMPDIR/does-not-exist.sh" "$CLI_SCRIPT" config >/dev/null 2>&1; then
+    fail "'config' recovery succeeded despite a missing materialization library"
+else
+    pass "'config' recovery fails cleanly when the materialization library is missing"
+fi
+
 echo "--- Error handling ---"
 
 if "$CLI_SCRIPT" bogus 2>&1 | grep -q 'unknown command'; then
