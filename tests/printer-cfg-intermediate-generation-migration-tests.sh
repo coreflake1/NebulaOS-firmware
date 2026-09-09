@@ -258,6 +258,97 @@ else
 fi
 [ "$(rc_of "$log4")" != "0" ] && pass "case 4: migrate_printer_cfg reports failure" || fail "case 4: migrate_printer_cfg reported success despite unrecognized extra content"
 
+# --- Case 5 (Phase 2 final live convergence mission, 2026-09-09): a device
+#     whose OWN trailing content already carries a real, full SAVE_CONFIG
+#     autosave block (an already-calibrated printer) - the tracked seed
+#     ALSO ships its own placeholder SAVE_CONFIG block (added for virgin
+#     devices per docs/NEBULAOS_CALIBRATION_CONFIG_OWNERSHIP.md), so a
+#     naive concatenation puts two "#*# <----SAVE_CONFIG---->" markers in
+#     one file. Reproduced live: Klipper's autosave parser only honors the
+#     FIRST such marker and, on finding non-"#*#" trailing content (this
+#     project's own [z_compensate]/[resonance_tester] sections) before a
+#     second marker, silently discards the WHOLE autosave block as
+#     "modifications after header" - the real device's genuine BLTouch
+#     z_offset, PID, load-cell, and input-shaper calibration, gone, no
+#     error logged anywhere Klipper's own startup output would surface it
+#     as a hard failure. Migration must instead omit the seed's own
+#     placeholder in this case, so exactly one (the real) block survives.
+
+REAL_AUTOSAVE_TRAILER='
+# Your own additional includes/macros go below this line.
+
+[z_compensate]
+tri_min_hold: 1400
+tri_max_hold: 2000
+
+[resonance_tester]
+max_freq: 60
+
+#*# <---------------------- SAVE_CONFIG ---------------------->
+#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
+#*#
+#*# [bltouch]
+#*# z_offset = 1.755
+#*#
+#*# [nebulaos_z_offset_probe]
+#*# counts_per_gram = 85.72084
+#*# reference_tare_counts = -249399
+#*#
+#*# [extruder]
+#*# control = pid
+#*# pid_kp = 24.146
+#*# pid_ki = 2.091
+#*# pid_kd = 69.723
+#*# rotation_distance = 7.530
+#*#
+#*# [heater_bed]
+#*# control = pid
+#*# pid_kp = 64.358
+#*# pid_ki = 0.689
+#*# pid_kd = 1503.566
+#*#
+#*# [input_shaper]
+#*# shaper_type_x = mzv
+#*# shaper_freq_x = 58.0
+#*# shaper_type_y = mzv
+#*# shaper_freq_y = 37.6
+'
+
+t5="$WORK/case5"; mkdir -p "$t5"; f5="$t5/printer.cfg"
+{
+	printf '%s' "$INTERMEDIATE_GEN_HEADER"
+	printf '%s' "$INTERMEDIATE_GEN_MIDDLE"
+	printf '%s' "$REAL_AUTOSAVE_TRAILER"
+} > "$f5"
+
+log5="$WORK/log5"
+run_fn "$t5" "$WORK/system5" "$log5"
+
+[ "$(rc_of "$log5")" = "0" ] && pass "case 5: reports success" || fail "case 5: reported failure ($(cat "$log5"))"
+
+marker_count=$(grep -cxF '#*# <---------------------- SAVE_CONFIG ---------------------->' "$f5")
+[ "$marker_count" = "1" ] && pass "case 5: migrated file contains exactly one SAVE_CONFIG marker" \
+	|| fail "case 5: migrated file contains $marker_count SAVE_CONFIG markers (Klipper's autosave parser only honors the first and discards the rest as corrupted)"
+
+if grep -qF '#*# z_offset = 1.755' "$f5" \
+	&& grep -qF '#*# counts_per_gram = 85.72084' "$f5" \
+	&& grep -qF '#*# shaper_freq_x = 58.0' "$f5"; then
+	pass "case 5: the device's own real calibration data survives the migration"
+else
+	fail "case 5: the device's own real calibration data was lost"
+fi
+
+if grep -qF '#*# z_offset = 0.000' "$f5" || grep -qF '#*# pid_kp = 20.584' "$f5"; then
+	fail "case 5: the seed's own placeholder factory-default values leaked into the migrated file alongside the real ones"
+else
+	pass "case 5: the seed's own placeholder factory-default values are not present"
+fi
+
+sum5_a=$(md5sum "$f5" | cut -d' ' -f1)
+run_fn "$t5" "$WORK/system5b" "$WORK/log5b"
+sum5_b=$(md5sum "$f5" | cut -d' ' -f1)
+[ "$sum5_a" = "$sum5_b" ] && pass "case 5: second run is a true no-op" || fail "case 5: second run modified the file further"
+
 echo ""
 echo "printer-cfg-intermediate-generation-migration-tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

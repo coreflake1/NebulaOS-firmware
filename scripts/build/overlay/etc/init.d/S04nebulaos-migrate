@@ -797,9 +797,47 @@ migrate_printer_cfg() {
 	fi
 
 	tmp="$f.migrate-tmp.$$"
-	cp -a "$new_seed" "$tmp"
+	# The seed ships its own placeholder SAVE_CONFIG autosave block (see
+	# docs/NEBULAOS_CALIBRATION_CONFIG_OWNERSHIP.md and the marker comment
+	# in the seed itself) so a genuinely virgin device has one to start
+	# from. A device migrated here, though, almost always already has its
+	# own REAL SAVE_CONFIG block as part of "trailing" (preserved above,
+	# verbatim, from the file being migrated) - concatenating both would
+	# put two "#*# <----SAVE_CONFIG---->" markers in one file. Klipper's
+	# own autosave parser (klippy/configfile.py _find_autosave_data) only
+	# ever honors the FIRST such marker via data.find(); it then treats
+	# any non-"#*#"-prefixed line found before reaching a second marker
+	# (here, this project's own [z_compensate]/[resonance_tester] trailing
+	# sections, which sit BETWEEN the two blocks) as "modifications after
+	# header" and silently discards the ENTIRE autosave block - real,
+	# hardware-calibrated data (BLTouch z_offset, PID, load-cell
+	# calibration, input shaper) included, with no error, just a warning.
+	# Reproduced live (Phase 2 final live convergence mission, 2026-09-09):
+	# an already-calibrated device migrated straight through with two
+	# markers in the output. Fix: when trailing already contains a real
+	# marker, drop the seed's own placeholder block (and the explanatory
+	# comment introducing it) entirely, keeping only the seed's includes/
+	# header - so exactly one marker, the device's own real one, survives.
+	if grep -qxF '#*# <---------------------- SAVE_CONFIG ---------------------->' "$trailing"; then
+		awk '
+			/^# NEBULAOS_SEED_PLACEHOLDER_AUTOSAVE_BLOCK_BEGIN/ { exit }
+			{ print }
+		' "$new_seed" > "$tmp"
+	else
+		cp -a "$new_seed" "$tmp"
+	fi
 	cat "$trailing" >> "$tmp"
 	rm -f "$trailing"
+
+	# Final safety net: whatever path built $tmp above, never write a file
+	# with more than one real SAVE_CONFIG marker - Klipper would silently
+	# discard all autosave data in that case (see the comment above).
+	save_config_marker_count=$(grep -cxF '#*# <---------------------- SAVE_CONFIG ---------------------->' "$tmp")
+	if [ "$save_config_marker_count" -gt 1 ]; then
+		log "ERROR: migrated printer.cfg would contain more than one SAVE_CONFIG autosave block ($save_config_marker_count found) - refusing to write it (backup at $backup, original untouched)"
+		rm -f "$tmp"
+		return 1
+	fi
 
 	if ! grep -qxF '[include /etc/nebulaos/klipper/platform.cfg]' "$tmp"; then
 		log "ERROR: migrated printer.cfg failed a basic sanity check - leaving the original untouched (backup at $backup)"
