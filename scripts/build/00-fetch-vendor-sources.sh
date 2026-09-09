@@ -122,7 +122,7 @@ mkdir -p "$VENDOR"
 cd "$VENDOR"
 
 clone_pinned() {
-	name="$1"; url="$2"; ref="$3"; extra="$4"; shallow_branch="${5:-}"
+	name="$1"; url="$2"; ref="$3"; extra="$4"; shallow_branch="${5:-}"; local_branch="${6:-}"
 	if [ -d "$name/.git" ]; then
 		echo "== $name already present, verifying pin (not re-cloning) =="
 	elif [ -n "$shallow_branch" ]; then
@@ -154,7 +154,35 @@ clone_pinned() {
 		echo "== cloning $name @ $ref =="
 		git clone $extra "$url" "$name"
 		git -C "$name" fetch origin "$ref" 2>/dev/null || true
-		git -C "$name" checkout "$ref"
+		if [ -n "$local_branch" ]; then
+			# `git checkout <sha>` ALWAYS produces a detached HEAD, even
+			# when that sha is exactly the current branch tip - verified
+			# empirically, not assumed (Phase 2 final software closure
+			# mission, 2026-09-09). A plain `git clone` (this branch,
+			# unlike the shallow branch above, is used when full real
+			# history is wanted - see the nebulaos-klipper-extensions call
+			# site) lands attached to whatever branch GitHub's default-
+			# branch resolution picks; the following bare `checkout "$ref"`
+			# then unconditionally detaches it, regardless of `$extra`
+			# having requested a specific branch. That detached seed
+			# archive would fail 06-verify.sh's check_seed_archive()
+			# `symbolic-ref --short HEAD` check on a genuinely fresh
+			# clone (vendor/ is gitignored, so every "fresh clone of
+			# firmware HEAD" build hits this path) - previously masked
+			# only because a persistent, never-freshly-cloned local
+			# vendor/ directory happened to already be attached to the
+			# right branch from an earlier checkout. `checkout -B` here
+			# creates/resets $local_branch to point at $ref while
+			# staying attached to it, then wires branch.<name>.remote/
+			# merge the same way the shallow path above does, so
+			# make_seed_archive()'s verbatim .git archive is correct by
+			# construction rather than by accident.
+			git -C "$name" checkout -B "$local_branch" "$ref"
+			git -C "$name" config "branch.$local_branch.remote" origin
+			git -C "$name" config "branch.$local_branch.merge" "refs/heads/$local_branch"
+		else
+			git -C "$name" checkout "$ref"
+		fi
 	fi
 	# Pin enforcement (2026-07-31, NEBULAOS_CAMERA_USB_RT_SOURCE_ANALYSIS.md's
 	# vendor-pin audit): previously this function only checked out the pinned
@@ -289,7 +317,18 @@ clone_pinned klipper "$KLIPPER_REPO" "$KLIPPER_PIN" "" "$KLIPPER_BRANCH"
 # headers (see that repo's VENDORED.md). Small - it ships about thirty
 # files and none of Klipper's history, which matters on a device that has
 # to extract its seed archive from tar on a 208MB-RAM board.
-clone_pinned nebulaos-klipper-extensions "$KLIPPER_EXTENSIONS_REPO" "$KLIPPER_EXTENSIONS_PIN"
+#
+# Explicit local_branch=$KLIPPER_EXTENSIONS_BRANCH (Phase 2 final software
+# closure mission, 2026-09-09): this clone previously relied on GitHub's
+# own default-branch resolution landing on the same branch
+# KLIPPER_EXTENSIONS_BRANCH names, and on the trailing checkout-by-SHA
+# happening to leave that branch attached - true only by accident (see
+# clone_pinned()'s own comment on its local_branch parameter for exactly
+# why a bare `checkout <sha>` always detaches regardless). Passing the
+# branch name explicitly makes the seed archive's local branch config
+# correct by construction on every fresh clone, not merely on a persisted
+# vendor/ checkout that happened to get it right earlier.
+clone_pinned nebulaos-klipper-extensions "$KLIPPER_EXTENSIONS_REPO" "$KLIPPER_EXTENSIONS_PIN" "" "" "$KLIPPER_EXTENSIONS_BRANCH"
 
 # Official Moonraker - not a fork, no reason to deviate.
 clone_pinned moonraker "$MOONRAKER_REPO" "$MOONRAKER_PIN"

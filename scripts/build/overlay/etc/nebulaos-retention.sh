@@ -14,10 +14,13 @@
 # not block boot - matches SimpleAF's own S45cleanup convention). Can also
 # be invoked manually with --dry-run to preview without deleting anything.
 
-NEBULAOS_ROOT=/usr/data/nebulaos
-LOG="$NEBULAOS_ROOT/maintenance/retention.log"
-LOCKDIR="$NEBULAOS_ROOT/updates/locks"
-SHARED_GCODES=/usr/data/printer_data/gcodes
+# Overridable for tests, same convention as S04nebulaos-migrate/flash-
+# spare-slot.sh (Phase 2 final software closure mission, 2026-09-09 -
+# needed the first time this script grew a real offline test suite).
+NEBULAOS_ROOT="${NEBULAOS_ROOT:-/usr/data/nebulaos}"
+LOG="${LOG:-$NEBULAOS_ROOT/maintenance/retention.log}"
+LOCKDIR="${LOCKDIR:-$NEBULAOS_ROOT/updates/locks}"
+SHARED_GCODES="${SHARED_GCODES:-/usr/data/printer_data/gcodes}"
 
 # Free-space floors on /usr/data, in MB - adapted from SimpleAF's single
 # 1000MB threshold (docs/NEBULAOS_RETENTION_POLICY.md sec 1/2.3), split
@@ -185,6 +188,132 @@ clean_old_config_backups() {
 	done
 }
 
+# prune_backup_dir DIR KEEP REASON
+#
+# Same policy as clean_old_config_backups()/clean_obsolete_versions() above,
+# factored out so migration-backups' several distinct backup shapes (see
+# clean_migration_backups() below) can all share it: entries older than 7
+# days are candidates, newest-first; the newest KEEP of those candidates
+# are still protected, so there is always at least KEEP real backups to
+# fall back to regardless of age. Never touches anything within the last 7
+# days at all, no matter how many entries exist.
+prune_backup_dir() {
+	dir="$1"; keep="$2"; reason="$3"
+	[ -d "$dir" ] || return 0
+	find "$dir" -mindepth 1 -maxdepth 1 -mtime +7 2>/dev/null | sort -r | tail -n "+$((keep + 1))" | \
+		while read -r f; do
+			path_is_namespace_safe "$f" && delete "$f" "$reason"
+		done
+}
+
+# Phase 2 final software closure mission, 2026-09-09: migration-backups had
+# no pruning at all - a real device accumulated ~1.6GB there (95% of a
+# 5.9GB /usr/data partition, 260MB free), almost entirely from
+# reseed_git_app()'s own per-boot BACKUP_DIR="$BACKUP_ROOT/<timestamp>"
+# full klipper+moonraker+nebulaos-klipper-extensions checkout backups
+# (S04nebulaos-migrate) - up to several hundred MB each, one per migration
+# run, forever. Extends this existing script rather than adding a second
+# mechanism, per this project's own standing "one cleanup path" rule.
+#
+# Three distinct shapes under migration-backups/, all handled the same way
+# (age +7 days, keep newest 2 - same KEEP as clean_obsolete_versions()'s
+# failed-* retention above, for consistency):
+#   1. Timestamp-named directories (BACKUP_ROOT/<ISO8601>/) - each one IS a
+#      single backup event covering whichever of klipper/moonraker/
+#      extensions were reseeded that run; pruned as one atomic unit by its
+#      own name.
+#   2. Named-category subdirectories (printer-cfg-migration/,
+#      printer-cfg-migration-refused/, moonraker-conf-migration/,
+#      moonraker-conf-migration-refused/, and any future migration adds) -
+#      each one holds individual timestamped backup FILES; pruned
+#      per-file, per-category, independently.
+#   3. Loose files sitting directly at migration-backups/ root (e.g.
+#      migrate_config_ownership()'s own printer.cfg.pre-config-ownership-
+#      migration.<ts> - an existing minor inconsistency in where that one
+#      migration writes its backup, not something this pass changes) -
+#      pruned individually, as their own single-file "category".
+#
+# Never touches active config, printer.cfg, current SAVE_CONFIG, PLR
+# state, MCU state, user macros, or anything else outside
+# $NEBULAOS_ROOT/system/migration-backups itself - this function's only
+# input is that one directory tree.
+MIGRATION_BACKUP_KEEP=2
+
+clean_migration_backups() {
+	root="$NEBULAOS_ROOT/system/migration-backups"
+	[ -d "$root" ] || return 0
+
+	find "$root" -mindepth 1 -maxdepth 1 2>/dev/null | while read -r entry; do
+		base=$(basename "$entry")
+		if [ -d "$entry" ]; then
+			case "$base" in
+				[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+					# Shape 1: the directory itself is one timestamped
+					# backup event - handled by the per-entry mtime+count
+					# pass over $root below, not here (a per-directory
+					# recursive prune here would instead delete individual
+					# component subdirectories out of a single backup
+					# event, which is never what we want - klipper/
+					# moonraker/extensions from the SAME event must be
+					# pruned or kept together).
+					;;
+				*)
+					# Shape 2: a named category - prune its own files
+					# independently.
+					prune_backup_dir "$entry" "$MIGRATION_BACKUP_KEEP" "old-migration-backup-$base"
+					;;
+			esac
+		fi
+	done
+
+	# Shape 1 (timestamp directories) and shape 3 (loose root files) are
+	# both direct children of $root with no further category grouping -
+	# prune them together as one pool, newest N protected regardless of
+	# whether that "newest" happens to be a directory or a loose file.
+	# Named-category subdirectories (shape 2) are excluded here because
+	# they were already handled, per-category, above - counting them
+	# against the shape-1/3 pool would let an old, low-value loose file
+	# use up a "keep" slot that should protect a real per-boot backup, or
+	# vice versa.
+	tmp_list=$(mktemp "${TMPDIR:-/tmp}/migration-backup-prune.XXXXXX" 2>/dev/null) || return 0
+	find "$root" -mindepth 1 -maxdepth 1 -mtime +7 2>/dev/null | while read -r entry; do
+		base=$(basename "$entry")
+		case "$base" in
+			[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) echo "$entry" ;;
+			printer-cfg-migration|printer-cfg-migration-refused|moonraker-conf-migration|moonraker-conf-migration-refused) ;;
+			*) [ -f "$entry" ] && echo "$entry" ;;
+		esac
+	done | sort -r > "$tmp_list"
+	tail -n "+$((MIGRATION_BACKUP_KEEP + 1))" "$tmp_list" | while read -r f; do
+		path_is_namespace_safe "$f" && delete "$f" "old-migration-backup"
+	done
+	rm -f "$tmp_list"
+}
+
+# A separate top-level directory from migration-backups/ (see
+# mainsail_backup_namespace() in nebulaos-recover) - kept as its own
+# function, not folded into clean_migration_backups() above, specifically
+# so it is never accidentally gated behind migration-backups/ existing;
+# the two are independent and either can exist without the other.
+clean_mainsail_namespace_backups() {
+	prune_backup_dir "$NEBULAOS_ROOT/system/mainsail-namespace-backups" "$MIGRATION_BACKUP_KEEP" "old-mainsail-namespace-backup"
+}
+
+# Historical stray backup files this project's own earlier tooling left
+# directly at $NEBULAOS_ROOT (not under system/migration-backups at all) -
+# mechanically recognized by the exact "printer.cfg.pre-*.bak" naming
+# convention every real NebulaOS backup mechanism already uses elsewhere
+# in this file, never a broad "*.bak" glob (which could just as easily
+# match something a user or a different tool created). Age+count floor
+# applies here too - never deletes the single newest one, never touches
+# anything less than 7 days old.
+clean_stray_bak_files() {
+	find "$NEBULAOS_ROOT" -mindepth 1 -maxdepth 1 -type f -name 'printer.cfg.pre-*.bak' -mtime +7 2>/dev/null | \
+		sort -r | tail -n +2 | while read -r f; do
+		path_is_namespace_safe "$f" && delete "$f" "stray-legacy-config-backup"
+	done
+}
+
 clean_abandoned_staging() {
 	find "$NEBULAOS_ROOT/updates/staging" -mindepth 1 -maxdepth 1 -mtime +1 2>/dev/null | while read -r f; do
 		name=$(basename "$f")
@@ -281,7 +410,7 @@ emergency_gcode_cleanup() {
 
 start() {
 	mkdir -p "$NEBULAOS_ROOT/maintenance"
-	wait_for_clock_sync
+	[ -n "${NEBULAOS_RETENTION_SKIP_CLOCK_WAIT:-}" ] || wait_for_clock_sync
 
 	if update_in_progress; then
 		log "update transaction in progress - restricting to backup/log-only rotation this run"
@@ -295,6 +424,9 @@ start() {
 	clean_old_config_backups
 	clean_abandoned_staging
 	clean_obsolete_versions
+	clean_migration_backups
+	clean_mainsail_namespace_backups
+	clean_stray_bak_files
 
 	free=$(free_mb)
 	if [ -z "$free" ]; then
@@ -311,4 +443,11 @@ start() {
 	fi
 }
 
-start
+# Sourcing seam for offline tests (same convention as S04nebulaos-migrate's
+# S04NEBULAOS_MIGRATE_NO_AUTORUN) - lets a test `. ` this file to reach its
+# individual functions (clean_migration_backups, prune_backup_dir, etc.)
+# with fake NEBULAOS_ROOT/LOG paths, without start() running immediately
+# and without waiting on wait_for_clock_sync's real clock check.
+if [ -z "${NEBULAOS_RETENTION_NO_AUTORUN:-}" ]; then
+	start
+fi

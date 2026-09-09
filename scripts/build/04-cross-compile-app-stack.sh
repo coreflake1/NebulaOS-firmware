@@ -890,7 +890,7 @@ cat > "$OVERLAY/opt/nebulaos-seeds/seed-manifest.json" <<EOF
       "format": "git_repo_archive_real_history",
       "file": "nebulaos-klipper-extensions.tar.gz",
       "repository": "$extensions_origin",
-      "branch": "main",
+      "branch": "$KLIPPER_EXTENSIONS_BRANCH",
       "seed_commit": "$extensions_seed_commit",
       "is_shallow": $extensions_is_shallow,
       "sha256": "$(sha256sum "$OVERLAY/opt/nebulaos-seeds/nebulaos-klipper-extensions.tar.gz" | cut -d' ' -f1)",
