@@ -947,9 +947,10 @@ echo "=== printer_data config factory seed ==="
 # A genuinely wiped printer_data/config leaves Klipper and Moonraker
 # crash-looping - the immutable seed at /opt/nebulaos-seeds/printer_data-
 # config/ is what S02nebulaos-namespace restores from. Phase 2: seed
-# contains only printer.cfg and moonraker.conf (plus songs.conf); all
-# workflow macros live in /etc/nebulaos/klipper/*.cfg (image-owned,
-# included via absolute paths).
+# contains printer.cfg, moonraker.conf, songs.conf, and
+# GuppyScreen/scripts/static_ip.py (see below); all workflow macros live
+# in /etc/nebulaos/klipper/*.cfg (image-owned, included via absolute
+# paths).
 check /opt/nebulaos-seeds/printer_data-config/printer.cfg
 check /opt/nebulaos-seeds/printer_data-config/moonraker.conf
 # These files belonged to the old SimpleAF/GuppyScreen architecture and
@@ -959,6 +960,18 @@ check_absent /opt/nebulaos-seeds/printer_data-config/camera-quality.cfg
 check_absent /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/set_camera_quality.py
 check_absent /opt/nebulaos-seeds/printer_data-config/GuppyScreen/guppy_cmd.cfg
 check_absent /opt/nebulaos-seeds/printer_data-config/simpleaf/homing.cfg
+# Clean Mainsail config root mission (2026-09-10): static_ip.py is the one
+# exception to "the old GuppyScreen deps are gone" - the compiled
+# /opt/guppyscreen/guppyscreen binary has
+# /opt/printer_data/config/GuppyScreen/scripts/static_ip.py hardcoded as a
+# literal path (confirmed via `strings` against a real device's binary),
+# so a fresh device built without this file would silently ship a broken
+# touchscreen static-IP feature. The 2026-08 "remove SimpleAF/GuppyScreen
+# deps" refactor deleted it along with the genuinely dead scripts in the
+# same directory without checking for this dependency. Restored
+# byte-identical from a live, already-qualified device (sha256
+# c131017c03b61e225a46f1cd3b70a0a5f602c6fe994bc761dd9f58bd23bc2b20).
+check /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/static_ip.py
 
 rm -rf /tmp/printerdata-check
 mkdir -p /tmp/printerdata-check

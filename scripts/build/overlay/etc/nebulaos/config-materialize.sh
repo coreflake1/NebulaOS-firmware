@@ -93,6 +93,12 @@ materialize_config_tree() {
 	tmp="$PRINTER_DATA_CONFIG/nebulaos.materialize-tmp.$$"
 	rm -rf "$tmp"
 	mkdir -p "$tmp" || { log "ERROR: materialize_config_tree: could not create staging dir $tmp"; return 1; }
+	# mkdir's resulting mode depends on the caller's umask (boot-time init
+	# contexts may run under a restrictive umask), which would otherwise
+	# leave the promoted $dest directory inconsistent with its siblings in
+	# $PRINTER_DATA_CONFIG. Force the standard, Moonraker-file-API-readable
+	# mode regardless of caller umask.
+	chmod 0755 "$tmp" || { log "ERROR: materialize_config_tree: could not set standard permissions on staging dir $tmp"; rm -rf "$tmp"; return 1; }
 
 	for f in $cfg_files; do
 		if ! cp -a "$NEBULAOS_KLIPPER_CFG_DIR/$f" "$tmp/$f"; then

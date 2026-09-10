@@ -314,6 +314,32 @@ clean_stray_bak_files() {
 	done
 }
 
+# Clean Mainsail config root mission (2026-09-10): Klipper's own SAVE_CONFIG
+# mechanism writes a fresh printer-YYYYMMDD_HHMMSS.cfg backup directly into
+# printer_data/config/ (upstream Klipper behavior, printer.py's
+# save_config() - not something this project patches or controls) every
+# time a calibration macro runs SAVE_CONFIG. Left unmanaged, this directory
+# accumulates one small text file per calibration run forever - unlike
+# clean_old_config_backups()/clean_migration_backups() above, these are not
+# duplicated debris this project's own tooling created, they are Klipper's
+# own real, user-meaningful configuration history (the same content
+# 06-verify.sh/config-materialize.sh treat as first-class elsewhere), so a
+# more generous KEEP than the 2-copy floor used for multi-hundred-MB
+# migration backups is used here. Name-pattern-filtered (not a whole-
+# directory prune like prune_backup_dir()) because printer_data/config also
+# holds the live printer.cfg, nebulaos/, macros/, etc. that must never be
+# touched by retention.
+SAVE_CONFIG_BACKUP_KEEP=10
+
+clean_old_save_config_backups() {
+	dir="$NEBULAOS_ROOT/printer_data/config"
+	[ -d "$dir" ] || return 0
+	find "$dir" -maxdepth 1 -type f -name 'printer-[0-9]*_[0-9]*.cfg' -mtime +7 2>/dev/null | \
+		sort -r | tail -n "+$((SAVE_CONFIG_BACKUP_KEEP + 1))" | while read -r f; do
+		path_is_namespace_safe "$f" && delete "$f" "old-save-config-backup"
+	done
+}
+
 clean_abandoned_staging() {
 	find "$NEBULAOS_ROOT/updates/staging" -mindepth 1 -maxdepth 1 -mtime +1 2>/dev/null | while read -r f; do
 		name=$(basename "$f")
@@ -422,6 +448,7 @@ start() {
 	rotate_platform_logs
 	clean_rotated_logs
 	clean_old_config_backups
+	clean_old_save_config_backups
 	clean_abandoned_staging
 	clean_obsolete_versions
 	clean_migration_backups

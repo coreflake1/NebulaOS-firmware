@@ -100,6 +100,36 @@ recorded_gen1=$(grep -o '"generation"[^,]*' "$t1/system/config-generation.json" 
 [ "$recorded_gen1" = "$gen1" ] && pass "test 1: config-generation.json records the correct generation" \
 	|| fail "test 1: config-generation.json has wrong/missing generation ($recorded_gen1 vs $gen1)"
 
+mode1=$(stat -c '%a' "$t1/printer_data/config/nebulaos" 2>/dev/null)
+[ "$mode1" = "755" ] && pass "test 1: promoted nebulaos/ directory has standard 0755 permissions" \
+	|| fail "test 1: promoted nebulaos/ directory has mode $mode1, expected 755"
+
+# =========================================================================
+# Test 1b: Clean Mainsail config root mission (2026-09-10) - a real device
+# was found with nebulaos/ materialized as 0700, unlike every sibling
+# directory in printer_data/config/ (all 0755). Root cause: mkdir -p's
+# resulting mode depends on the caller's umask, and boot-time init
+# contexts (S04nebulaos-migrate) can run under a restrictive one. Proves
+# the fix holds even under the exact umask that produced the live bug.
+# =========================================================================
+
+t1b="$WORK/t1b"
+src1b="$WORK/t1b-immutable"
+make_immutable_source "$src1b" "v1" >/dev/null
+result1b=$(
+	env NEBULAOS_KLIPPER_CFG_DIR="$src1b" \
+	    PRINTER_DATA_CONFIG="$t1b/printer_data/config" \
+	    SYSTEM="$t1b/system" \
+	    BACKUP_ROOT="$t1b/system/migration-backups" \
+	    sh -c ". '$LIB'; log() { :; }; umask 077; materialize_config_tree boot-materialization; echo RC=\$?"
+)
+rc1b=$(echo "$result1b" | grep '^RC=' | sed 's/RC=//')
+[ "$rc1b" = "0" ] && pass "test 1b: materialize_config_tree succeeds under a restrictive (077) caller umask" \
+	|| fail "test 1b: materialize_config_tree failed under umask 077 ($result1b)"
+mode1b=$(stat -c '%a' "$t1b/printer_data/config/nebulaos" 2>/dev/null)
+[ "$mode1b" = "755" ] && pass "test 1b: nebulaos/ is still 0755 even when the caller's umask was 077" \
+	|| fail "test 1b: nebulaos/ has mode $mode1b under umask 077, expected 755 (this is the exact live bug)"
+
 # =========================================================================
 # Test 2: same generation on next boot - no materialization needed
 # =========================================================================
