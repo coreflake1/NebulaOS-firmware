@@ -1,0 +1,28 @@
+{
+  "$comment": [
+    "NebulaOS launch sentinel - MACHINE-LOCAL, NOT COMMITTED.",
+    "Reproduced from NebulaOS-firmware/tools/workspace-control/sentinel/settings.local.json",
+    "by tools/sync-workspace-control.sh, and git-excluded via .git/info/exclude so it",
+    "never dirties this repository.",
+    "",
+    "Why it exists: Claude loads .claude/settings.json - hooks, permissions, subagents -",
+    "from the PRIMARY project directory. Starting Claude inside this repository instead",
+    "of the workspace root would silently run with none of the NebulaOS guardrails.",
+    "",
+    "This sentinel does not duplicate the root rules. It denies source modification and",
+    "points back to the canonical root setup at:",
+    "  /home/tim/Documents/workspace/NebulaOS",
+    "Reading for diagnosis remains possible."
+  ],
+
+  "permissions": {
+    "deny": [
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*/**)"
+    ]
+  }
+}

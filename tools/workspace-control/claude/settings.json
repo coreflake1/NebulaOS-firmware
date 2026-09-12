@@ -1,0 +1,79 @@
+{
+  "$comment": [
+    "NebulaOS workspace control - project settings. DERIVED STATE.",
+    "Canonical source: NebulaOS-firmware/tools/workspace-control/claude/settings.json",
+    "Do not hand-edit the installed copy at .claude/settings.json; the identity gate",
+    "detects drift. Edit canonical, then run tools/sync-workspace-control.sh --apply.",
+    "Archive isolation is defence in depth: permission deny rules (Read/Edit/Bash/cd)",
+    "plus an OS-level sandbox filesystem denyRead. Subagents inherit all of it."
+  ],
+
+  "autoMemoryEnabled": false,
+
+  "permissions": {
+    "deny": [
+      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*)",
+      "Edit(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Write(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Glob(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Grep(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Bash(cd:*NebulaOS-archive*)",
+      "SlashCommand(/cd:*NebulaOS-archive*)"
+    ],
+    "additionalDirectories": []
+  },
+
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": false,
+    "filesystem": {
+      "disabled": false,
+      "denyRead": [
+        "/home/tim/Documents/workspace/NebulaOS-archive-2026-09-12",
+        "/home/tim/Documents/workspace/NebulaOS-archive-2026-09-12/**"
+      ],
+      "denyWrite": [
+        "/home/tim/Documents/workspace/NebulaOS-archive-2026-09-12",
+        "/home/tim/Documents/workspace/NebulaOS-archive-2026-09-12/**"
+      ]
+    }
+  },
+
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh",
+            "timeout": 120
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start.sh --compact",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/pre-tool-use-identity.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

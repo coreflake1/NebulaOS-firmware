@@ -1,0 +1,29 @@
+# Canonical -> installed mapping for the NebulaOS workspace control layer.
+#
+# Read by BOTH:
+#   scripts/sync-workspace-control.sh   (installs canonical -> root)
+#   scripts/verify-workspace-identity.sh (detects drift root vs canonical)
+#
+# Having one manifest is the point: sync and drift-detection can never
+# disagree about what the root is supposed to contain.
+#
+# Format:  <canonical path, relative to workspace-control/>  <installed path, relative to workspace root>  <mode>
+#
+# Every installed path below is DERIVED STATE. It is intentionally NOT
+# committed anywhere: the workspace root is not a git repository, and these
+# files are reproduced from this tracked canonical source by the sync script.
+
+authority/AGENTS.md                     AGENTS.md                               644
+authority/CLAUDE.md                     CLAUDE.md                               644
+authority/WORKSPACE_RULES.md            WORKSPACE_RULES.md                      644
+
+claude/settings.json                    .claude/settings.json                   644
+claude/agents/nebula-architect.md       .claude/agents/nebula-architect.md      644
+claude/agents/nebula-verifier.md        .claude/agents/nebula-verifier.md       644
+claude/rules/architecture-authority.md  .claude/rules/architecture-authority.md 644
+claude/hooks/session-start.sh           .claude/hooks/session-start.sh          755
+claude/hooks/pre-tool-use-identity.sh   .claude/hooks/pre-tool-use-identity.sh  755
+
+scripts/verify-workspace-identity.sh    tools/verify-workspace-identity.sh      755
+scripts/verify-architecture.sh          tools/verify-architecture.sh            755
+scripts/sync-workspace-control.sh       tools/sync-workspace-control.sh         755
