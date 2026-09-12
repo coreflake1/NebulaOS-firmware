@@ -4,26 +4,40 @@
     "Canonical source: NebulaOS-firmware/tools/workspace-control/claude/settings.json",
     "Do not hand-edit the installed copy at .claude/settings.json; the identity gate",
     "detects drift. Edit canonical, then run tools/sync-workspace-control.sh --apply.",
-    "Archive isolation is defence in depth: permission deny rules (Read/Edit/Bash/cd)",
-    "plus an OS-level sandbox filesystem denyRead. Subagents inherit all of it."
+    "",
+    "Archive isolation is defence in depth:",
+    "  1. Read(...)  deny  - Claude Code applies Read rules to ALL file-reading tools",
+    "                        (Read, Glob, Grep), so separate Glob/Grep rules are",
+    "                        rejected as unmatched and are deliberately absent.",
+    "  2. Edit(...)  deny  - likewise covers ALL file-editing tools (Edit, Write,",
+    "                        NotebookEdit); a separate Write rule is rejected.",
+    "  3. Bash(cd:*) deny  - blocks shell cd into the archive.",
+    "  4. sandbox.filesystem.denyRead/denyWrite - OS-level boundary that also stops",
+    "                        cat/head/python open()/relative paths/symlinks.",
+    "  5. PreToolUse hook  - denies any tool input mentioning NebulaOS-archive and",
+    "                        explains why.",
+    "Subagents inherit all of it; no project subagent is granted an exception.",
+    "",
+    "NOTE: this Claude Code build has no SlashCommand/cd permission tool, so the",
+    "/cd slash command cannot be gated by a permission rule. It is covered instead",
+    "by the empty additionalDirectories (the archive is not a permitted working",
+    "directory) plus layers 4 and 5, which fail regardless of the working directory.",
+    "",
+    "sandbox.autoAllowBashIfSandboxed defaults to TRUE in this build; it is pinned",
+    "false on purpose. The sandbox is an OS filesystem boundary around the archive,",
+    "not a reason to auto-approve shell commands."
   ],
-
   "autoMemoryEnabled": false,
-
   "permissions": {
     "deny": [
-      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
       "Read(//home/tim/Documents/workspace/NebulaOS-archive-*)",
+      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
+      "Edit(//home/tim/Documents/workspace/NebulaOS-archive-*)",
       "Edit(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
-      "Write(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
-      "Glob(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
-      "Grep(//home/tim/Documents/workspace/NebulaOS-archive-*/**)",
-      "Bash(cd:*NebulaOS-archive*)",
-      "SlashCommand(/cd:*NebulaOS-archive*)"
+      "Bash(cd:*NebulaOS-archive*)"
     ],
     "additionalDirectories": []
   },
-
   "sandbox": {
     "enabled": true,
     "autoAllowBashIfSandboxed": false,
@@ -39,7 +53,6 @@
       ]
     }
   },
-
   "hooks": {
     "SessionStart": [
       {
