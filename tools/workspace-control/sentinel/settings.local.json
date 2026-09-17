@@ -11,7 +11,7 @@
     "",
     "This sentinel does not duplicate the root rules. It denies source modification and",
     "points back to the canonical root setup at:",
-    "  /home/tim/Documents/workspace/NebulaOS",
+    "  /home/tim/workspace/NebulaOS",
     "Reading for diagnosis remains possible."
   ],
 
@@ -22,7 +22,7 @@
       "NotebookEdit",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Read(//home/tim/Documents/workspace/NebulaOS-archive-*/**)"
+      "Read(//home/tim/workspace/NebulaOS-archive-*/**)"
     ]
   }
 }

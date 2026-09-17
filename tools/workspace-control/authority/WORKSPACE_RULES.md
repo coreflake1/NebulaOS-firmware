@@ -208,7 +208,7 @@ hook can gate every edit in milliseconds without a network round trip. It never 
 Development sessions must start from the workspace root:
 
 ```
-/home/tim/Documents/workspace/NebulaOS
+/home/tim/workspace/NebulaOS
 ```
 
 Project `.claude/settings.json` — and therefore every hook, permission, and subagent — loads

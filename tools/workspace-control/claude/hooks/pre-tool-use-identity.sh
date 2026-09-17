@@ -23,14 +23,14 @@ INPUT=$(cat 2>/dev/null || true)
 ROOT=${CLAUDE_PROJECT_DIR:-}
 if [ -z "$ROOT" ]; then
   ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd -P) || \
-    deny "NebulaOS guardrail: cannot resolve workspace root. Start Claude from /home/tim/Documents/workspace/NebulaOS."
+    deny "NebulaOS guardrail: cannot resolve workspace root. Start Claude from /home/tim/workspace/NebulaOS."
 fi
 
 # --- launch location -------------------------------------------------------
 # .claude/settings.json (hooks, permissions, subagents) loads from the PRIMARY
 # project directory. If that is one of the five repos rather than the workspace
 # root, the root guardrails are not in force.
-EXPECTED_ROOT=/home/tim/Documents/workspace/NebulaOS
+EXPECTED_ROOT=/home/tim/workspace/NebulaOS
 RROOT=$(readlink -f "$ROOT" 2>/dev/null || echo "$ROOT")
 if [ "$RROOT" != "$EXPECTED_ROOT" ]; then
   deny "NEBULAOS_WORKSPACE_ROOT_VALID=NO
@@ -55,7 +55,7 @@ case "$INPUT" in
   *NebulaOS-archive*)
     deny "NebulaOS guardrail: the archived workspace is out of bounds.
 
-/home/tim/Documents/workspace/NebulaOS-archive-* is preserved evidence, not
+/home/tim/workspace/NebulaOS-archive-* is preserved evidence, not
 authority, and normal sessions must not read it. Historical investigation is a
 separate, explicitly user-requested session - see
 NebulaOS-firmware/tools/workspace-control/historian/README.md."
