@@ -23,16 +23,25 @@ INPUT=$(cat 2>/dev/null || true)
 ROOT=${CLAUDE_PROJECT_DIR:-}
 if [ -z "$ROOT" ]; then
   ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd -P) || \
-    deny "NebulaOS guardrail: cannot resolve workspace root. Start Claude from /home/tim/workspace/NebulaOS."
+    deny "NebulaOS guardrail: cannot resolve workspace root. Start Claude from the NebulaOS workspace root."
 fi
 
 # --- launch location -------------------------------------------------------
 # .claude/settings.json (hooks, permissions, subagents) loads from the PRIMARY
 # project directory. If that is one of the five repos rather than the workspace
 # root, the root guardrails are not in force.
-EXPECTED_ROOT=/home/tim/workspace/NebulaOS
+#
+# The root is identified STRUCTURALLY, never by a hard-coded absolute path: it
+# is the directory holding both the installed identity gate and the tracked
+# canonical control source that gate was installed from. A nested repo has
+# neither, so the check below still catches the launch-location mistake it
+# exists for. Pinning an absolute path here instead would mean that relocating
+# the workspace denies every edit - including the edit that would fix the pin.
 RROOT=$(readlink -f "$ROOT" 2>/dev/null || echo "$ROOT")
-if [ "$RROOT" != "$EXPECTED_ROOT" ]; then
+SELF_ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd -P) || SELF_ROOT=$RROOT
+if [ ! -x "$RROOT/tools/verify-workspace-identity.sh" ] \
+|| [ ! -f "$RROOT/NebulaOS-firmware/tools/workspace-control/MANIFEST" ] \
+|| [ "$RROOT" != "$SELF_ROOT" ]; then
   deny "NEBULAOS_WORKSPACE_ROOT_VALID=NO
 
 Claude's primary project directory is:
@@ -43,10 +52,11 @@ Source modification is blocked because the NebulaOS root guardrails
 load only from the workspace root.
 
 Restart Claude from:
-  $EXPECTED_ROOT
+  $SELF_ROOT
 
 Reading for diagnosis is still permitted."
 fi
+ROOT=$RROOT
 
 # --- archive isolation (Bash route) ----------------------------------------
 # The permission deny rules and the sandbox both cover this; this is the third
