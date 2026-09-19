@@ -161,6 +161,76 @@ GATE=$ROOT/tools/verify-workspace-identity.sh
 OUT=$("$GATE" --hook 2>&1); RC=$?
 if [ "$RC" -ne 0 ]; then
   REASONS=$(printf '%s\n' "$OUT" | grep -E '^\s+FAIL:' | head -12)
+
+  # --- control-layer drift recovery ---------------------------------------
+  # The only exception in this hook, and deliberately a narrow one.
+  #
+  # Without it the guardrail deadlocks. Editing the tracked canonical control
+  # source is the documented way to change this layer; that makes the root
+  # derived copies stale by design; stale copies then deny every Edit, Write
+  # and Bash - including tools/sync-workspace-control.sh, the very command
+  # the deny message below tells you to run. The repair sits inside the blast
+  # radius of the fault, so the layer cannot be maintained at all.
+  #
+  # The exception opens exactly one command, and only when ALL of:
+  #   - every gate failure is control-file drift that the sync repairs. Any
+  #     other failure - repo identity, stale source generation, topology,
+  #     sentinels, a missing canonical MANIFEST - still denies. Source
+  #     identity is never bypassable this way.
+  #   - the caller is the main agent. nebula-architect and nebula-verifier
+  #     are refused here and, independently, by the reviewer guard above.
+  #   - the tool is Bash and the command is a lone invocation of the canonical
+  #     sync: no chaining, no redirection, no substitution, no extra
+  #     arguments. `sync && rm -rf x` is not a sync.
+  #   - the script resolves, through realpath, to the installed copy or the
+  #     tracked canonical copy. Relative spellings resolve against the
+  #     caller's reported cwd and are refused when cwd is unknown, so an
+  #     earlier `cd` cannot aim the exception at some other file.
+  #
+  # The archive and launch-location guards ran earlier and have already
+  # denied, so neither is reachable from here.
+  if printf '%s\n' "$REASONS" | grep -qE '^[[:space:]]+FAIL: control: root files (drifted from canonical|missing):' \
+  && ! printf '%s\n' "$REASONS" | grep -E '^[[:space:]]+FAIL:' \
+       | grep -qvE '^[[:space:]]+FAIL: control: root files (drifted from canonical|missing):'; then
+    SYNC_VERDICT=$(printf '%s' "$INPUT" | NEBULA_ROOT="$ROOT" python3 -c '
+import json,os,shlex,sys
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+
+if d.get("agent_type"): sys.exit(0)                    # main agent only
+if (d.get("tool_name") or "Bash") != "Bash": sys.exit(0)
+
+cmd=((d.get("tool_input") or {}).get("command") or "")
+if not cmd.strip(): sys.exit(0)
+
+# one plain command: no chaining, redirection, substitution or expansion
+bad=set(";&|<>(){}$\n\r"); bad.add(chr(96))
+if any(c in cmd for c in bad): sys.exit(0)
+
+try: toks=shlex.split(cmd)
+except Exception: sys.exit(0)
+if not toks: sys.exit(0)
+if toks[0] in ("bash","sh","/bin/bash","/bin/sh","/usr/bin/bash","/usr/bin/sh"):
+    toks=toks[1:]
+if not toks: sys.exit(0)
+script,args=toks[0],toks[1:]
+if args not in ([],["--apply"]): sys.exit(0)
+
+if os.path.isabs(script):
+    target=script
+else:
+    cwd=d.get("cwd")
+    if not cwd: sys.exit(0)            # cannot resolve safely -> refuse
+    target=os.path.join(cwd,script)
+
+root=os.environ["NEBULA_ROOT"]
+allowed={os.path.realpath(os.path.join(root,"tools/sync-workspace-control.sh")),
+         os.path.realpath(os.path.join(root,"NebulaOS-firmware/tools/workspace-control/scripts/sync-workspace-control.sh"))}
+if os.path.realpath(target) in allowed: print("SYNC")
+' 2>/dev/null)
+    [ "$SYNC_VERDICT" = SYNC ] && allow
+  fi
+
   deny "WORKSPACE_IDENTITY_VALID=NO - source modification blocked.
 
 $REASONS
