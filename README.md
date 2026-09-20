@@ -9,18 +9,30 @@ each live in their own repos, but this one pins the exact commit of each, fetche
 puts the whole thing together into something you can flash.
 
 ```
-NebulaOS-kernel  ─┐
-NebulaOS-klipper ─┼─►  NebulaOS-firmware  ─►  final rootfs + kernel + firmware image
-NebulaOS-guppyscreen ┘   (this repo)
+NebulaOS-kernel             ─┐
+Klipper3d/klipper           ─┤
+NebulaOS-klipper-extensions ─┼─►  NebulaOS-firmware  ─►  final rootfs + kernel + firmware image
+NebulaOS-guppyscreen        ─┘        (this repo)
 ```
 
 - [`NebulaOS-kernel`](https://github.com/coreflake1/NebulaOS-kernel) — Linux 6.6 kernel fork (`openke` branch)
-- [`NebulaOS-klipper`](https://github.com/coreflake1/NebulaOS-klipper) — Klipper runtime fork (`master` branch)
+- [`Klipper3d/klipper`](https://github.com/Klipper3d/klipper) — the host Klipper runtime. Official
+  upstream, pinned to an exact commit, and kept unmodified: NebulaOS patches none of Klipper's own
+  files
+- [`NebulaOS-klipper-extensions`](https://github.com/coreflake1/NebulaOS-klipper-extensions) —
+  NebulaOS's own host-side Klippy extras, composed alongside that unmodified Klipper at boot
+  instead of being forked into it
 - [`NebulaOS-guppyscreen`](https://github.com/coreflake1/NebulaOS-guppyscreen) — touchscreen UI fork (`main` branch)
 - [`NebulaOS`](https://github.com/coreflake1/NebulaOS) — releases live here, not source
 
-Every dependency this build pulls in — kernel, Klipper, GuppyScreen, Buildroot, Moonraker,
-k1-ustreamer, v4l-utils, Mainsail, WiFi firmware, the build container itself — is pinned by exact
+`coreflake1/NebulaOS-klipper`, the old host-Klipper fork, is **retired**. It is not a build input,
+not a dependency, and not the host runtime source. It is kept only as historical provenance for
+the filtered git history that now lives in `NebulaOS-klipper-extensions` (Phase 1 no-fork
+migration, 2026-08-17 — see the `KLIPPER_REPO` comment in `manifests/dependencies.conf`).
+
+Every dependency this build pulls in — kernel, Klipper, the Klipper extensions, GuppyScreen,
+Buildroot, Moonraker, k1-ustreamer, v4l-utils, Mainsail, WiFi firmware, the build container
+itself — is pinned by exact
 commit/tag/digest and a SHA256 in `manifests/dependencies.conf`. The build always fetches fresh; it
 won't pick up a local checkout of the kernel or Klipper repo sitting next to it, even if you have
 one.
@@ -64,11 +76,11 @@ architected MIPS32 output — it's not claiming byte-for-byte reproducibility be
 builds (timestamps and a few build-path strings will differ), just that the same code went in and
 came out right.
 
-## Don't build the other three repos on their own
+## Don't build the other repos on their own
 
-Cloning `NebulaOS-kernel`, `NebulaOS-klipper`, or `NebulaOS-guppyscreen` by itself and trying to
-build it won't get you a working printer image — none of them do that alone. This repo is the one
-that pulls all three together into something flashable.
+Cloning `NebulaOS-kernel`, `NebulaOS-klipper-extensions`, or `NebulaOS-guppyscreen` by itself and
+trying to build it won't get you a working printer image — none of them do that alone. This repo
+is the one that pulls them, along with pinned upstream Klipper, together into something flashable.
 
 ## How reproducible is this, really
 
