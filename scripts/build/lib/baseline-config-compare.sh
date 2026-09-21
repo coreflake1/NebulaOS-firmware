@@ -103,8 +103,15 @@ baseline_config_semantic_diff() {
 
 	# No RETURN trap here (not POSIX, and /bin/sh may be dash) - both exit
 	# paths below explicitly clean up their own temp files instead.
-	bcsd_tmp_baseline=$(mktemp)
-	bcsd_tmp_current=$(mktemp)
+	# Fail closed: an empty path here would silently retarget the writes
+	# below at the caller's own working directory (see make-seed-archive.sh
+	# for the same hazard, and what it actually did to a real checkout).
+	bcsd_tmp_baseline=$(mktemp) || return 1
+	bcsd_tmp_current=$(mktemp) || { rm -f "$bcsd_tmp_baseline"; return 1; }
+	[ -n "$bcsd_tmp_baseline" ] && [ -n "$bcsd_tmp_current" ] || {
+		rm -f "$bcsd_tmp_baseline" "$bcsd_tmp_current"
+		return 1
+	}
 
 	if ! git -C "$bcsd_repo_root" show "$bcsd_baseline_ref:artifacts/buildroot-halley5-v30-image/$bcsd_relpath" > "$bcsd_tmp_baseline" 2>/dev/null; then
 		rm -f "$bcsd_tmp_baseline" "$bcsd_tmp_current"

@@ -73,7 +73,22 @@ make_seed_archive() {
 	# this function's own mktemp staging path; purely cosmetic, no
 	# functional effect on bytecode validity.
 	python3_bin="${6:-}"; mount_path="${7:-}"
-	tmp=$(mktemp -d)
+	# Fail closed. This was an unchecked `tmp=$(mktemp -d)`, and the failure
+	# mode is not theoretical: with an unwritable TMPDIR, mktemp fails, $tmp
+	# is EMPTY, and every `git -C "$tmp" ..." below silently becomes
+	# `git -C ""`, which git treats as a no-op rather than an error - so the
+	# commands run against whatever repository the caller happens to be in.
+	# That is exactly how `git -C "$tmp" checkout -q -B "$active_branch"`
+	# switched the real firmware checkout onto a `master` branch during this
+	# mission. `cp -r "$src/." ""` and `rm -rf ""` are the same hazard.
+	tmp=$(mktemp -d) || {
+		echo "ERROR: refusing to package $src - could not create a temporary staging directory" >&2
+		return 1
+	}
+	[ -n "$tmp" ] && [ -d "$tmp" ] || {
+		echo "ERROR: refusing to package $src - mktemp produced an unusable staging path ('$tmp')" >&2
+		return 1
+	}
 	cp -r "$src/." "$tmp/"
 	# Ensure the archived copy is checked out on the branch Moonraker's
 	# reserved slot actually expects, without disturbing $src itself.
@@ -182,7 +197,11 @@ make_seed_archive() {
 		if [ "$stale_count" -gt 0 ]; then
 			echo "$head_sha" > "$tmp/.git/shallow"
 			rm -rf "$tmp/.git/logs"
-			_reachable=$(mktemp)
+			_reachable=$(mktemp) || {
+				echo "ERROR: refusing to package $src - could not create a temporary object list" >&2
+				rm -rf "$tmp"
+				return 1
+			}
 			git -C "$tmp" rev-list --objects --all > "$_reachable"
 			_pack_hash=$(git -C "$tmp" pack-objects "$tmp/.git/objects/pack/pack" < "$_reachable")
 			rm -f "$_reachable"
