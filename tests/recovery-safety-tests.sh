@@ -51,6 +51,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 DEPS_MANIFEST="$REPO_ROOT/manifests/dependencies.conf"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/recovery-safety-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: recovery-safety-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

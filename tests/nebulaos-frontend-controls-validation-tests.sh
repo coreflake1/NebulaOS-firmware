@@ -22,6 +22,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 LIB="$REPO_ROOT/scripts/build/lib/validate-frontend-controls.sh"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/frontend-controls-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-frontend-controls-validation-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # shellcheck disable=SC1090

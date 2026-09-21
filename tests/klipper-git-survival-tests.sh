@@ -52,6 +52,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 COMPOSE_LIB="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-klipper-compose.sh"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/klipper-git-survival-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: klipper-git-survival-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost

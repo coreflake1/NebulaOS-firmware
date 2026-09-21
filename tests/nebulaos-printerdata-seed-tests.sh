@@ -22,6 +22,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 S02_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S02nebulaos-namespace"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/printerdata-seed-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-printerdata-seed-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

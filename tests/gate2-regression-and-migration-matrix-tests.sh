@@ -33,6 +33,7 @@ MIGRATE_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
 FACTORY_SEED_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed"
 ACTIVATE_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S05nebulaos-activate"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gate2-regression-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: gate2-regression-and-migration-matrix-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost

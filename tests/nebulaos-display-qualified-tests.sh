@@ -43,6 +43,7 @@ WRITE_HELPER="$REPO_ROOT/scripts/build/overlay/usr/libexec/nebulaos-display-qual
 INITD_DIR="$REPO_ROOT/scripts/build/overlay/etc/init.d"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nebulaos-display-qualified-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-display-qualified-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

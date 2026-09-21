@@ -30,6 +30,7 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/retention-save-config-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-retention-save-config-backup-pruning-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 cleanup() { chmod -R u+rwx "$WORK" 2>/dev/null; rm -rf "$WORK"; }
 trap cleanup EXIT INT TERM
 

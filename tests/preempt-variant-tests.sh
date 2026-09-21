@@ -50,6 +50,7 @@ pass() {
 # anything else) before this suite's first mutation, so cleanup can
 # restore exactly that state rather than assuming a fixed baseline.
 PRETEST_SNAPSHOT=$(mktemp)
+[ -n "${PRETEST_SNAPSHOT:-}" ] && [ -e "$PRETEST_SNAPSHOT" ] || { echo "FATAL: preempt-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 cp "$FRAGMENT" "$PRETEST_SNAPSHOT"
 
 cleanup() {

@@ -85,7 +85,9 @@ fi
 # preempt-variant-tests.sh. Snapshot the real pre-test bytes, same as
 # those two suites now do, and restore exactly those bytes.
 DTS_PRETEST_SNAPSHOT=$(mktemp)
+[ -n "${DTS_PRETEST_SNAPSHOT:-}" ] && [ -e "$DTS_PRETEST_SNAPSHOT" ] || { echo "FATAL: variant-state-preservation-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 FRAGMENT_PRETEST_SNAPSHOT=$(mktemp)
+[ -n "${FRAGMENT_PRETEST_SNAPSHOT:-}" ] && [ -e "$FRAGMENT_PRETEST_SNAPSHOT" ] || { echo "FATAL: variant-state-preservation-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 cp "$DTS" "$DTS_PRETEST_SNAPSHOT"
 cp "$FRAGMENT" "$FRAGMENT_PRETEST_SNAPSHOT"
 

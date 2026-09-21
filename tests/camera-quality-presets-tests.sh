@@ -50,6 +50,7 @@ fi
 run_with_marker() {
 	# $1 = fake marker content ("" for missing/empty marker)
 	fake_bin=$(mktemp -d)
+	[ -n "${fake_bin:-}" ] && [ -e "$fake_bin" ] || { echo "FATAL: camera-quality-presets-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 	cat > "$fake_bin/cat" <<EOF
 #!/bin/sh
 if [ "\$1" = "/usr/data/nebulaos/maintenance/camera-quality-mode" ]; then

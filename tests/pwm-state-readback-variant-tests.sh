@@ -51,8 +51,10 @@ pass() { PASS=$((PASS + 1)); }
 [ -f "$FRAGMENT" ] || { echo "SKIP: $FRAGMENT not present"; exit 0; }
 
 PRETEST_FRAGMENT=$(mktemp)
+[ -n "${PRETEST_FRAGMENT:-}" ] && [ -e "$PRETEST_FRAGMENT" ] || { echo "FATAL: pwm-state-readback-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 cp "$FRAGMENT" "$PRETEST_FRAGMENT"
 PRETEST_KERNEL_SNAPSHOT=$(mktemp -d)
+[ -n "${PRETEST_KERNEL_SNAPSHOT:-}" ] && [ -e "$PRETEST_KERNEL_SNAPSHOT" ] || { echo "FATAL: pwm-state-readback-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 for f in $AFFECTED_FILES; do
 	mkdir -p "$PRETEST_KERNEL_SNAPSHOT/$(dirname "$f")"
 	cp "$KERNEL_DIR/$f" "$PRETEST_KERNEL_SNAPSHOT/$f"
@@ -250,6 +252,7 @@ fi
 # that file's own header for exactly what this does and does not prove. ---
 ROUNDTRIP_SRC="$SCRIPT_DIR/pwm-state-readback-roundtrip.c"
 ROUNDTRIP_BIN=$(mktemp)
+[ -n "${ROUNDTRIP_BIN:-}" ] && [ -e "$ROUNDTRIP_BIN" ] || { echo "FATAL: pwm-state-readback-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 if cc -Wall -Wextra -O2 -o "$ROUNDTRIP_BIN" "$ROUNDTRIP_SRC" 2>/tmp/pwm-roundtrip-cc.log; then
 	pass
 else

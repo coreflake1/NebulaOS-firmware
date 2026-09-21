@@ -24,6 +24,7 @@ pass() { PASS=$((PASS + 1)); }
 [ -f "$TARGET" ] || { echo "SKIP: $TARGET not present"; exit 0; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wifi-irq-priority-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: wifi-irq-priority-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 FAKE_BIN="$WORK/bin"
 mkdir -p "$FAKE_BIN"
 CHRT_LOG="$WORK/chrt.log"

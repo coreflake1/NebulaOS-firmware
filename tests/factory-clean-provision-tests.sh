@@ -15,6 +15,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 PROVISION_SCRIPT="$REPO_ROOT/scripts/build/overlay/opt/nebulaos/factory-clean-provision.sh"
 NAMESPACE_SCRIPT_REAL="$REPO_ROOT/scripts/build/overlay/etc/init.d/S02nebulaos-namespace"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/factory-clean-provision-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: factory-clean-provision-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost

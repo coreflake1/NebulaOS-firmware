@@ -39,6 +39,7 @@ MIGRATE_SCRIPT="$OVERLAY_ETC/init.d/S04nebulaos-migrate"
 ACTIVATE_SCRIPT="$OVERLAY_ETC/init.d/S05nebulaos-activate"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/klipper-stack-lifecycle.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: klipper-stack-lifecycle-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost

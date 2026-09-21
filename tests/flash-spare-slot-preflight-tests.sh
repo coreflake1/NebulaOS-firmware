@@ -30,6 +30,7 @@ set -u
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 FLASH_SCRIPT="$SCRIPT_DIR/../scripts/flash-spare-slot.sh"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/flash-preflight-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: flash-spare-slot-preflight-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

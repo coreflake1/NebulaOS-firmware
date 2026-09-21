@@ -171,6 +171,7 @@ test_s00_logs_policy() {
 # to prove write_ota_marker is never invoked, regardless of Klipper state.
 test_simulation_klipper_fails() {
 	WORK=$(mktemp -d "${TMPDIR:-/tmp}/boot-safety-sim.XXXXXX")
+	[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: boot-safety-no-auto-stock-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 	trap_cleanup="rm -rf $WORK"
 
 	# Create a mock ota_marker.sh that records any calls to write_ota_marker
@@ -234,6 +235,7 @@ test_simulation_klipper_fails() {
 # ---------------------------------------------------------------------------
 test_simulation_klipper_ok() {
 	WORK=$(mktemp -d "${TMPDIR:-/tmp}/boot-safety-sim-ok.XXXXXX")
+	[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: boot-safety-no-auto-stock-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 	MARKER_LOG="$WORK/marker_log"
 	rm -f "$MARKER_LOG"
 

@@ -33,6 +33,7 @@ NDQ_LIB_REAL="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-display-qualified.sh
 INITD_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S98nebulaos-display-sleep-wake-controller"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/nebulaos-display-sleep-wake-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-display-sleep-wake-controller-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

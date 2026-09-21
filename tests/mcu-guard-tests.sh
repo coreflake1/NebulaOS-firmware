@@ -419,6 +419,7 @@ echo ""
 echo "--- Behavioral: mock helper output parsing ---"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/mcu-guard-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: mcu-guard-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 # Create a mock Python helper that emits PASS.

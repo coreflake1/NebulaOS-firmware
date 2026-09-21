@@ -159,6 +159,7 @@ echo ""
 echo "--- Status subcommand ---"
 
 TMPDIR=$(mktemp -d)
+[ -n "${TMPDIR:-}" ] && [ -e "$TMPDIR" ] || { echo "FATAL: nebulaos-recover-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$TMPDIR"' EXIT
 
 MOCK_ROOT="$TMPDIR/nebulaos"

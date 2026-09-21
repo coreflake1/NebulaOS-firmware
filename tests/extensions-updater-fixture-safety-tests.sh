@@ -156,6 +156,8 @@ git -C "$CANARY" commit -q -m "canary seed"
 canary_before=$(git -C "$CANARY" rev-list --count --all)
 ( cd "$CANARY" || exit 1
   # the exact pre-fix pattern: unguarded cd, then commit in whatever cwd
+  # SAFETY-SCAN-EXEMPT: deliberate reproduction of the defect, inside a
+  # disposable canary repo, so the checks below cannot pass vacuously.
   cd "$ROOT/does-not-exist" 2>/dev/null
   git commit -q --allow-empty -m "canary escape" ) >/dev/null 2>&1
 canary_after=$(git -C "$CANARY" rev-list --count --all)

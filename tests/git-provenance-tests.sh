@@ -25,6 +25,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 . "$REPO_ROOT/scripts/build/lib/git-provenance.sh"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/git-provenance-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: git-provenance-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@localhost

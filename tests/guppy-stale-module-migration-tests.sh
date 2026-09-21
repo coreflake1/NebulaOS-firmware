@@ -24,6 +24,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 export GATE_LIB="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-maintenance-gate.sh"
 MIGRATE_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/guppy-stale-module-migration-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: guppy-stale-module-migration-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 
 cleanup() {
 	chmod -R u+rwx "$WORK" 2>/dev/null

@@ -26,6 +26,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 MOONRAKER_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S56moonraker"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/moonraker-recovery-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: moonraker-update-manager-recovery-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"; [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null' EXIT INT TERM
 
 PASS=0

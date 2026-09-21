@@ -49,14 +49,67 @@ fail() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 # A `cd` that starts a command must be guarded (`|| exit`, `|| die`, `&&`
 # chain). An unguarded one is the exact mechanism that published those four
 # commits. `$(cd ... && pwd)` idioms are already guarded by their own &&.
-unguarded=$(echo "$SCAN_FILES" | xargs grep -nE '^[[:space:]]*cd[[:space:]]' 2>/dev/null \
-	| grep -v '||' \
-	| awk -F: '{b=$0; sub(/^[^:]+:[0-9]+:/,"",b); if (b ~ /^[[:space:]]*#/) next; print}')
+# A line may be exempted with a SAFETY-SCAN-EXEMPT comment on the two lines
+# above it - used by the canary in extensions-updater-fixture-safety-tests.sh,
+# which must reproduce the defect inside a disposable repo for its own checks
+# not to pass vacuously. Exemptions are printed, never silent.
+unguarded=$(echo "$SCAN_FILES" | xargs grep -nE -B2 '^[[:space:]]*cd[[:space:]]' 2>/dev/null \
+	| awk '
+	    /SAFETY-SCAN-EXEMPT/ { exempt = 3 }
+	    /^[^:]*[:-][0-9]+[:-][[:space:]]*cd[[:space:]]/ {
+	        if (exempt > 0) { exempt--; next }
+	        b = $0; sub(/^[^:]*[:-][0-9]+[:-]/, "", b)
+	        if (b ~ /^[[:space:]]*#/) next
+	        if (b ~ /\|\|/) next
+	        print
+	    }
+	    { if (exempt > 0) exempt-- }')
+exempted=$(echo "$SCAN_FILES" | xargs grep -c 'SAFETY-SCAN-EXEMPT' 2>/dev/null | awk -F: '{t+=$2} END{print t+0}')
 if [ -z "$unguarded" ]; then
-	pass "no unguarded 'cd' in any tests/*.sh (a failed cd can never fall through into the caller's repository)"
+	pass "no unguarded 'cd' in any tests/*.sh (a failed cd can never fall through into the caller's repository; $exempted audited exemption line(s))"
 else
 	fail "unguarded 'cd' found - a failure here falls through into the invoking repository:
 $unguarded"
+fi
+
+# --- 1b. every mktemp result is validated before use --------------------
+# The defect that actually escaped during this mission was NOT an unguarded
+# `cd`. tests/klipper-git-survival-tests.sh had a plain
+# `WORK=$(mktemp -d ...)` with no check; with an unwritable TMPDIR that
+# leaves $WORK empty, and `git -C ""` is a NO-OP in git rather than an
+# error - so `git -C "$K" checkout -q master` ran against the real firmware
+# checkout and switched it to a `master` branch. The same hazard existed in
+# scripts/build/lib/make-seed-archive.sh, which the real build uses.
+#
+# An unvalidated empty path variable is invisible to a `cd`-pattern scan, so
+# it gets its own check.
+unchecked_tmp=$(echo "$SCAN_FILES" "$SCRIPT_DIR/../scripts/build/lib"/*.sh \
+	| tr ' ' '\n' | grep -v '^$' | sort -u | while IFS= read -r f; do
+		[ -f "$f" ] || continue
+		awk -v F="$f" '
+		    match($0, /^[ \t]*[A-Za-z_][A-Za-z0-9_]*=\$\(mktemp/) {
+		        var = $0
+		        sub(/^[ \t]*/, "", var); sub(/=.*$/, "", var)
+		        if ($0 ~ /\|\|/) next
+		        window = ""
+		        for (j = NR; j <= NR + 6; j++) window = window window_lines[j]
+		        pending[NR] = var
+		    }
+		    { window_lines[NR] = $0 "\n" }
+		    END {
+		        for (n in pending) {
+		            v = pending[n]; ok = 0
+		            for (j = n; j <= n + 6; j++)
+		                if (index(window_lines[j], "-n \"${" v) || index(window_lines[j], "-n \"$" v)) ok = 1
+		            if (!ok) print F ":" n " (" v ")"
+		        }
+		    }' "$f"
+	done)
+if [ -z "$unchecked_tmp" ]; then
+	pass "every mktemp result in tests/ and scripts/build/lib/ is validated before use (an empty path cannot retarget git -C or rm -rf at the caller)"
+else
+	fail "mktemp result used without validation - an empty path here retargets later commands at the caller's own directory:
+$unchecked_tmp"
 fi
 
 # --- 2. no UNTARGETED push to a remote by NAME --------------------------

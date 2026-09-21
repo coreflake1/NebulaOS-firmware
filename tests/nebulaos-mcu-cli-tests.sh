@@ -188,6 +188,7 @@ echo ""
 echo "--- Status subcommand (mock state file) ---"
 
 TMPDIR=$(mktemp -d)
+[ -n "${TMPDIR:-}" ] && [ -e "$TMPDIR" ] || { echo "FATAL: nebulaos-mcu-cli-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$TMPDIR"' EXIT
 
 MOCK_STATE="$TMPDIR/guard.state"

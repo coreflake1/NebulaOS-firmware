@@ -49,6 +49,7 @@ pass() { PASS=$((PASS + 1)); }
 [ -d "$KERNEL_DIR/.git" ] || { echo "SKIP: $KERNEL_DIR not a git checkout - run 00-fetch-vendor-sources.sh first"; exit 0; }
 
 PRETEST_SNAPSHOT=$(mktemp -d)
+[ -n "${PRETEST_SNAPSHOT:-}" ] && [ -e "$PRETEST_SNAPSHOT" ] || { echo "FATAL: pinctrl-ownership-fix-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 for f in $AFFECTED_FILES; do
 	mkdir -p "$PRETEST_SNAPSHOT/$(dirname "$f")"
 	cp "$KERNEL_DIR/$f" "$PRETEST_SNAPSHOT/$f"

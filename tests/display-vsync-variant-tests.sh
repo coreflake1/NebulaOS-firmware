@@ -29,8 +29,10 @@ pass() { PASS=$((PASS + 1)); }
 [ -f "$FRAGMENT" ] || { echo "SKIP: $FRAGMENT not present"; exit 0; }
 
 PRETEST_FRAGMENT=$(mktemp)
+[ -n "${PRETEST_FRAGMENT:-}" ] && [ -e "$PRETEST_FRAGMENT" ] || { echo "FATAL: display-vsync-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 cp "$FRAGMENT" "$PRETEST_FRAGMENT"
 PRETEST_KERNEL_SNAPSHOT=$(mktemp -d)
+[ -n "${PRETEST_KERNEL_SNAPSHOT:-}" ] && [ -e "$PRETEST_KERNEL_SNAPSHOT" ] || { echo "FATAL: display-vsync-variant-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 for f in $AFFECTED_FILES; do
 	mkdir -p "$PRETEST_KERNEL_SNAPSHOT/$(dirname "$f")"
 	cp "$KERNEL_DIR/$f" "$PRETEST_KERNEL_SNAPSHOT/$f"

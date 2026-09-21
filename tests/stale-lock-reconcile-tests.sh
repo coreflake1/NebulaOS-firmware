@@ -43,6 +43,7 @@ MIGRATE_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
 [ -f "$SUPERVISOR" ] || { echo "SKIP: $SUPERVISOR not present"; exit 0; }
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/stale-lock-reconcile.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: stale-lock-reconcile-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0

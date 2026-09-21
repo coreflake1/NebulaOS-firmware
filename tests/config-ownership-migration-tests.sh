@@ -23,6 +23,7 @@ REAL_TOOL="$REPO_ROOT/scripts/build/overlay/opt/nebulaos/tools/migrate_config_ow
 # a real, resolvable value regardless of which function it goes on to call.
 export GATE_LIB="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-maintenance-gate.sh"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/config-ownership-migration-tests.XXXXXX")
+[ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: config-ownership-migration-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
 PASS=0
