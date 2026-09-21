@@ -123,15 +123,99 @@ else
   bad "extensions-shipping-pin-resolvable" "pin '$EPIN' not a commit in the extensions repo"
 fi
 
-# --- 6. Moonraker official / unmodified ------------------------------------
+# --- 6. Moonraker: official upstream + allowlisted patches only ------------
+# NebulaOS ships OFFICIAL upstream Moonraker and never touches the
+# vendor/moonraker checkout - but it DOES apply exactly one reviewed,
+# named, build-time patch to the OVERLAY COPY. The invariant that used to
+# live here was called "moonraker-unmodified" and reported PASS while that
+# patch was applied on every build, because it was blind three separate
+# ways: the regex required `-p<digit>` immediately after `patch` (the real
+# call is `patch -N -p1`), the glob was non-recursive so scripts/build/lib/
+# was never scanned, and the `grep -vE '^\s*#'` comment filter could never
+# match because `grep -rn` prefixes every line with `file:lineno:`.
+#
+# This is NOT general permission to patch or fork Moonraker. The allowlist
+# below has exactly one entry, pinned by sha256; any other Moonraker patch
+# fails this invariant. The allowlisted patch is itself a REMOVAL_CANDIDATE
+# - see scripts/build/04-cross-compile-app-stack.sh for the root cause
+# (CONFIG_FILE_LOCKING, long since fixed) and the retirement experiment.
 MREPO=$(man MOONRAKER_REPO); MPIN=$(man MOONRAKER_PIN)
 case "$MREPO" in
   *Arksine/moonraker*) ok "moonraker-is-official-upstream" "$MREPO @ ${MPIN:0:12}";;
   *) bad "moonraker-is-official-upstream" "unexpected repo '$MREPO'";;
 esac
-MOON_PATCH=$(grep -rnE '(git +apply|patch +-p[0-9])' "$FW/scripts/build/"*.sh 2>/dev/null | grep -i moonraker | grep -vE '^\s*#' | wc -l)
-[ "$MOON_PATCH" = 0 ] && ok "moonraker-unmodified" "no patch/apply step targets moonraker" \
-                      || bad "moonraker-unmodified" "$MOON_PATCH patch step(s) target moonraker"
+
+MOON_ALLOW_NAME=moonraker-sqlite-nolock.patch
+MOON_ALLOW_SHA=831abda453dc83f024e32daf6b8702b00bfbdb8ea57bac2519abd98ce0c35cb1
+moon_problems=()
+
+# (a) FILE SET - exactly the allowlisted moonraker patch file may exist.
+moon_named=$(ls -1 "$FW/scripts/build/patches" 2>/dev/null | grep -i moonraker | sort | tr '\n' ' ')
+moon_named=${moon_named% }
+[ "$moon_named" = "$MOON_ALLOW_NAME" ] || \
+  moon_problems+=("moonraker patch file set is '${moon_named:-<none>}', expected exactly '$MOON_ALLOW_NAME'")
+
+# (b) CONTENT PIN - the allowlisted patch must be the exact reviewed bytes,
+#     so allowlisting by filename cannot be used to smuggle in new content.
+if [ -f "$FW/scripts/build/patches/$MOON_ALLOW_NAME" ]; then
+  moon_sha=$(sha256sum "$FW/scripts/build/patches/$MOON_ALLOW_NAME" | cut -d' ' -f1)
+  [ "$moon_sha" = "$MOON_ALLOW_SHA" ] || \
+    moon_problems+=("$MOON_ALLOW_NAME content changed (sha256 ${moon_sha:0:12} != ${MOON_ALLOW_SHA:0:12}) - re-review, then update MOON_ALLOW_SHA")
+else
+  moon_problems+=("$MOON_ALLOW_NAME is missing from scripts/build/patches/")
+fi
+
+# (c) CONTENT SWEEP - catches a Moonraker patch hiding under an innocuous
+#     filename, and any apply step that reaches one through a shell variable.
+#     What a diff TOUCHES cannot be disguised by how it is invoked.
+while IFS= read -r pf; do
+  [ -n "$pf" ] || continue
+  [ "$(basename "$pf")" = "$MOON_ALLOW_NAME" ] && continue
+  if grep -qE '^(diff --git|---|\+\+\+).*moonraker' "$pf" 2>/dev/null; then
+    moon_problems+=("$(basename "$pf") diffs a moonraker path but is not allowlisted")
+  fi
+done < <(find "$FW/scripts/build/patches" -type f 2>/dev/null | sort)
+
+# (d) APPLY STEPS - flag-order-proof, RECURSIVE (the old glob was
+#     scripts/build/*.sh, so scripts/build/lib/ was never scanned), honestly
+#     comment-filtered, and CONTINUATION-AWARE: shell line continuations are
+#     joined first, so splitting an invocation across lines cannot hide the
+#     patch filename on the second line from a line-at-a-time scan.
+moon_logical=$(find "$FW/scripts/build" -name '*.sh' -type f 2>/dev/null | sort \
+  | while IFS= read -r f; do
+      awk -v F="$f" '
+        { if (acc == "") startln = NR
+          l = $0
+          if (sub(/[[:space:]]*\\$/, "", l)) { acc = acc l " "; next }
+          acc = acc l
+          print F ":" startln ":" acc
+          acc = ""
+        }
+        END { if (acc != "") print F ":" startln ":" acc }
+      ' "$f"
+    done)
+moon_steps=$(printf '%s\n' "$moon_logical" \
+  | awk '{ body=$0; sub(/^[^:]+:[0-9]+:/, "", body);
+           if (body ~ /^[[:space:]]*#/) next;
+           if (tolower(body) !~ /moonraker/) next;
+           if (body ~ /git[[:space:]]+apply/ \
+               || body ~ /(^|[^[:alnum:]_.\/-])patch([[:space:]]+-|[[:space:]]*<)/) print }')
+MOON_STEP_COUNT=0
+while IFS= read -r step; do
+  [ -n "$step" ] || continue
+  MOON_STEP_COUNT=$((MOON_STEP_COUNT+1))
+  case "$step" in
+    *"$MOON_ALLOW_NAME"*) : ;;
+    *) moon_problems+=("un-allowlisted moonraker patch/apply step: ${step#"$FW/"}") ;;
+  esac
+done <<< "$moon_steps"
+
+if [ "${#moon_problems[@]}" -eq 0 ]; then
+  ok "moonraker-official-upstream-allowlisted-patches-only" \
+     "official upstream + $MOON_STEP_COUNT allowlisted build-time patch (${MOON_ALLOW_NAME}, sha256 ${MOON_ALLOW_SHA:0:12}); applied to the overlay copy only, vendor/moonraker untouched"
+else
+  bad "moonraker-official-upstream-allowlisted-patches-only" "$(printf '%s; ' "${moon_problems[@]}")"
+fi
 
 # --- 7. Mainsail official / unmodified -------------------------------------
 MSTAG=$(man MAINSAIL_TAG); MSSHA=$(man MAINSAIL_SHA256)
