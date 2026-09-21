@@ -519,6 +519,41 @@ check /opt/klipper/klippy/chelper/c_helper.so
 check /opt/klipper/klippy/extras/nebulaos_version.py
 check /opt/nebulaos-version.json
 check /opt/moonraker/moonraker/server.py
+
+# Moonraker sqlite-nolock patch: SECOND-LAYER effect assertion, read out of
+# the ACTUAL shipped rootfs rather than the overlay staging tree. The
+# load-bearing gate is at the point of patching in
+# 04-cross-compile-app-stack.sh (which also stops wrong bytecode being
+# precompiled); this one exists because that script and this one can be run
+# independently, and because a rootfs check is the last thing between a
+# silently-unpatched Moonraker and a device.
+#
+# The failure being caught: the patch step used to end in `|| true`, so if
+# MOONRAKER_PIN moved or upstream refactored database.py, the hunks would
+# stop applying, the build would still report success, and the image would
+# ship stock database.py with nothing in the log to say so. Two materially
+# different Moonraker payloads from the same firmware commit and the same
+# pins. See FIRMWARE.md sec 23 for why the patch exists and why it is a
+# removal candidate.
+#
+# Comment lines are stripped before counting: the patch's own explanatory
+# comment contains the literal strings "sqlite3.connect()" and "nolock=1",
+# so raw counts are 2 and a gate built on them would never pass.
+MOONRAKER_DB_CONTENT=$(debugfs -R "cat /opt/moonraker/moonraker/components/database.py" ${IMAGES}/rootfs.ext2 2>/dev/null)
+if [ -z "$MOONRAKER_DB_CONTENT" ]; then
+	echo "MISS /opt/moonraker/moonraker/components/database.py could not be read from the rootfs"
+else
+	MDB_CODE=$(echo "$MOONRAKER_DB_CONTENT" | grep -v '^[[:space:]]*#')
+	mdb_defs=$(echo "$MOONRAKER_DB_CONTENT" | grep -c '^def connect_sqlite_nolock(')
+	mdb_refs=$(echo "$MDB_CODE" | grep -c 'connect_sqlite_nolock(')
+	mdb_raw=$(echo "$MDB_CODE" | grep -c 'sqlite3\.connect(')
+	mdb_calls=$((mdb_refs - mdb_defs))
+	if [ "$mdb_defs" = 1 ] && [ "$mdb_calls" = 4 ] && [ "$mdb_raw" = 1 ]; then
+		echo "OK   moonraker-sqlite-nolock.patch is present in the SHIPPED database.py ($mdb_calls call sites through the nolock helper)"
+	else
+		echo "MISS moonraker-sqlite-nolock.patch did NOT reach the shipped database.py (helper defs=$mdb_defs, call sites=$mdb_calls expected 4, raw sqlite3.connect(=$mdb_raw expected 1) - the image would ship stock Moonraker database code"
+	fi
+fi
 check /usr/lib/python3.11/site-packages/streaming_form_data
 check /usr/sbin/nginx
 check /usr/share/mainsail/index.html

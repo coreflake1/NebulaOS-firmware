@@ -338,25 +338,113 @@ rm -rf "$OVERLAY/opt/moonraker/moonraker"
 cp -r "$VENDOR/moonraker/moonraker" "$OVERLAY/opt/moonraker/"
 find "$OVERLAY/opt/moonraker" -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
-# OpenKE (2026-07-23): vendor/moonraker is a plain upstream clone re-fetched
-# fresh by 00-fetch-vendor-sources.sh every time (unlike the kernel, which
-# is a real fork we commit to) - so this patch is applied to the copy that
-# just landed in the overlay, not to vendor/moonraker itself, which would
-# silently lose it on the next fetch. Fixes a real, reproducible hang/
-# "database is locked" error found on real hardware: strace showed
-# fcntl64(fd, F_SETLK64, F_RDLCK, PENDING_BYTE) = -1 EACCES on this
-# kernel's tmpfs, with zero real lock contention (single connection, first
-# ever access) - SQLite's own documented nolock=1 URI workaround for
-# filesystems with broken POSIX locking fixes it, confirmed reliably
-# reproducible/fixed multiple times in a row (see FIRMWARE.md sec 23).
+# Moonraker is OFFICIAL upstream (Arksine/moonraker @ MOONRAKER_PIN) and
+# vendor/moonraker is never touched - 00-fetch-vendor-sources.sh re-fetches it
+# fresh every run, so a patch applied there would silently vanish. This patch
+# is applied to the OVERLAY COPY only, i.e. to the bytes that actually ship.
 #
-# -N: the copy above is a fresh rm -rf + cp -r from vendor/moonraker every
-# run, so this should always be pristine and apply cleanly - but patch's own
-# "already applied" detection has, in practice, still triggered here and
-# (without -N) aborted the whole script via set -e despite the file already
-# being in the correct end state. -N makes patch skip hunks it detects as
-# already-applied instead of erroring, so this stays idempotent either way.
-patch -N -p1 -d "$OVERLAY/opt/moonraker" < "$SCRIPT_DIR/patches/moonraker-sqlite-nolock.patch" || true
+# STATUS: UNVALIDATED_LEGACY_WORKAROUND / REMOVAL_CANDIDATE.
+#
+# What this patch does: replaces database.py's sqlite3.connect() call sites
+# with SQLite's "nolock=1" URI parameter, which makes SQLite skip its file
+# locking protocol entirely. It is NOT an extra layer of protection on top of
+# working locks - it is a SUBSTITUTE for them, and the two are mutually
+# exclusive by construction.
+#
+# Why it is a removal candidate. It was written on 2026-07-23 against the
+# theory that this kernel's tmpfs had broken POSIX advisory locking (strace
+# showed fcntl64(F_SETLK64, PENDING_BYTE) = -1 EACCES). That theory is wrong,
+# and the real root cause was found the same day and fixed in the same commit
+# (44e48b4): the base x2000_halley5_v30_linux vendor defconfig shipped with
+# CONFIG_FILE_LOCKING off. With that option off the kernel compiles out
+# fs/locks.c entirely (fs/Makefile: obj-$(CONFIG_FILE_LOCKING) += locks.o), so
+# flock() returns ENOSYS and fcntl_setlk64() is an inline stub that returns
+# -EACCES unconditionally (include/linux/filelock.h) - which is exactly, and
+# only, the failure that was observed. It was never filesystem-specific: tmpfs
+# defines no .lock file_operation at all, so it uses the generic
+# posix_lock_file() path like everything else. See FIRMWARE.md sec 23.
+# halley5-nebulaos-fragment.config now sets CONFIG_FILE_LOCKING=y and
+# 06-verify.sh asserts it on every build, so the mechanism this patch works
+# around cannot occur in the shipping kernel configuration.
+#
+# Why it is still here anyway. The patch and the kernel fix landed in the SAME
+# commit, so no build has ever existed with the kernel fix and stock Moonraker.
+# The sufficiency of the kernel fix alone is therefore deduced, never observed.
+# Deleting a boot-critical compatibility fix on deduction alone is not worth it.
+#
+# THE EXPERIMENT THAT RETIRES THIS PATCH (needs a build + a real boot, which is
+# why it has not been done here): disable this step, build, flash, and confirm
+# Moonraker's first database open succeeds with CONFIG_FILE_LOCKING=y. If it
+# does, delete the patch, this block, and the allowlist entry in
+# tools/workspace-control/scripts/verify-architecture.sh, and restore a plain
+# "Moonraker is unmodified" invariant.
+#
+# Current safety basis, stated honestly. The patch's own comment claims nolock
+# is safe because the database is "private to a single Moonraker process on a
+# private tmpfs mount". BOTH halves of that are false today: since 2026-07-25
+# (S01persistent-datastore) /opt/printer_data is a bind mount of
+# /usr/data/nebulaos/printer_data on the ext4 partition /dev/mmcblk0p10, which
+# is physically shared with stock firmware and persists across reboots. What
+# actually makes nolock tolerable now is that the NebulaOS namespace
+# /usr/data/nebulaos is single-writer - only this image's Moonraker opens that
+# database. Note the patch also converts the backup and restore connections,
+# which operate on USER-SUPPLIED paths; that is the widest part of its blast
+# radius and the strongest argument for retiring it.
+#
+# -N: the overlay copy is a fresh rm -rf + cp -r from vendor/moonraker every
+# run, so the file should always be pristine and apply cleanly - but patch's
+# own "already applied" detection has triggered here in practice. -N makes it
+# skip already-applied hunks instead of erroring.
+#
+# The exit status is deliberately NOT the gate. GNU patch -N exits 1 when it
+# skips an already-applied hunk, and exits 0 when a hunk applies with fuzz, so
+# rc is unreliable in both directions - which is why this used to end in
+# `|| true`, discarding the status entirely and letting a silently-unpatched
+# Moonraker ship. The EFFECT is the gate instead, asserted immediately below.
+patch -N -p1 -d "$OVERLAY/opt/moonraker" \
+	< "$SCRIPT_DIR/patches/moonraker-sqlite-nolock.patch" || true
+
+# Fail-closed effect assertion. This is the real gate: it does not care how
+# patch exited, only whether the shipped bytes are the ones intended. It runs
+# HERE rather than only in 06-verify.sh because the bytecode precompilation
+# step immediately below bakes this file's content into .pyc, and because a
+# failure 4000 lines later is a far worse signal. 06-verify.sh repeats the
+# presence check as a second layer.
+MOONRAKER_DB_PY=$OVERLAY/opt/moonraker/moonraker/components/database.py
+if [ ! -f "$MOONRAKER_DB_PY" ]; then
+	echo "FATAL: $MOONRAKER_DB_PY not found - the moonraker overlay copy is missing or upstream moved database.py" >&2
+	exit 1
+fi
+# Expected end state: the helper is defined once, all FOUR original call sites
+# now go through it, and the ONLY remaining raw sqlite3.connect( is the single
+# nolock URI call inside the helper itself.
+#
+# Counting is deliberately CODE-ONLY (comment lines stripped first). The patch's
+# own explanatory comment contains the literal strings "sqlite3.connect()" and
+# "nolock=1", so a naive grep -c sees 2 of each and a gate built on those raw
+# counts would hard-fail every single build. Verified against a reconstructed
+# pre-patch database.py with the patch actually applied.
+db_code() { grep -v '^[[:space:]]*#' "$MOONRAKER_DB_PY" | grep -c "$1" || true; }
+db_helper_defs=$(grep -c '^def connect_sqlite_nolock(' "$MOONRAKER_DB_PY" || true)
+db_raw_connects=$(db_code 'sqlite3\.connect(')
+db_nolock=$(db_code 'nolock=1')
+db_helper_refs=$(db_code 'connect_sqlite_nolock(')
+db_call_sites=$((db_helper_refs - db_helper_defs))
+if [ "$db_helper_defs" != 1 ] || [ "$db_raw_connects" != 1 ] \
+   || [ "$db_nolock" != 1 ] || [ "$db_call_sites" != 4 ]; then
+	echo "FATAL: moonraker-sqlite-nolock.patch did not take effect on the overlay copy." >&2
+	echo "       $MOONRAKER_DB_PY" >&2
+	echo "       connect_sqlite_nolock definitions: $db_helper_defs (expected 1)" >&2
+	echo "       connect_sqlite_nolock call sites: $db_call_sites (expected 4)" >&2
+	echo "       remaining raw sqlite3.connect( calls: $db_raw_connects (expected 1, the one inside the helper)" >&2
+	echo "       nolock=1 occurrences: $db_nolock (expected 1)" >&2
+	echo "       This is the exact silent divergence the patch step used to allow: two materially" >&2
+	echo "       different Moonraker payloads from the same firmware commit and the same pins." >&2
+	echo "       If MOONRAKER_PIN was just bumped, re-base the patch against the new database.py" >&2
+	echo "       (or run the retirement experiment documented above and delete it)." >&2
+	exit 1
+fi
+echo "OK   moonraker-sqlite-nolock.patch verified applied to the overlay copy ($db_call_sites call sites through the nolock helper, $db_raw_connects raw sqlite3.connect( left)"
 
 # Production optimization mission, Phase 4 (2026-07-30): precompile after
 # the patch above, not before, so bytecode reflects the final patched
