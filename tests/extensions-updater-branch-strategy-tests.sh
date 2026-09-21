@@ -103,9 +103,74 @@ fi
 export GIT_AUTHOR_NAME=nebulaos-test GIT_AUTHOR_EMAIL=test@nebulaos.invalid
 export GIT_COMMITTER_NAME=nebulaos-test GIT_COMMITTER_EMAIL=test@nebulaos.invalid
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/extensions-branch-strategy-tests.XXXXXX")
-cleanup() { rm -rf "$WORK"; }
+# --- fixture safety ------------------------------------------------------
+# This suite creates commits, a branch and a push. Every one of those MUST
+# land in a throwaway fixture, and none of them may ever reach the
+# repository the script happens to be invoked from.
+#
+# One of them did, for real. Four empty commits authored by nebulaos-test
+# (fa4a58ac, 2579efe7, 8889ca87, 8d9ecad8) sit in canonical firmware main's
+# ancestry to this day. The mechanism: a subshell did an UNGUARDED
+# `cd "$WORK/seed"` and, because this script sets -u but not -e, execution
+# continued in the INHERITED working directory when that cd failed - so
+# `git commit --allow-empty` ran against the firmware checkout, and
+# `git push origin main production` was aimed at canonical GitHub. The push
+# happened to fail only because the fixture's pin.txt was never written, so
+# the local production branch was never created and the refspec could not
+# resolve. That is luck, not a safeguard.
+#
+# Those four commits are published history and are deliberately left in
+# place - rewriting them would invalidate every existing clone. This is the
+# fix for the harness that produced them.
+#
+# The rules, now enforced rather than assumed:
+#   * fixture creation is fail-closed: any failure aborts, loudly;
+#   * every mutating git call names its repository with `git -C`, so none of
+#     them can inherit a working directory;
+#   * the push names the fixture bare remote BY PATH, never by the remote
+#     name `origin`, so an inherited production `origin` is not reachable as
+#     a fallback even in principle;
+#   * fixture_repo() re-derives each repository's own git dir and refuses to
+#     touch anything outside $WORK.
+#
+# `set -e` is deliberately NOT added: sections 3 and 5 exercise commands
+# that are EXPECTED to fail - that is precisely what those regression checks
+# prove. Safety here comes from explicit targeting, not from abort-on-error.
+
+die() { echo "FATAL: $1" >&2; exit 1; }
+
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/extensions-branch-strategy-tests.XXXXXX") \
+	|| die "could not create a temporary working directory"
+[ -n "${WORK:-}" ] || die "mktemp produced an empty path"
+[ -d "$WORK" ]     || die "mktemp did not produce a directory ('$WORK')"
+case "$WORK" in
+	/*) ;;
+	*) die "refusing to use a relative fixture root ('$WORK')" ;;
+esac
+[ -w "$WORK" ] || die "fixture root is not writable ('$WORK')"
+
+# Only ever remove a real directory this run actually created.
+cleanup() {
+	if [ -n "${WORK:-}" ] && [ -d "$WORK" ]; then
+		rm -rf "$WORK"
+	fi
+	return 0
+}
 trap cleanup EXIT INT TERM
+
+# Resolve a repository's own git dir and prove it lives inside the fixture
+# root before anything mutates it. This is the last line of defence: if it
+# ever fires, the run stops rather than "probably" being fine.
+fixture_repo() {
+	_fr_dir=$1
+	[ -d "$_fr_dir" ] || die "fixture repository '$_fr_dir' does not exist"
+	_fr_git=$(git -C "$_fr_dir" rev-parse --absolute-git-dir 2>/dev/null) \
+		|| die "'$_fr_dir' is not a git repository"
+	case "$_fr_git" in
+		"$WORK"/*) ;;
+		*) die "REFUSING to mutate '$_fr_git': outside the fixture root $WORK" ;;
+	esac
+}
 
 awk '/^clone_pinned\(\) \{/,/^}/' "$FETCH_SCRIPT" > "$WORK/clone_pinned_fn.sh"
 
@@ -119,25 +184,45 @@ awk '/^clone_pinned\(\) \{/,/^}/' "$FETCH_SCRIPT" > "$WORK/clone_pinned_fn.sh"
 # ancestor relationship worth computing here - clone_pinned() has no
 # reason to know or care about main at all once local_branch=production is
 # used, which is exactly the point of the fix.
-mkdir -p "$WORK/remote.git"
-git init -q -b main --bare "$WORK/remote.git"
-git clone -q "$WORK/remote.git" "$WORK/seed"
-(
-	cd "$WORK/seed"
-	git checkout -q -b main 2>/dev/null || true
-	git commit -q --allow-empty -m "c1"
-	git commit -q --allow-empty -m "c2 (the pin - production points here)"
-	echo "$(git rev-parse HEAD)" > "$WORK/pin.txt"
-	git commit -q --allow-empty -m "c3 (main keeps moving, unrelated to the pin)"
-	git commit -q --allow-empty -m "c4 (main keeps moving, unrelated to the pin)"
-	git branch production "$(cat "$WORK/pin.txt")"
-	git push -q origin main production
-)
-rm -rf "$WORK/seed"
-PIN=$(cat "$WORK/pin.txt")
+REMOTE=$WORK/remote.git
+SEED=$WORK/seed
+
+mkdir -p "$REMOTE" || die "could not create the fixture remote directory"
+git init -q -b main --bare "$REMOTE" || die "could not initialise the fixture bare remote"
+fixture_repo "$REMOTE"
+
+git clone -q "$REMOTE" "$SEED" || die "could not clone the fixture remote into a seed checkout"
+[ -d "$SEED/.git" ] || die "fixture seed checkout was not created at $SEED"
+fixture_repo "$SEED"
+
+# Every call below names $SEED explicitly. There is no `cd`, so there is no
+# inherited working directory for any of this to fall through into.
+git -C "$SEED" checkout -q -b main 2>/dev/null || true
+git -C "$SEED" commit -q --allow-empty -m "c1" \
+	|| die "fixture: could not create commit c1"
+git -C "$SEED" commit -q --allow-empty -m "c2 (the pin - production points here)" \
+	|| die "fixture: could not create commit c2"
+git -C "$SEED" rev-parse HEAD > "$WORK/pin.txt" \
+	|| die "fixture: could not record the pin commit"
+git -C "$SEED" commit -q --allow-empty -m "c3 (main keeps moving, unrelated to the pin)" \
+	|| die "fixture: could not create commit c3"
+git -C "$SEED" commit -q --allow-empty -m "c4 (main keeps moving, unrelated to the pin)" \
+	|| die "fixture: could not create commit c4"
+
+PIN=$(cat "$WORK/pin.txt" 2>/dev/null) || die "fixture: pin.txt could not be read"
+[ -n "$PIN" ] || die "fixture: the recorded pin is empty"
+
+git -C "$SEED" branch production "$PIN" \
+	|| die "fixture: could not create the production branch at $PIN"
+# By PATH, never by the remote name. An inherited `origin` pointing at a real
+# product repository must not be reachable from this push even in principle.
+git -C "$SEED" push -q "$REMOTE" main production \
+	|| die "fixture: could not push main/production to the fixture remote"
+
+rm -rf "$SEED"
 
 (
-	cd "$WORK"
+	cd "$WORK" || exit 1
 	. ./clone_pinned_fn.sh
 	clone_pinned target "$WORK/remote.git" "$PIN" "" "" "production" > "$WORK/clone.log" 2>&1
 	echo "RC=$?" >> "$WORK/clone.log"
@@ -177,7 +262,7 @@ fi
 #     original bug rather than trivially passing regardless of the fix.
 
 (
-	cd "$WORK"
+	cd "$WORK" || exit 1
 	. ./clone_pinned_fn.sh
 	clone_pinned target_old_shape "$WORK/remote.git" "$PIN" > "$WORK/clone_old.log" 2>&1
 )
@@ -207,7 +292,7 @@ esac
 MAKE_SEED_ARCHIVE_LIB="$REPO_ROOT/scripts/build/lib/make-seed-archive.sh"
 if [ -f "$MAKE_SEED_ARCHIVE_LIB" ]; then
 	(
-		cd "$WORK"
+		cd "$WORK" || exit 1
 		. ./clone_pinned_fn.sh
 		clone_pinned chain_target "$WORK/remote.git" "$PIN" "" "" "production" > "$WORK/chain_clone.log" 2>&1
 		. "$MAKE_SEED_ARCHIVE_LIB"
@@ -247,7 +332,7 @@ fi
 # test suite actually distinguishes the two, not just checking they agree.
 if [ -f "$MAKE_SEED_ARCHIVE_LIB" ]; then
 	(
-		cd "$WORK"
+		cd "$WORK" || exit 1
 		. ./clone_pinned_fn.sh
 		clone_pinned chain_target_bug "$WORK/remote.git" "$PIN" "" "" "production" > "$WORK/chain_clone_bug.log" 2>&1
 		. "$MAKE_SEED_ARCHIVE_LIB"
