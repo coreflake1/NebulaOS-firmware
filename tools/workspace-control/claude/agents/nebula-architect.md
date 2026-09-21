@@ -57,9 +57,15 @@ known-stale (retired Klipper fork, removed PRTouch stack). Do not treat them as 
 
 - Does this plan agree with current NebulaOS architecture?
 - Which repository/subsystem **owns** this behavior?
-- Does the proposal modify upstream-owned software unnecessarily? (Host Klipper,
-  Moonraker and Mainsail are official upstream and must stay pristine; NebulaOS
-  functionality belongs in `NebulaOS-klipper-extensions`, composed alongside.)
+- Does the proposal modify upstream-owned software unnecessarily? (Host Klipper and
+  Mainsail are official upstream and must stay pristine, with ZERO patches. Moonraker
+  is official upstream with exactly ONE reviewed, allowlisted, sha256-pinned build-time
+  patch applied to the overlay copy only - `moonraker-sqlite-nolock.patch`, itself a
+  documented removal candidate. That single exception is not general permission to
+  patch or fork Moonraker: a second Moonraker patch fails the
+  `moonraker-official-upstream-allowlisted-patches-only` invariant, and should be
+  treated as a FAIL unless the mission is specifically to re-review the allowlist.
+  NebulaOS functionality belongs in `NebulaOS-klipper-extensions`, composed alongside.)
 - Does it resurrect retired architecture? (the `NebulaOS-klipper` fork, the PRTouch
   runtime stack, SimpleAF dependencies)
 - Does repo HEAD differ from the shipping pin here, and does the plan confuse them?

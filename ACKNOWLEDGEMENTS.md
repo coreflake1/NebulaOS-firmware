@@ -79,7 +79,11 @@ do that recovery path without it.
 
 ## The rest of the stack
 
-- [Moonraker](https://github.com/Arksine/moonraker) — the API server, run unmodified (Klipper has its own section above)
+- [Moonraker](https://github.com/Arksine/moonraker) — the API server, official upstream at a pinned
+  commit. The `vendor/moonraker` checkout is never touched. One reviewed NebulaOS compatibility
+  patch (`moonraker-sqlite-nolock.patch`) is applied at build time to the overlay copy only; it is
+  documented as a removal candidate in `scripts/build/04-cross-compile-app-stack.sh` and is the
+  only permitted Moonraker modification. (Klipper has its own section above)
 - [Mainsail](https://github.com/mainsail-crew/mainsail) — the web UI
 - [Buildroot](https://buildroot.org/) — the base of our whole build system
 - The Linux kernel, and the Ingenic X2000 SDK/BSP this board's kernel support is built from
