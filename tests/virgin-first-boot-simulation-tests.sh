@@ -161,22 +161,70 @@ EOF
 	# extras/PRTOUCH_REMOVAL_PLAN.md in NebulaOS-klipper-extensions). This
 	# test used to also instantiate a real PRTouchV2 object from
 	# prtouch.cfg's own [prtouch_v2] section; that module no longer exists,
-	# so only [z_compensate] is validated now. prtouch.cfg's include, which
-	# used to be commented out (a stale claim that "the native GD32 MCU does
-	# not ship HX711-capable firmware" - already contradicted by this
-	# project's own Phase 1.8A hardware qualification of Z_OFFSET_CALIBRATION
-	# via the native HX711 path), is now ACTIVE - without it, neither
-	# Z_OFFSET_CALIBRATION nor CRTENSE_NOZZLE_CLEAR would exist as a gcode
-	# command at all. [z_compensate] still lives inside prtouch.cfg itself
+	# so only [z_compensate] is validated now. prtouch.cfg's include is
+	# ACTIVE - without it the [z_compensate] section would never load, and
+	# the command it registers at the shipping pin, _NEBULAOS_NOZZLE_CLEAN,
+	# would not exist as a gcode command at all. (This comment used to name
+	# CRTENSE_NOZZLE_CLEAR and Z_OFFSET_CALIBRATION; neither is registered
+	# by the shipping z_compensate.py. It was describing the firmware's own
+	# removed klippy_extras/ mirror, which had drifted from what ships.)
+	# [z_compensate] still lives inside prtouch.cfg itself
 	# (kept at that name/path rather than renamed, to avoid rippling the
 	# rename through every other overlay/test/doc reference to it). This
 	# test validates that [z_compensate]'s own section content, in its
 	# now-active location, still parses correctly against real ZCompensate
 	# code now that PRTouch has been removed from it.
 	provisioned_cfg="$NEBULAOS_ROOT/printer_data/config/printer.cfg"
-	if PYTHONPATH="$REPO_ROOT" python3 - "$provisioned_cfg" "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/prtouch.cfg" <<'PYEOF'
+
+	# Resolve the extension modules that ACTUALLY SHIP. This used to import
+	# from the firmware repository's own klippy_extras/ mirror, which had
+	# drifted from the extensions repository that owns these modules: the
+	# mirror's z_compensate.py registered CRTENSE_NOZZLE_CLEAR and
+	# Z_OFFSET_CALIBRATION and defaulted hot_start_temp to 140, while the
+	# shipping module registers only _NEBULAOS_NOZZLE_CLEAN and defaults to
+	# 150. So this test was validating the shipped printer.cfg against code
+	# that is not shipped. The mirror has been removed.
+	#
+	# Resolution order, deliberately strict:
+	#   1. the build's own fetched checkout - authoritative, sitting at
+	#      KLIPPER_EXTENSIONS_PIN by construction;
+	#   2. a sibling workspace checkout, but ONLY if its HEAD is exactly
+	#      that pin;
+	#   3. otherwise SKIP, naming the pin it wanted.
+	# A sibling checkout at any other commit is precisely the "validate
+	# against non-shipping code" failure this change exists to end, so it
+	# is refused rather than silently used.
+	ext_pin=$(grep -E '^KLIPPER_EXTENSIONS_PIN=' "$REPO_ROOT/manifests/dependencies.conf" \
+		| tail -1 | cut -d= -f2)
+	extras_dir=""
+	if [ -d "$REPO_ROOT/vendor/nebulaos-klipper-extensions/extras" ]; then
+		extras_dir=$REPO_ROOT/vendor/nebulaos-klipper-extensions/extras
+	elif [ -d "$REPO_ROOT/../NebulaOS-klipper-extensions/extras" ]; then
+		_sib=$(cd "$REPO_ROOT/../NebulaOS-klipper-extensions" && pwd)
+		_sib_head=$(git -C "$_sib" rev-parse HEAD 2>/dev/null)
+		if [ -n "$ext_pin" ] && [ "$_sib_head" = "$ext_pin" ]; then
+			extras_dir=$_sib/extras
+		fi
+	fi
+
+	# klippy/extras is a PACKAGE at runtime, and z_compensate.py uses a
+	# relative import (`from . import nozzle_clear`). The extensions repo's
+	# extras/ has no __init__.py of its own, so compose a throwaway package
+	# of symlinks to the real shipping files rather than copying them.
+	pkg_root=$WORK/extpkg
+	if [ -n "$extras_dir" ]; then
+		rm -rf "$pkg_root"
+		mkdir -p "$pkg_root/klippy_extras"
+		: > "$pkg_root/klippy_extras/__init__.py"
+		for _m in "$extras_dir"/*.py; do
+			ln -sf "$_m" "$pkg_root/klippy_extras/$(basename "$_m")"
+		done
+	fi
+
+	if [ -z "$extras_dir" ]; then
+		echo "SKIP: no extensions source at KLIPPER_EXTENSIONS_PIN ($ext_pin) - run 00-fetch-vendor-sources.sh, or put the sibling NebulaOS-klipper-extensions checkout on that exact pin. Refusing to validate the shipped printer.cfg against non-shipping extension code."
+	elif PYTHONPATH="$pkg_root" python3 - "$provisioned_cfg" "$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/prtouch.cfg" <<'PYEOF'
 import configparser, sys
-sys.path.insert(0, ".")
 from klippy_extras import prtouch_test_support as fake
 from klippy_extras import z_compensate
 

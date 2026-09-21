@@ -317,19 +317,27 @@ rm -rf "$OVERLAY/opt/klipper/config" "$OVERLAY/opt/klipper/docs"
 cp -r "$VENDOR/klipper/config" "$OVERLAY/opt/klipper/"
 cp -r "$VENDOR/klipper/docs" "$OVERLAY/opt/klipper/"
 
-# This repo's own klippy_extras/ (prtouch_v2.py, z_compensate.py,
-# guppy_module_loader.py, etc.) used to be a real gap - written and
-# referenced by printer.cfg's own comments, but never actually copied
-# anywhere by this pipeline, since only vendor Klipper's own klippy/extras/
-# ever made it into the overlay above. Fixed at the source instead of here:
-# vendor/klipper now tracks coreflake1/NebulaOS-klipper's `nebulaos` branch
-# (00-fetch-vendor-sources.sh), which has every one of these files committed
-# directly into its own klippy/extras/ - the wholesale `cp -r klippy` above
-# already carries them into the overlay, so no separate copy step is needed
-# here any more. This repo's own klippy_extras/ directory remains the
-# reviewable source of truth for these files' content (edit there, then
-# re-commit into the fork - see docs/NEBULAOS_MUTABLE_RUNTIME_ARCHITECTURE.md
-# sec 1.3), it is just no longer injected at build time as untracked files.
+# NebulaOS extension modules (z_compensate.py, nozzle_clear.py,
+# nebulaos_*.py, the vendored community extras) are NOT copied here, and
+# this repository does not hold a copy of them.
+#
+# They are owned by coreflake1/NebulaOS-klipper-extensions, fetched at
+# KLIPPER_EXTENSIONS_PIN by 00-fetch-vendor-sources.sh, and composed into
+# host Klipper's klippy/extras/ as SYMLINKS driven by that repository's own
+# nebulaos-extensions.json manifest - see
+# scripts/build/overlay/etc/nebulaos-klipper-compose.sh, which resolves the
+# manifest, rejects path traversal and hard-fails on a collision with an
+# upstream file of the same name. Host Klipper itself stays official
+# upstream (Klipper3d/klipper) with zero core patches.
+#
+# This comment block used to say something different and wrong: that
+# vendor/klipper tracked coreflake1/NebulaOS-klipper's `nebulaos` branch and
+# that developers should edit this repository's own klippy_extras/ mirror
+# and "re-commit into the fork". That fork is retired, KLIPPER_REPO points
+# at Klipper3d/klipper, and the mirror has been deleted - it had drifted
+# from what actually ships, so following those instructions edited code that
+# reached no image. Edit the extensions repository, then advance
+# KLIPPER_EXTENSIONS_PIN.
 
 ### 2. Moonraker: source + its Python dependency chain
 echo "== copying Moonraker source =="
@@ -1029,7 +1037,8 @@ echo "== factory seeds created: $(ls -la "$OVERLAY/opt/nebulaos-seeds/") =="
 # Clean-Update + Virgin Baseline mission, Phase 6 (2026-08-08): a single,
 # immutable, squashfs-resident record of exactly what this image IS -
 # firmware tag/SHA, kernel/GuppyScreen pins - read at runtime by
-# klippy_extras/nebulaos_version.py (see docs/NEBULAOS_PERSISTENT_LIFECYCLE.md
+# nebulaos_version.py, owned by NebulaOS-klipper-extensions (see
+# docs/NEBULAOS_PERSISTENT_LIFECYCLE.md
 # and docs/NEBULAOS_UPDATE_OWNERSHIP.md) and combined there with the
 # LIVE Klipper checkout's own git state plus $SYSTEM/app-generation.json,
 # so "what's actually running" is always queryable in one place rather
