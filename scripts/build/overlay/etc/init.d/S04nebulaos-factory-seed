@@ -44,6 +44,34 @@
 # fixture-path convention as scripts/flash-spare-slot.sh's DEV_PREFIX) -
 # real boot never sets these, so ":=" always resolves to the real paths.
 SEEDS="${SEEDS:-/opt/nebulaos-seeds}"
+
+# Audit F-10. Six fixed /tmp log paths lived here. Fixed names collide
+# between runs, survive across boots as stale content, and are not writable
+# in every environment this script is exercised in (they made
+# tests/factory-seed-git-tests.sh fail 2 of 32 under a read-only /tmp).
+#
+# One validated private directory per run replaces them. The validation is
+# not ceremony: an unchecked mktemp leaves an EMPTY variable, and an empty
+# path reaching a redirection or a mutating command is the exact class that
+# previously let `git -C ""` retarget the caller's own repository (see
+# tests/test-harness-repo-safety-tests.sh). seed_log() therefore never
+# returns an empty string - it degrades to /dev/null instead.
+#
+# Deliberately NOT cleaned up: these are diagnostic logs the rest of this
+# boot may need, and they live under a tmpfs that clears on reboot anyway.
+# That preserves the previous runtime semantics.
+SEED_LOGDIR=$(mktemp -d "${TMPDIR:-/tmp}/nebulaos-factory-seed.XXXXXX" 2>/dev/null) || SEED_LOGDIR=""
+if [ -z "${SEED_LOGDIR:-}" ] || [ ! -d "${SEED_LOGDIR:-}" ]; then
+	SEED_LOGDIR=""
+fi
+
+seed_log() {
+	if [ -n "$SEED_LOGDIR" ]; then
+		printf '%s\n' "$SEED_LOGDIR/$1.log"
+	else
+		printf '%s\n' "/dev/null"
+	fi
+}
 APPS="${APPS:-/usr/data/nebulaos/apps}"
 SYSTEM="${SYSTEM:-/usr/data/nebulaos/system}"
 LOCKDIR="${LOCKDIR:-/usr/data/nebulaos/updates/locks}"
@@ -84,6 +112,18 @@ log() {
 # why it moved and the stale-lock fix it carries. Uses this script's own
 # log()/$APPS/$LOCKDIR directly.
 . "$GATE_LIB"
+
+# Shared seed-manifest reader (F-06). Same extraction rationale as
+# $GATE_LIB: identical logic in both S04 scripts, kept in one file.
+SEED_MANIFEST_LIB="${SEED_MANIFEST_LIB:-/etc/nebulaos-seed-manifest.sh}"
+# Sourced tolerantly. On a real device the overlay always ships it; if it
+# is ever absent, seed_manifest_branch() is simply undefined, the call
+# sites get an empty branch and REFUSE to seed with a named error, which
+# is the correct fail-closed outcome. Sourcing it unconditionally would
+# instead abort the whole script before any of that reasoning runs.
+if [ -f "$SEED_MANIFEST_LIB" ]; then
+	. "$SEED_MANIFEST_LIB"
+fi
 
 pause_expendable_services() {
 	log "pausing expendable services for memory-heavy seeding (guppyscreen, webcam)"
@@ -265,13 +305,13 @@ try_venv_seed() {
 	[ -f "$seed_path" ] || return 1
 	rm -rf "$envdir.partial"
 	mkdir -p "$envdir.partial"
-	if ! sh -c "gzip -dc '$seed_path' | tar -xo -C '$envdir.partial'" 2>/tmp/venv-seed-extract-error.log; then
-		log "WARNING: venv seed extraction failed ($seed_path) - see /tmp/venv-seed-extract-error.log - falling back to on-device venv creation"
+	if ! sh -c "gzip -dc '$seed_path' | tar -xo -C '$envdir.partial'" 2>"$(seed_log venv-seed-extract-error)"; then
+		log "WARNING: venv seed extraction failed ($seed_path) - see $(seed_log venv-seed-extract-error) - falling back to on-device venv creation"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	if ! "$envdir.partial/bin/python3" -c "$smoke_test" 2>/tmp/venv-seed-smoke-error.log; then
-		log "WARNING: venv seed failed its own import smoke test ($seed_path) - see /tmp/venv-seed-smoke-error.log - falling back to on-device venv creation"
+	if ! "$envdir.partial/bin/python3" -c "$smoke_test" 2>"$(seed_log venv-seed-smoke-error)"; then
+		log "WARNING: venv seed failed its own import smoke test ($seed_path) - see $(seed_log venv-seed-smoke-error) - falling back to on-device venv creation"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
@@ -292,13 +332,13 @@ setup_moonraker_env() {
 	fi
 	log "creating writable Moonraker Python environment at $envdir"
 	rm -rf "$envdir.partial"
-	if ! python3 -m venv --system-site-packages "$envdir.partial" 2>/tmp/moonraker-venv-error.log; then
-		log "ERROR: venv creation failed - see /tmp/moonraker-venv-error.log - leaving no partial state"
+	if ! python3 -m venv --system-site-packages "$envdir.partial" 2>"$(seed_log moonraker-venv-error)"; then
+		log "ERROR: venv creation failed - see $(seed_log moonraker-venv-error) - leaving no partial state"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	if ! "$envdir.partial/bin/python3" -c "import tornado, numpy, streaming_form_data" 2>/tmp/moonraker-venv-error.log; then
-		log "ERROR: moonraker venv failed its own import smoke test - see /tmp/moonraker-venv-error.log - rejecting"
+	if ! "$envdir.partial/bin/python3" -c "import tornado, numpy, streaming_form_data" 2>"$(seed_log moonraker-venv-error)"; then
+		log "ERROR: moonraker venv failed its own import smoke test - see $(seed_log moonraker-venv-error) - rejecting"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
@@ -336,13 +376,13 @@ setup_klipper_env() {
 	fi
 	log "creating writable Klippy Python environment at $envdir"
 	rm -rf "$envdir.partial"
-	if ! python3 -m venv --system-site-packages "$envdir.partial" 2>/tmp/klipper-venv-error.log; then
-		log "ERROR: venv creation failed - see /tmp/klipper-venv-error.log - leaving no partial state"
+	if ! python3 -m venv --system-site-packages "$envdir.partial" 2>"$(seed_log klipper-venv-error)"; then
+		log "ERROR: venv creation failed - see $(seed_log klipper-venv-error) - leaving no partial state"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	if ! "$envdir.partial/bin/python3" -c "import greenlet, cffi, jinja2, serial, can" 2>/tmp/klipper-venv-error.log; then
-		log "ERROR: klipper venv failed its own import smoke test - see /tmp/klipper-venv-error.log - rejecting"
+	if ! "$envdir.partial/bin/python3" -c "import greenlet, cffi, jinja2, serial, can" 2>"$(seed_log klipper-venv-error)"; then
+		log "ERROR: klipper venv failed its own import smoke test - see $(seed_log klipper-venv-error) - rejecting"
 		rm -rf "$envdir.partial"
 		return 1
 	fi
@@ -436,9 +476,28 @@ start() {
 	seed_git_app klipper master "https://github.com/Klipper3d/klipper.git"
 	klipper_seeded=$?
 	setup_klipper_env
-	seed_git_app nebulaos-klipper-extensions main \
-		"https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
-	extensions_seeded=$?
+	# F-06: the expected branch comes from the seed manifest this image
+	# shipped, never from a literal. The build writes it there from the
+	# same $KLIPPER_EXTENSIONS_BRANCH that drives make_seed_archive, so
+	# manifest and archive cannot disagree. Three hardcoded "main"
+	# literals here previously rejected every "production" archive, and
+	# because the check compares branch NAMES, main==production never
+	# masked it. See /etc/nebulaos-seed-manifest.sh.
+	#
+	# The ORIGIN stays a literal deliberately: the branch is a format
+	# claim about the archive (safe to derive), the origin is an identity
+	# claim about WHICH repository. Deriving that would let a build
+	# pointed at the wrong repo validate itself.
+	extensions_branch=$(seed_manifest_branch "$SEEDS/seed-manifest.json" \
+		nebulaos-klipper-extensions)
+	if [ -z "$extensions_branch" ]; then
+		log "ERROR: cannot determine the expected extensions branch from $SEEDS/seed-manifest.json - refusing to seed nebulaos-klipper-extensions rather than guessing a branch name (is $SEED_MANIFEST_LIB present?)"
+		extensions_seeded=1
+	else
+		seed_git_app nebulaos-klipper-extensions "$extensions_branch" \
+			"https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
+		extensions_seeded=$?
+	fi
 	seed_git_app moonraker master "https://github.com/Arksine/moonraker.git"
 	setup_moonraker_env
 	seed_mainsail
