@@ -44,7 +44,31 @@ source changed — which is exactly what it is currently telling you.
 
 ## How to read a MISS from 06-verify
 
-`scripts/build/06-verify.sh` prints `MISS` lines but **exits 0** and gates
-nothing. The mechanical gate is `scripts/build/assert-baseline-config.sh`, which
-sets `FAILED=1` and exits non-zero, run pre- and post-build by
-`scripts/build/build-qualified-baseline.sh:47,58-62`.
+`scripts/build/06-verify.sh` has two check semantics, and the difference
+matters when you are reading its output:
+
+- `check` - **reporting**. Prints `OK`/`MISS` and gates nothing. Most paths
+  here are produced by one specific build stage, and the partial pipelines
+  described in `docs/BUILD_FROM_SOURCE.md` legitimately run a subset of 00-06,
+  so a `MISS` is usually "you skipped a stage", not a defect.
+- `check_required` - **release-blocking**. A `MISS` on one of these prints
+  `<== REQUIRED`, and the script exits **non-zero** at the end.
+
+Updated 2026-09-23 (D-02). This section previously said 06-verify "exits 0 and
+gates nothing", which was true of every check and was the problem: the script
+carried a comment claiming its seed-manifest-library check made absence
+"impossible", while `check()` set no flag and the script had no aggregation and
+no failing exit. Image-content assertions belong here - this is the only tool
+that reads the built rootfs, via `debugfs` against `${IMAGES}/rootfs.ext2` - so
+the fix was to give it a real exit status, not to move the check elsewhere.
+
+The bar for `check_required` is deliberately high: the path must leave a
+shipped image permanently unable to perform a core lifecycle function, **and**
+it must be one that cannot legitimately be absent from a partial build. Today
+exactly one path qualifies, `/etc/nebulaos-seed-manifest.sh`.
+
+`scripts/build/assert-baseline-config.sh` remains the **kernel-baseline**
+gate - it sets `FAILED=1` and exits non-zero, run pre- and post-build by
+`scripts/build/build-qualified-baseline.sh:47,58-62`. It operates only on
+`$KERNEL_DIR`, `kernel.config` and the DTS, and has no access to the rootfs,
+so it is not the place for image-content assertions.
