@@ -19,6 +19,50 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 MACHINE_CFG="$REPO_ROOT/scripts/build/overlay/etc/nebulaos/klipper/machine.cfg"
 STOCK_CFG="$REPO_ROOT/artifacts/reference/stock-printer.cfg"
+PRINTER_CFG="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config/printer.cfg"
+
+# ---------------------------------------------------------------------------
+# Audit F-12. [extruder] rotation_distance is NOT in machine.cfg and must not
+# be: the Phase 2 calibration-framework mission deliberately moved it (and
+# the extruder PID terms) into the persistent printer.cfg seed's pre-baked
+# SAVE_CONFIG autosave block, so that stock PID_CALIBRATE and
+# NEBULAOS_ESTEPS_CALIBRATE can persist a real calibrated result the ordinary
+# Klipper way. machine.cfg:184-191 documents that move.
+#
+# This test previously asserted the value in machine.cfg and had been failing
+# ever since - asserting a retired ownership split rather than protecting the
+# current one. It now reads the location that actually owns the value. The
+# production config is unchanged; only the test's model of ownership is.
+#
+# Reads a key out of printer.cfg's "#*# " SAVE_CONFIG block.
+# ---------------------------------------------------------------------------
+saveconfig_get() {
+    _sc_file="$1"
+    _sc_section="$2"
+    _sc_key="$3"
+    sed -n 's/^#\*#[[:space:]]\{0,1\}//p' "$_sc_file" 2>/dev/null | awk -v section="$_sc_section" -v key="$_sc_key" '
+        /^\[/ {
+            h = $0
+            gsub(/^\[/, "", h); gsub(/\][[:space:]]*$/, "", h)
+            in_s = (h == section)
+            next
+        }
+        in_s {
+            if ($0 ~ /^[[:space:]]*$/) next
+            eq = index($0, "=")
+            if (eq == 0) next
+            k = substr($0, 1, eq - 1); v = substr($0, eq + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+            if (k == key) { print v; exit }
+        }
+    '
+}
+
+# Numeric equality, so 7.530 and 7.53 compare equal.
+num_eq() {
+    awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 == b + 0) }'
+}
 
 PASS=0
 FAIL=0
@@ -293,8 +337,23 @@ assert_cfg "extruder" "step_pin"  "PB4"  "[extruder] step_pin is PB4"
 assert_cfg "extruder" "dir_pin"   "PB3"  "[extruder] dir_pin is PB3"
 assert_cfg "extruder" "enable_pin" "!PC3" "[extruder] enable_pin is !PC3"
 assert_cfg "extruder" "microsteps" "16"   "[extruder] microsteps is 16"
-assert_cfg "extruder" "rotation_distance" "7.53" \
-    "[extruder] rotation_distance is 7.53"
+# F-12: owned by printer.cfg's SAVE_CONFIG block, not machine.cfg.
+_ext_rd=$(saveconfig_get "$PRINTER_CFG" "extruder" "rotation_distance")
+if [ -z "$_ext_rd" ]; then
+    fail "[extruder] rotation_distance not found in printer.cfg's SAVE_CONFIG block (it is owned there, not in machine.cfg)"
+elif num_eq "$_ext_rd" "7.53"; then
+    pass "[extruder] rotation_distance is 7.53 (SAVE_CONFIG-owned, value '$_ext_rd')"
+else
+    fail "[extruder] rotation_distance is '$_ext_rd' in printer.cfg's SAVE_CONFIG block, expected 7.53"
+fi
+
+# And it must NOT have come back into machine.cfg, which would re-create the
+# _disallow_include_conflicts collision the move exists to avoid.
+if [ -n "$(cfg_get "$MACHINE_CFG" "extruder" "rotation_distance")" ]; then
+    fail "[extruder] rotation_distance is back in machine.cfg - it is owned by the SAVE_CONFIG block (machine.cfg:184-191)"
+else
+    pass "[extruder] rotation_distance is absent from machine.cfg, as the current ownership split requires"
+fi
 
 # ===========================================================================
 # 9. Shared enable pin -- all four axes use the same !PC3
@@ -391,8 +450,19 @@ assert_stock_parity "stepper_y" "position_endstop" \
     "[stepper_y] position_endstop matches stock-printer.cfg"
 assert_stock_parity "extruder" "microsteps" \
     "[extruder] microsteps matches stock-printer.cfg"
-assert_stock_parity "extruder" "rotation_distance" \
-    "[extruder] rotation_distance matches stock-printer.cfg"
+# F-12: compare the SAVE_CONFIG-owned value against stock, numerically
+# (the seed carries 7.530, stock carries 7.53 - the same number).
+_ext_rd=$(saveconfig_get "$PRINTER_CFG" "extruder" "rotation_distance")
+_ext_rd_stock=$(cfg_get "$STOCK_CFG" "extruder" "rotation_distance")
+if [ -z "$_ext_rd" ]; then
+    fail "[extruder] rotation_distance matches stock-printer.cfg -- not found in printer.cfg's SAVE_CONFIG block"
+elif [ -z "$_ext_rd_stock" ]; then
+    fail "[extruder] rotation_distance matches stock-printer.cfg -- key not found in stock-printer.cfg"
+elif num_eq "$_ext_rd" "$_ext_rd_stock"; then
+    pass "[extruder] rotation_distance matches stock-printer.cfg (seed '$_ext_rd' == stock '$_ext_rd_stock')"
+else
+    fail "[extruder] rotation_distance differs from stock (seed='$_ext_rd', stock='$_ext_rd_stock')"
+fi
 
 # ===========================================================================
 # 15. Cross-reference: every TMC parameter matches stock
