@@ -121,6 +121,30 @@ pre-build)
 	# baseline.sh's own exit status was the only thing standing between a
 	# silently-dropped 9th variant and a "PASSED" report here.
 	FRAGMENT="$ARTIFACT_DIR/halley5-nebulaos-fragment.config"
+	# Audit F-08. The three fragment greps below used to double as
+	# skipped-variant detection, but only BY ACCIDENT: the committed
+	# fragment still held the retired Phase 1.9A content, so they failed
+	# when the variant had not run. That block is now correct (it states
+	# the 1.9B configuration the product actually ships), which means the
+	# greps alone can no longer tell "the variant ran" from "the committed
+	# baseline already said so".
+	#
+	# So check the variant's own applied-marker, which it has always
+	# written (accelerometer-eeprom-bus-enable-variant.sh:114,347-348) and
+	# which nothing has ever read. LIMITATION, stated honestly:
+	# build-work/ is not auto-cleaned, so a marker can survive from an
+	# earlier run in a REUSED checkout. It is a real positive signal only
+	# in the clean-room flow build-qualified-baseline.sh documents ("does
+	# NOT reuse any existing vendor/, build-work/, or artifacts/ state").
+	# The DTS check further below reads the freshly-cloned kernel tree and
+	# is not subject to that caveat.
+	VARIANT_MARKER="$REPO_ROOT/build-work/accelerometer-eeprom-bus-enable-variant-applied.txt"
+	if [ -f "$VARIANT_MARKER" ] && [ -s "$VARIANT_MARKER" ]; then
+		echo "  PASS: accelerometer-eeprom-bus-enable variant marker present ($(cat "$VARIANT_MARKER"))"
+	else
+		echo "  FAIL: no accelerometer-eeprom-bus-enable applied-marker at $VARIANT_MARKER - the 9th variant did not run in this build tree"
+		FAILED=1
+	fi
 	grep -q "CONFIG_SPI_GPIO=y" "$FRAGMENT" 2>/dev/null
 	check "CONFIG_SPI_GPIO=y present in tracked fragment (accelerometer-eeprom-bus-enable)" $?
 	grep -q "CONFIG_EEPROM_AT24=y" "$FRAGMENT" 2>/dev/null
