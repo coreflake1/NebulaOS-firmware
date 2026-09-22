@@ -45,6 +45,12 @@ pass() { echo "PASS: $1"; PASS=$((PASS + 1)); }
 #     the old paths in prose. A comment cannot execute, so it cannot
 #     reintroduce the namespace-ownership bug - only a live path literal
 #     in real code can.
+#   - S04nebulaos-migrate's migrate_static_ip_state() (audit F-11): a
+#     migration that moves state OUT of the retired alias has to name the
+#     alias it is moving out of. It only ever reads and `mv`s away from
+#     that path and never writes into it, which is the opposite of the
+#     regression this guard exists to catch. Named here specifically, not
+#     blanket-exempted: any OTHER live reference in that file still fails.
 check_no_bare_printer_data_or_guppyscreen_alias() {
 	hits=$(grep -rn '/usr/data/printer_data\b\|/usr/data/guppyscreen\b' \
 		"$OVERLAY/etc" "$OVERLAY/opt" 2>/dev/null \
@@ -54,7 +60,8 @@ check_no_bare_printer_data_or_guppyscreen_alias() {
 			sub(/^[^:]*:[^:]*:/, "", content)
 			sub(/^[[:space:]]*/, "", content)
 			if (content !~ /^#/) print
-		}')
+		}' \
+		| grep -v '^[^:]*/S04nebulaos-migrate:[0-9]*:[[:space:]]*_msis_old_dir="/usr/data/printer_data/config"$')
 
 	if [ -z "$hits" ]; then
 		pass "no active-code reference to the retired /usr/data/printer_data or /usr/data/guppyscreen top-level aliases (outside the documented gcodes exception and S01persistent-datastore's own forensic history comments)"

@@ -1003,9 +1003,20 @@ check_absent /opt/nebulaos-seeds/printer_data-config/simpleaf/homing.cfg
 # so a fresh device built without this file would silently ship a broken
 # touchscreen static-IP feature. The 2026-08 "remove SimpleAF/GuppyScreen
 # deps" refactor deleted it along with the genuinely dead scripts in the
-# same directory without checking for this dependency. Restored
-# byte-identical from a live, already-qualified device (sha256
-# c131017c03b61e225a46f1cd3b70a0a5f602c6fe994bc761dd9f58bd23bc2b20).
+# same directory without checking for this dependency.
+#
+# Audit F-11 (2026-09-22): that restore was taken "byte-identical from a
+# live, already-qualified device" (sha256 c131017c...), and the device
+# predated GUPPYSCREEN_PIN 5f1911ac's own fix - so it silently reverted
+# static_ip.py's state paths back onto the retired /usr/data/printer_data
+# alias, which overlaps stock's shared tree. This file is OWNED by
+# NebulaOS-guppyscreen (k1/scripts/static_ip.py); the copy here exists only
+# because the compiled binary hardcodes the runtime path. It is now
+# byte-identical to that owner at GUPPYSCREEN_PIN (sha256
+# b3e7a0dae3f86343a4d205effed240b971ff6e2977ded547f39767fe0da6aa72), and
+# tests/guppyscreen-owned-files-tests.sh asserts that mechanically. Do not
+# hand-edit it or restore it from a device - update the owning repository,
+# advance the pin, then re-sync.
 check /opt/nebulaos-seeds/printer_data-config/GuppyScreen/scripts/static_ip.py
 
 rm -rf /tmp/printerdata-check
