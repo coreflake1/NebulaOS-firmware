@@ -83,7 +83,14 @@ fi
 #
 # An unvalidated empty path variable is invisible to a `cd`-pattern scan, so
 # it gets its own check.
+# Coverage extended (audit F-10): the shipped overlay is in scope too. The
+# factory-seed script now creates a validated private log directory instead
+# of six fixed /tmp paths, and the same empty-path rule applies to it - an
+# unvalidated mktemp there would put an empty path into a redirection on a
+# real device, not just in a test.
 unchecked_tmp=$(echo "$SCAN_FILES" "$SCRIPT_DIR/../scripts/build/lib"/*.sh \
+	"$SCRIPT_DIR/../scripts/build/overlay/etc/init.d"/* \
+	"$SCRIPT_DIR/../scripts/build/overlay/etc"/*.sh \
 	| tr ' ' '\n' | grep -v '^$' | sort -u | while IFS= read -r f; do
 		[ -f "$f" ] || continue
 		awk -v F="$f" '
