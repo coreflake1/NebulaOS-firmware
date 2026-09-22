@@ -14,6 +14,10 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+# The S04 scripts source this shared reader (audit F-06). Exported once
+# here so every `env ... sh -c ". $SCRIPT"` invocation below inherits it;
+# on a device it is /etc/nebulaos-seed-manifest.sh and this is a no-op.
+export SEED_MANIFEST_LIB="${SEED_MANIFEST_LIB:-$SCRIPT_DIR/../scripts/build/overlay/etc/nebulaos-seed-manifest.sh}"
 # Points every sourced init script's own GATE_LIB override at the real,
 # tracked shared gate (not the real device path /etc/nebulaos-
 # maintenance-gate.sh, which does not exist on a dev machine) - exported
@@ -93,7 +97,7 @@ setup_seeds() {
   "migration_version": "gen-v2",
   "seeds": {
     "klipper": {"seed_commit": "$seed_commit"},
-    "nebulaos-klipper-extensions": {"seed_commit": "$ext_seed_commit"}
+    "nebulaos-klipper-extensions": {"branch": "main", "seed_commit": "$ext_seed_commit"}
   }
 }
 EOF

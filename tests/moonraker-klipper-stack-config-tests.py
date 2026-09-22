@@ -225,7 +225,7 @@ if cfg.has_section(SECT):
     expectations = {
         "type": "git_repo",
         "origin": EXTENSIONS_ORIGIN,
-        "primary_branch": "main",
+        "primary_branch": "production",
         "managed_services": "klipper",
         "path": "/usr/data/nebulaos/apps/nebulaos-klipper-extensions",
     }
@@ -241,10 +241,11 @@ if cfg.has_section(SECT):
         f"extensions have unexpected pinned_commit: {e.get('pinned_commit')!r}",
     )
     check(
-        e.get("primary_branch") == "main",
-        "primary_branch is set explicitly - Moonraker defaults it to 'master', "
-        "which this repository does not use",
-        "primary_branch must be set explicitly for a repo on 'main'",
+        e.get("primary_branch") == "production",
+        "primary_branch is set explicitly to the deployed-runtime branch - "
+        "Moonraker defaults it to 'master', which this repository does not use, "
+        "and 'main' is the DEVELOPMENT branch (audit F-06)",
+        "primary_branch must be 'production', the deployed-runtime branch",
     )
     check(
         "virtualenv" not in e and "requirements" not in e,

@@ -30,6 +30,10 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+# The S04 scripts source this shared reader (audit F-06). Exported once
+# here so every `env ... sh -c ". $SCRIPT"` invocation below inherits it;
+# on a device it is /etc/nebulaos-seed-manifest.sh and this is a no-op.
+export SEED_MANIFEST_LIB="${SEED_MANIFEST_LIB:-$SCRIPT_DIR/../scripts/build/overlay/etc/nebulaos-seed-manifest.sh}"
 OVERLAY_ETC="$REPO_ROOT/scripts/build/overlay/etc"
 MAKE_ARCHIVE_LIB="$REPO_ROOT/scripts/build/lib/make-seed-archive.sh"
 COMPOSE_LIB="$OVERLAY_ETC/nebulaos-klipper-compose.sh"
@@ -157,7 +161,7 @@ build_seed_set() {
   "migration_version": "$gen",
   "seeds": {
     "klipper": {"seed_commit": "$kc"},
-    "nebulaos-klipper-extensions": {"seed_commit": "$ec"}
+    "nebulaos-klipper-extensions": {"branch": "main", "seed_commit": "$ec"}
   }
 }
 EOF

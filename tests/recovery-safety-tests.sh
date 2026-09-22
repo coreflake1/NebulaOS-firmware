@@ -85,22 +85,65 @@ OFFICIAL_KLIPPER="https://github.com/Klipper3d/klipper.git"
 # ways for it to happen.
 
 test_branch_consistency() {
-	for spec in "klipper:$KLIPPER_BRANCH" \
-	            "nebulaos-klipper-extensions:$KLIPPER_EXTENSIONS_BRANCH"; do
-		app=${spec%%:*}
-		want=${spec#*:}
-		seed=$(grep -o "seed_git_app $app [a-zA-Z0-9_-]*" \
-			"$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed" \
-			| awk '{print $3}' | head -1)
-		mig=$(grep -o "reseed_git_app $app [a-zA-Z0-9_-]*" \
-			"$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate" \
-			| awk '{print $3}' | head -1)
-		if [ -n "$want" ] && [ "$want" = "$seed" ] && [ "$want" = "$mig" ]; then
-			pass "$app: manifest ($want), factory-seed ($seed) and migrate ($mig) all track the same branch"
-		else
-			fail "$app: branch drift - manifest='$want' factory-seed='$seed' migrate='$mig'"
-		fi
-	done
+	FS="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed"
+	MG="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
+	BUILD="$REPO_ROOT/scripts/build/04-cross-compile-app-stack.sh"
+
+	# --- klipper: still a literal on both sides, so still compare them ----
+	# Klipper's branch is hardcoded in the seed manifest too
+	# (04-cross-compile-app-stack.sh writes "branch": "master" literally for
+	# it), so literal-vs-literal is the right check here and must not be
+	# dropped just because the extensions half changed shape.
+	k_seed=$(grep -o "seed_git_app klipper [a-zA-Z0-9_-]*" "$FS" | awk '{print $3}' | head -1)
+	k_mig=$(grep -o "reseed_git_app klipper [a-zA-Z0-9_-]*" "$MG" | awk '{print $3}' | head -1)
+	if [ -n "$KLIPPER_BRANCH" ] && [ "$KLIPPER_BRANCH" = "$k_seed" ] && [ "$KLIPPER_BRANCH" = "$k_mig" ]; then
+		pass "klipper: manifest ($KLIPPER_BRANCH), factory-seed ($k_seed) and migrate ($k_mig) all track the same branch"
+	else
+		fail "klipper: branch drift - manifest='$KLIPPER_BRANCH' factory-seed='$k_seed' migrate='$k_mig'"
+	fi
+
+	# --- extensions: the contract changed, so the check changed ----------
+	# Audit F-06: three hardcoded "main" literals asserted the DEVELOPMENT
+	# branch against archives the build had put on "production", the
+	# deployed-runtime branch. Because the assertion compares branch NAMES,
+	# main == production never masked it. The fix is not a corrected
+	# literal - that is the same drift, re-armed - but derivation from the
+	# seed manifest the image ships. So the property to guard is now
+	# "no literal anywhere, and every site derives", plus the integrity of
+	# the derivation chain itself.
+	ext_literals=$(grep -nE '(seed_git_app|reseed_git_app) nebulaos-klipper-extensions[[:space:]]+[a-zA-Z0-9_-]+' "$FS" "$MG"; \
+	               grep -nE '^[[:space:]]*branch="(main|production|master)"' "$MG")
+	if [ -z "$ext_literals" ]; then
+		pass "nebulaos-klipper-extensions: no hardcoded branch literal at any runtime seeding site"
+	else
+		fail "nebulaos-klipper-extensions: a hardcoded branch literal is back:
+$ext_literals"
+	fi
+
+	derive_sites=$(grep -c 'seed_manifest_branch "$SEEDS/seed-manifest.json"' "$FS" "$MG" 2>/dev/null \
+		| awk -F: '{t+=$2} END{print t+0}')
+	if [ "$derive_sites" -ge 3 ]; then
+		pass "nebulaos-klipper-extensions: all 3 runtime sites derive the branch from the seed manifest ($derive_sites found)"
+	else
+		fail "nebulaos-klipper-extensions: only $derive_sites site(s) derive from the seed manifest, expected 3 (factory-seed, migrate reseed, seed_missing_extensions)"
+	fi
+
+	# The anchor of the whole derivation chain: the build must still write
+	# the manifest field from $KLIPPER_EXTENSIONS_BRANCH. If that ever
+	# becomes a literal, derivation silently starts agreeing with the wrong
+	# value and every check above still passes.
+	if grep -qF '"branch": "$KLIPPER_EXTENSIONS_BRANCH"' "$BUILD"; then
+		pass "seed manifest's extensions branch field is written from \$KLIPPER_EXTENSIONS_BRANCH (derivation chain intact)"
+	else
+		fail "04-cross-compile-app-stack.sh no longer writes the extensions seed-manifest branch from \$KLIPPER_EXTENSIONS_BRANCH - the derivation chain is broken at its source"
+	fi
+
+	# And the runtime contract itself must still be production.
+	if [ "$KLIPPER_EXTENSIONS_BRANCH" = "production" ]; then
+		pass "manifest runtime contract: KLIPPER_EXTENSIONS_BRANCH=production"
+	else
+		fail "manifest runtime contract: KLIPPER_EXTENSIONS_BRANCH='$KLIPPER_EXTENSIONS_BRANCH', expected production"
+	fi
 }
 
 # --- Test 2: the recovery target is official upstream, and the pin is on it

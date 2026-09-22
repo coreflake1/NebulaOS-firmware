@@ -20,6 +20,10 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+# The S04 scripts source this shared reader (audit F-06). Exported once
+# here so every `env ... sh -c ". $SCRIPT"` invocation below inherits it;
+# on a device it is /etc/nebulaos-seed-manifest.sh and this is a no-op.
+export SEED_MANIFEST_LIB="${SEED_MANIFEST_LIB:-$SCRIPT_DIR/../scripts/build/overlay/etc/nebulaos-seed-manifest.sh}"
 S02_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S02nebulaos-namespace"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/printerdata-seed-tests.XXXXXX")
 [ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: nebulaos-printerdata-seed-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
