@@ -373,13 +373,34 @@ else
 	fail "control: this fixture cannot record a generation even when everything is valid, so the fail-closed assertions below would pass for the wrong reason: $_ctl"
 fi
 
+# $1 overrides SEED_MANIFEST_LIB so the lib-absent case can point it at a
+# path that does not exist - the scripts source it tolerantly on purpose, so
+# this is a REACHABLE production state, not a synthetic one.
 run_migrate6() {
 	env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 SEEDS="$SEEDS6" APPS="$A6" SYSTEM="$S6" \
-		LOCKDIR="$W/locks6" GATE_LIB="$GATE_LIB_SRC" SEED_MANIFEST_LIB="$MANIFEST_LIB" \
+		LOCKDIR="$W/locks6" GATE_LIB="$GATE_LIB_SRC" \
+		SEED_MANIFEST_LIB="${1:-$MANIFEST_LIB}" \
 		sh -c '. "$0"; start' "$MIGRATE" 2>&1
 }
 
-for bad in no-branch absent; do
+# The three cases are NOT equivalent, and only two of them reach the reseed
+# site. Spelled out because a previous version of this section passed for the
+# wrong reason and the difference is invisible from the assertion text:
+#
+#   no-branch  - manifest present and well formed, extensions object simply
+#                has no "branch" key. Reaches the reseed site; branch empty.
+#   lib-absent - manifest fully valid, but /etc/nebulaos-seed-manifest.sh is
+#                missing, so seed_manifest_branch() is never defined. Reaches
+#                the reseed site; branch empty. This is the one that actually
+#                happens in the field if the library is dropped from the
+#                overlay, and it is why 06-verify.sh checks for the file.
+#   absent     - no manifest at all. Does NOT reach the reseed site: start()
+#                returns at the `[ ! -f "$SEEDS/seed-manifest.json" ]` guard
+#                (S04nebulaos-migrate:1247) with action skipped:no_manifest.
+#                Kept because "no manifest must never record a generation" is
+#                still worth pinning - but it proves nothing about the reseed
+#                site, so the reseed-specific assertions below skip it.
+for bad in no-branch lib-absent absent; do
 	rm -f "$S6/app-generation.json"
 	case $bad in
 		no-branch) cat > "$SEEDS6/seed-manifest.json" <<'J'
@@ -393,31 +414,77 @@ for bad in no-branch absent; do
 }
 J
 		;;
+		lib-absent) cat > "$SEEDS6/seed-manifest.json" <<'J'
+{
+  "migration_version": "gen-test-e",
+  "components": {
+    "klipper": { "branch": "master", "seed_commit": "a" },
+    "nebulaos-klipper-extensions": { "branch": "production", "seed_commit": "b" },
+    "moonraker": { "branch": "master", "seed_commit": "c" }
+  }
+}
+J
+		;;
 		absent) rm -f "$SEEDS6/seed-manifest.json" ;;
 	esac
-	out=$(run_migrate6)
+	rm -f "$S6/diagnostics/migration-state.json"
+	if [ "$bad" = lib-absent ]; then
+		out=$(run_migrate6 "$W/no-such-seed-manifest-lib.sh")
+	else
+		out=$(run_migrate6)
+	fi
 	if [ -f "$S6/app-generation.json" ]; then
 		fail "migrate reseed with a $bad manifest RECORDED A GENERATION - it reported success while the extensions half was never reseeded"
 	else
 		pass "migrate reseed with a $bad manifest records no generation (fails closed, will retry)"
 	fi
-	if [ "$bad" = no-branch ]; then
+	if [ "$bad" != absent ]; then
 		case "$out" in
 			*"did not migrate as a complete pair"*|*incomplete*)
 				pass "migrate reseed with a $bad manifest reports the pair as incomplete" ;;
 			*) fail "migrate reseed with a $bad manifest did not report an incomplete pair: $out" ;;
 		esac
+		# Pin the DIAGNOSIS, not just "something failed". The incomplete-pair
+		# message above fires if EITHER half is not ok, so on its own it does
+		# not prove the extensions half was the cause. These two do:
+		# klipper succeeded, and extensions failed for this specific reason.
+		_ds="$S6/diagnostics/migration-state.json"
+		if grep -q '"extensions_reseed": "branch_undeterminable"' "$_ds" 2>/dev/null; then
+			pass "migrate reseed with a $bad manifest records extensions_reseed=branch_undeterminable"
+		else
+			fail "migrate reseed with a $bad manifest did not record extensions_reseed=branch_undeterminable: $(cat "$_ds" 2>/dev/null)"
+		fi
+		if grep -q '"klipper_reseed": "success"' "$_ds" 2>/dev/null; then
+			pass "migrate reseed with a $bad manifest still reseeded klipper (so the extensions half is provably the failing one)"
+		else
+			fail "migrate reseed with a $bad manifest did not reseed klipper, so the assertions above do not isolate the extensions half: $(cat "$_ds" 2>/dev/null)"
+		fi
 	fi
 done
 write_manifest production
 
-# KNOWN LIMITATION, deliberately not asserted here. S04nebulaos-migrate:1215
-# creates BACKUP_DIR before any component is attempted, and :1288-1290 ends
-# without advancing the generation on failure, with no failure counter or
-# backoff. So ANY persistent per-boot migration failure - not just this one -
-# still produces one backup directory per boot, against
-# nebulaos-retention.sh's -mtime +7 floor. Fixing F-06 removes today's
-# trigger; it does not remove that amplifier, which needs its own change.
+# KNOWN LIMITATION, deliberately not asserted here, and made MORE reachable by
+# the fail-closed fix above - stated plainly rather than buried.
+#
+# S04nebulaos-migrate:1301 creates BACKUP_DIR before any component is
+# attempted, and the generation is not advanced on failure, with no failure
+# counter and no backoff. reseed_git_app() moves the previous checkout into
+# that directory as it cuts each component over, so every boot that fails
+# part-way leaves a full copy of whatever DID succeed behind.
+# nebulaos-retention.sh:203 only ever considers entries older than -mtime +7
+# (MIGRATION_BACKUP_KEEP=2 at :240 applies within that set), so nothing is
+# reclaimed for the first seven days.
+#
+# branch_undeterminable is a deterministic, image-wide condition: if the
+# manifest or the library is wrong in an image, it is wrong on every boot of
+# every device flashed with it. The pre-fix fail-OPEN bug recorded a
+# generation and so stopped after one boot - wrong, but self-limiting on
+# disk. Failing closed is correct and unbounded. A real device has already
+# been observed at ~1.6GB/95% of 5.9GB from this amplifier.
+#
+# Fixing F-06 removes today's trigger; it does not remove the amplifier,
+# which needs its own change (failure counter + backoff, or create
+# BACKUP_DIR lazily on first actual cutover).
 
 echo ""
 echo "extensions-branch-contract-tests: $PASS passed, $FAIL failed"

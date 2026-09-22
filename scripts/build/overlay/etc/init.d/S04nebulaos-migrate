@@ -1158,11 +1158,22 @@ migrate_guppy_stale_modules() {
 # were flashed from an image predating b1f0436 (2026-08-19). This is a narrow
 # legacy path, not a broad one - but those devices exist, so it runs.
 #
-# The realpath comparison is load-bearing, not defensive noise. Before
-# b1f0436, S01persistent-datastore created a compatibility SYMLINK
-# /usr/data/printer_data -> /opt/printer_data. On such a device the "old" and
-# "new" paths are the SAME FILE, and a string-compare migration would move a
-# file onto itself.
+# Two guards below handle the pre-b1f0436 alias case, and it is worth being
+# precise about which one actually does it. Before b1f0436,
+# S01persistent-datastore created a compatibility SYMLINK
+# /usr/data/printer_data -> /opt/printer_data, so "old" and "new" can be the
+# SAME FILE and a string-compare migration would move a file onto itself.
+#
+# The realpath compare catches that only when the alias is a symlink the whole
+# way. It does NOT catch it on a real device: `old` resolves through the
+# symlink to /opt/printer_data/config/..., while `new` is
+# $PRINTER_DATA_CONFIG (/usr/data/nebulaos/printer_data/config/...), which
+# reaches the same inode through a BIND MOUNT (S01persistent-datastore,
+# S05nebulaos-activate). readlink -f does not resolve bind mounts, so the two
+# strings differ even though it is one file. What saves us there is the next
+# guard, `[ -e "$_msis_new" ]`, which is true for that same file and takes the
+# "already exists at the canonical location" path. Both are kept: the realpath
+# compare for the pure-symlink case, the -e guard for the bind-mount case.
 migrate_static_ip_state() {
 	_msis_old_dir="/usr/data/printer_data/config"
 	_msis_new_dir="$PRINTER_DATA_CONFIG"
@@ -1337,7 +1348,10 @@ start() {
 			# while the extensions half was never reseeded - then the next
 			# boot takes the version-match early return and never retries.
 			# That is a silent, permanent new-Klipper-against-old-extensions
-			# divergence, i.e. exactly what the pair guard exists to stop.
+			# divergence. Note what the pair guard below can and cannot do
+			# about it: klipper was already cut over at its own reseed call
+			# above, so the guard cannot un-promote it - it withholds the
+			# generation record, which is what makes the next boot retry.
 			# A distinct result string, because _diag_write_state is the
 			# only forensic record a field device leaves and "manifest or
 			# library unreadable" is a different diagnosis from "the reseed
@@ -1381,8 +1395,16 @@ start() {
 	# The Klipper stack is validated as a pair. Report it as one, so a
 	# reader of the boot log sees "the pair failed", not two independent
 	# component lines they have to correlate themselves.
+	# This is a GENERATION-RECORDING guard, not a promotion guard, and the
+	# distinction matters to whoever reads this line at 2am. reseed_git_app()
+	# cuts each component over individually (the mv pair above), and klipper
+	# is reseeded before the extensions branch is even derived - so by the
+	# time we get here the half that succeeded is ALREADY live on disk. What
+	# is withheld is the generation record, which is what makes the next boot
+	# retry instead of taking the version-match early return. The log said
+	# "NEITHER half is promoted" until 2026-09-22; that was simply false.
 	if [ "$klipper_ok" != "1" ] || [ "$extensions_ok" != "1" ]; then
-		log "ERROR: the Klipper stack did not migrate as a complete pair (klipper ok=$klipper_ok, extensions ok=$extensions_ok). Running new Klipper against old extensions, or the reverse, is exactly the mismatch this pairing exists to prevent - so NEITHER half is promoted and the generation is not advanced."
+		log "ERROR: the Klipper stack did not migrate as a complete pair (klipper ok=$klipper_ok, extensions ok=$extensions_ok). Running new Klipper against old extensions, or the reverse, is exactly the mismatch this pairing exists to prevent. The generation is NOT advanced, so the next boot retries - but note the half that did succeed has already been cut over on disk, and the previous tree for it is in $BACKUP_DIR. Until this is resolved every boot repeats the migration and adds another backup there."
 	fi
 
 	if [ "$klipper_ok" = "1" ] && [ "$extensions_ok" = "1" ] && [ "$moonraker_ok" = "1" ]; then
