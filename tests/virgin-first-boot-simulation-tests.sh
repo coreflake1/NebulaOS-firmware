@@ -37,6 +37,12 @@ S02_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S02nebulaos-namespace"
 S04_FACTORY_SEED_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed"
 S04_MIGRATE_SCRIPT="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
 REAL_PRINTER_DATA_CONFIG="$REPO_ROOT/scripts/build/overlay/opt/printer_data/config"
+OFFICIAL_KLIPPER_ORIGIN="https://github.com/Klipper3d/klipper.git"
+EXT_ORIGIN="https://github.com/coreflake1/NebulaOS-klipper-extensions.git"
+SEED_MANIFEST_LIB="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-seed-manifest.sh"
+# The deployed-runtime branch, from the manifest that owns the contract.
+EXT_RUNTIME_BRANCH=$(grep -E '^KLIPPER_EXTENSIONS_BRANCH=' "$REPO_ROOT/manifests/dependencies.conf" | tail -1 | cut -d= -f2)
+EXT_RUNTIME_BRANCH="${EXT_RUNTIME_BRANCH:-production}"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/virgin-first-boot-tests.XXXXXX")
 [ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: virgin-first-boot-simulation-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -57,22 +63,56 @@ test_virgin_first_boot_produces_valid_klipper_config() {
 	rm -rf "$NEBULAOS_ROOT" "$SEEDS"
 	mkdir -p "$SEEDS"
 
-	# 1. Build a real, throwaway "canonical klipper" fixture archive -
-	# content doesn't matter for this test (recovery-safety-tests.sh
-	# already verifies the real pin's real content); only branch/origin/
-	# clean-tree matter to the seeding pipeline itself.
+	# 1. Build throwaway fixture archives for BOTH halves of the Klipper
+	# stack - content doesn't matter here (recovery-safety-tests.sh
+	# verifies the real pins' real content); branch/origin/clean-tree are
+	# what the seeding pipeline actually checks.
+	#
+	# Audit F-07: this fixture used to model the RETIRED
+	# coreflake1/NebulaOS-klipper fork as klipper's origin, and passed a
+	# klippy/chelper/c_helper.so dirty_exclude that production stopped
+	# using. Production seeds OFFICIAL Klipper3d/klipper
+	# (S04nebulaos-factory-seed:436). Modelling a retired architecture
+	# made this suite green while the real first boot was broken.
+	#
+	# Audit F-06: it also never seeded the extension set at all, which is
+	# exactly why the branch-contract defect was invisible here. Both
+	# halves are modelled now, and the extensions half is seeded through
+	# the corrected semantics - branch derived from the seed manifest, on
+	# the deployed-runtime branch, never a "main" literal.
 	klipper_src="$WORK/klipper-src"
 	git init -q -b master "$klipper_src"
 	echo "fixture klipper" > "$klipper_src/marker.txt"
 	git -C "$klipper_src" add -A
 	git -C "$klipper_src" -c user.email=t@l -c user.name=t commit -q -m "fixture"
 	klipper_commit=$(make_seed_archive "$klipper_src" master \
-		"https://github.com/coreflake1/NebulaOS-klipper.git" "$SEEDS/klipper.tar.gz")
+		"$OFFICIAL_KLIPPER_ORIGIN" "$SEEDS/klipper.tar.gz")
 
+	ext_src="$WORK/extensions-src"
+	git init -q -b "$EXT_RUNTIME_BRANCH" "$ext_src"
+	mkdir -p "$ext_src/extras"
+	echo "fixture extensions" > "$ext_src/extras/marker.py"
+	git -C "$ext_src" add -A
+	git -C "$ext_src" -c user.email=t@l -c user.name=t commit -q -m "fixture"
+	ext_commit=$(make_seed_archive "$ext_src" "$EXT_RUNTIME_BRANCH" \
+		"$EXT_ORIGIN" "$SEEDS/nebulaos-klipper-extensions.tar.gz")
+
+	# Real manifest shape: per-component objects carrying the branch the
+	# build put each archive on. The extensions branch assertion is read
+	# from here at runtime (/etc/nebulaos-seed-manifest.sh).
 	cat > "$SEEDS/seed-manifest.json" <<EOF
 {
   "migration_version": "virgin-sim-gen-1",
-  "seeds": {"klipper": {"seed_commit": "$klipper_commit"}}
+  "components": {
+    "klipper": {
+      "branch": "master",
+      "seed_commit": "$klipper_commit"
+    },
+    "nebulaos-klipper-extensions": {
+      "branch": "$EXT_RUNTIME_BRANCH",
+      "seed_commit": "$ext_commit"
+    }
+  }
 }
 EOF
 
@@ -96,9 +136,13 @@ EOF
 	# real fresh boot's S04 slot would (factory-seed runs before migrate).
 	env S04NEBULAOS_FACTORY_SEED_NO_AUTORUN=1 SEEDS="$SEEDS" \
 		APPS="$NEBULAOS_ROOT/apps" SYSTEM="$NEBULAOS_ROOT/system" \
+		SEED_MANIFEST_LIB="$SEED_MANIFEST_LIB" \
+		OFFICIAL_KLIPPER_ORIGIN="$OFFICIAL_KLIPPER_ORIGIN" EXT_ORIGIN="$EXT_ORIGIN" \
 		sh -c ". '$S04_FACTORY_SEED_SCRIPT'; \
-			seed_git_app klipper master 'https://github.com/coreflake1/NebulaOS-klipper.git' \
-				klippy/chelper/c_helper.so; \
+			seed_git_app klipper master \"\$OFFICIAL_KLIPPER_ORIGIN\"; \
+			b=\$(seed_manifest_branch \"\$SEEDS/seed-manifest.json\" nebulaos-klipper-extensions); \
+			[ -n \"\$b\" ] || { echo NO_BRANCH; exit 9; }; \
+			seed_git_app nebulaos-klipper-extensions \"\$b\" \"\$EXT_ORIGIN\"; \
 			record_initial_generation" > "$WORK/s04-seed.log" 2>&1
 
 	if [ ! -e "$NEBULAOS_ROOT/apps/klipper/.git" ]; then
@@ -106,6 +150,28 @@ EOF
 		return
 	fi
 	pass "virgin boot: canonical klipper checkout seeded"
+
+	# F-06: the extension set must actually provision on a virgin boot.
+	if [ ! -e "$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions/.git" ]; then
+		fail "virgin boot: extension set was NOT seeded - this is audit finding F-06 ($(cat "$WORK/s04-seed.log"))"
+		return
+	fi
+	pass "virgin boot: extension set seeded on the deployed-runtime branch"
+	_vb_branch=$(git -C "$NEBULAOS_ROOT/apps/nebulaos-klipper-extensions" symbolic-ref --short HEAD 2>/dev/null)
+	if [ "$_vb_branch" = "$EXT_RUNTIME_BRANCH" ]; then
+		pass "virgin boot: extensions checkout is on '$EXT_RUNTIME_BRANCH', the runtime contract"
+	else
+		fail "virgin boot: extensions checkout is on '$_vb_branch', expected '$EXT_RUNTIME_BRANCH'"
+	fi
+
+	# F-07 regression guard: if a literal "main" ever comes back to a
+	# runtime seeding site, say so here rather than silently modelling it.
+	if grep -qE '(seed_git_app|reseed_git_app) nebulaos-klipper-extensions[[:space:]]+main' \
+		"$S04_FACTORY_SEED_SCRIPT" "$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate" 2>/dev/null; then
+		fail "a runtime seeding site hardcodes the DEVELOPMENT branch 'main' again (audit F-06)"
+	else
+		pass "no runtime seeding site hardcodes 'main' for the extension set"
+	fi
 
 	if [ ! -f "$NEBULAOS_ROOT/system/app-generation.json" ] \
 		|| ! grep -q "virgin-sim-gen-1" "$NEBULAOS_ROOT/system/app-generation.json"; then
@@ -118,7 +184,7 @@ EOF
 	# be a clean no-op - the exact fresh-boot-ordering property Phase 3/4
 	# fixed and tests/app-migration-tests.sh already covers in isolation;
 	# re-confirmed here as part of the full chained pipeline.
-	env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 SEEDS="$SEEDS" \
+	env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 SEED_MANIFEST_LIB="$SEED_MANIFEST_LIB" SEEDS="$SEEDS" \
 		APPS="$NEBULAOS_ROOT/apps" SYSTEM="$NEBULAOS_ROOT/system" \
 		LOCKDIR="$WORK/no-lock" \
 		sh -c ". '$S04_MIGRATE_SCRIPT'; start" > "$WORK/s04-migrate.log" 2>&1
