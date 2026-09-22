@@ -304,6 +304,113 @@ case "$out" in
 	*) fail "migration did not take the version-match path: $out" ;;
 esac
 
+# ======================================================================
+# Section E: the migrate RESEED site must fail CLOSED too
+# ======================================================================
+# Section B covers the factory-seed site. The migrate reseed site
+# (S04nebulaos-migrate, the "extensions .git already exists" branch) is a
+# different code path with its own state, and it is the one that got this
+# wrong: an early version of the F-06 fix logged an error and ran a bare
+# `false` whose status nothing consumed, so extensions_ok stayed 1, the
+# pair guard never fired, record_generation ran, and the boot reported
+# "completed" while the extensions half had never been reseeded. The next
+# boot then took the version-match early return and never retried - a
+# silent, permanent new-Klipper-against-old-extensions divergence.
+#
+# The assertion that catches that is NOT the exit status. It is that no
+# app-generation.json gets written.
+A6="$W/apps6"; S6="$W/system6"; mkdir -p "$A6" "$S6"
+for c in klipper nebulaos-klipper-extensions moonraker; do
+	git init -q -b master "$A6/$c" >/dev/null 2>&1
+	printf 'old\n' > "$A6/$c/f"
+	git -C "$A6/$c" add -A
+	git -C "$A6/$c" commit -q -m "pre-migration"
+done
+
+# Real archives for the two halves that MUST succeed, so the only thing that
+# can fail is the extensions branch derivation. The origins have to be the
+# exact literals S04nebulaos-migrate passes to reseed_git_app, otherwise
+# those halves fail their own origin assertion, klipper_ok goes to 0, and no
+# generation is recorded for a reason that has nothing to do with what this
+# section is testing - which would make every assertion below pass
+# vacuously. (It did, on the first attempt.)
+KLIPPER_ORIGIN6="https://github.com/Klipper3d/klipper.git"
+MOONRAKER_ORIGIN6="https://github.com/Arksine/moonraker.git"
+SEEDS6="$W/seeds6"; mkdir -p "$SEEDS6"
+for spec in "klipper:$KLIPPER_ORIGIN6" "moonraker:$MOONRAKER_ORIGIN6"; do
+	c=${spec%%:*}; o=${spec#*:}
+	src="$W/${c}-src6"
+	git init -q -b master "$src"; printf 'new\n' > "$src/f"
+	git -C "$src" add -A; git -C "$src" commit -q -m new
+	git -C "$src" remote add origin "$o"
+	make_seed_archive "$src" master "$o" "$SEEDS6/$c.tar.gz" "" >/dev/null 2>&1
+	# The on-disk pre-migration checkout must carry the same origin, or
+	# reseed_git_app rejects it before the extensions half is even reached.
+	git -C "$A6/$c" remote add origin "$o" 2>/dev/null || \
+		git -C "$A6/$c" remote set-url origin "$o"
+done
+cp "$SEEDS/nebulaos-klipper-extensions.tar.gz" "$SEEDS6/"
+
+# Sanity: the fixture must be capable of recording a generation at all.
+# Without this, "no generation recorded" proves nothing.
+cat > "$SEEDS6/seed-manifest.json" <<'J'
+{
+  "migration_version": "gen-test-e",
+  "components": {
+    "klipper": { "branch": "master", "seed_commit": "a" },
+    "nebulaos-klipper-extensions": { "branch": "production", "seed_commit": "b" },
+    "moonraker": { "branch": "master", "seed_commit": "c" }
+  }
+}
+J
+rm -f "$S6/app-generation.json"
+_ctl=$(env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 SEEDS="$SEEDS6" APPS="$A6" SYSTEM="$S6" \
+	LOCKDIR="$W/locks6" GATE_LIB="$GATE_LIB_SRC" SEED_MANIFEST_LIB="$MANIFEST_LIB" \
+	sh -c '. "$0"; start' "$MIGRATE" 2>&1)
+if [ -f "$S6/app-generation.json" ]; then
+	pass "control: with a complete manifest this fixture DOES record a generation (the checks below are not vacuous)"
+else
+	fail "control: this fixture cannot record a generation even when everything is valid, so the fail-closed assertions below would pass for the wrong reason: $_ctl"
+fi
+
+run_migrate6() {
+	env S04NEBULAOS_MIGRATE_NO_AUTORUN=1 SEEDS="$SEEDS6" APPS="$A6" SYSTEM="$S6" \
+		LOCKDIR="$W/locks6" GATE_LIB="$GATE_LIB_SRC" SEED_MANIFEST_LIB="$MANIFEST_LIB" \
+		sh -c '. "$0"; start' "$MIGRATE" 2>&1
+}
+
+for bad in no-branch absent; do
+	rm -f "$S6/app-generation.json"
+	case $bad in
+		no-branch) cat > "$SEEDS6/seed-manifest.json" <<'J'
+{
+  "migration_version": "gen-test-e",
+  "components": {
+    "klipper": { "branch": "master", "seed_commit": "a" },
+    "nebulaos-klipper-extensions": { "seed_commit": "b" },
+    "moonraker": { "branch": "master", "seed_commit": "c" }
+  }
+}
+J
+		;;
+		absent) rm -f "$SEEDS6/seed-manifest.json" ;;
+	esac
+	out=$(run_migrate6)
+	if [ -f "$S6/app-generation.json" ]; then
+		fail "migrate reseed with a $bad manifest RECORDED A GENERATION - it reported success while the extensions half was never reseeded"
+	else
+		pass "migrate reseed with a $bad manifest records no generation (fails closed, will retry)"
+	fi
+	if [ "$bad" = no-branch ]; then
+		case "$out" in
+			*"did not migrate as a complete pair"*|*incomplete*)
+				pass "migrate reseed with a $bad manifest reports the pair as incomplete" ;;
+			*) fail "migrate reseed with a $bad manifest did not report an incomplete pair: $out" ;;
+		esac
+	fi
+done
+write_manifest production
+
 # KNOWN LIMITATION, deliberately not asserted here. S04nebulaos-migrate:1215
 # creates BACKUP_DIR before any component is attempted, and :1288-1290 ends
 # without advancing the generation on failure, with no failure counter or

@@ -1231,6 +1231,14 @@ check /etc/nebulaos-retention.sh
 check /etc/nebulaos-healthcheck.sh
 check /opt/nebulaos-seeds/klipper.tar.gz
 check /opt/nebulaos-seeds/moonraker.tar.gz
+# The seed manifest is only useful if the reader that parses it also ships:
+# S04nebulaos-factory-seed and S04nebulaos-migrate source this library to
+# derive the extensions branch assertion (audit F-06), and they source it
+# TOLERANTLY so a missing library cannot abort four unrelated migrations.
+# That tolerance is only safe if "missing from the image" is impossible,
+# which is what this check makes true - otherwise it degrades silently to
+# "extensions never seed again", the same invisible class as F-06 itself.
+check /etc/nebulaos-seed-manifest.sh
 check /opt/nebulaos-seeds/seed-manifest.json
 check /usr/sbin/ntpd
 check /etc/init.d/S40nebulaos-ntpsync

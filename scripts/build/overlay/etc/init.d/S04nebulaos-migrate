@@ -1330,8 +1330,22 @@ start() {
 		_ext_branch=$(seed_manifest_branch "$SEEDS/seed-manifest.json" \
 			nebulaos-klipper-extensions)
 		if [ -z "$_ext_branch" ]; then
+			# MUST set the same failure state the reseed-failed arm below
+			# sets. A bare `false` here would be read by nothing:
+			# extensions_ok stays 1, the pair guard does not fire,
+			# record_generation runs, and the boot reports "completed"
+			# while the extensions half was never reseeded - then the next
+			# boot takes the version-match early return and never retries.
+			# That is a silent, permanent new-Klipper-against-old-extensions
+			# divergence, i.e. exactly what the pair guard exists to stop.
+			# A distinct result string, because _diag_write_state is the
+			# only forensic record a field device leaves and "manifest or
+			# library unreadable" is a different diagnosis from "the reseed
+			# itself failed".
+			extensions_ok=0
+			_extensions_reseed_result="branch_undeterminable"
+			_last_error="extensions branch undeterminable"
 			log "ERROR: cannot determine the expected extensions branch from $SEEDS/seed-manifest.json - refusing to reseed rather than guessing a branch name (is $SEED_MANIFEST_LIB present?)"
-			false
 		elif reseed_git_app nebulaos-klipper-extensions "$_ext_branch" \
 			"https://github.com/coreflake1/NebulaOS-klipper-extensions.git"; then
 			_extensions_reseed_result="success"
