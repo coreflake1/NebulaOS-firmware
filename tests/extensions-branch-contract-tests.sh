@@ -428,6 +428,11 @@ J
 		absent) rm -f "$SEEDS6/seed-manifest.json" ;;
 	esac
 	rm -f "$S6/diagnostics/migration-state.json"
+	# The control run above performs a REAL successful migration, so the
+	# fixture already has one backup directory and an already-cut-over
+	# klipper. Measure the DELTA this failing run causes, not absolutes.
+	_pre_backups=$(find "$S6/migration-backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+	_pre_klipper=$(cat "$A6/klipper/f" 2>/dev/null)
 	if [ "$bad" = lib-absent ]; then
 		out=$(run_migrate6 "$W/no-such-seed-manifest-lib.sh")
 	else
@@ -439,25 +444,36 @@ J
 		pass "migrate reseed with a $bad manifest records no generation (fails closed, will retry)"
 	fi
 	if [ "$bad" != absent ]; then
+		# D-01: these two cases are now caught by the ZERO-WRITE precondition
+		# gate, before any component is touched. That is strictly stronger
+		# than the previous behaviour, where klipper was already cut over by
+		# the time the extensions branch was found to be underivable. The
+		# assertions below therefore pin "nothing happened at all", not just
+		# "the pair was reported incomplete".
 		case "$out" in
-			*"did not migrate as a complete pair"*|*incomplete*)
-				pass "migrate reseed with a $bad manifest reports the pair as incomplete" ;;
-			*) fail "migrate reseed with a $bad manifest did not report an incomplete pair: $out" ;;
+			*"migration NOT STARTED"*|*"PRECONDITION FAILED"*)
+				pass "migrate with a $bad manifest refuses to start (precondition gate, before any mutation)" ;;
+			*) fail "migrate with a $bad manifest did not refuse at the precondition gate: $out" ;;
 		esac
-		# Pin the DIAGNOSIS, not just "something failed". The incomplete-pair
-		# message above fires if EITHER half is not ok, so on its own it does
-		# not prove the extensions half was the cause. These two do:
-		# klipper succeeded, and extensions failed for this specific reason.
 		_ds="$S6/diagnostics/migration-state.json"
-		if grep -q '"extensions_reseed": "branch_undeterminable"' "$_ds" 2>/dev/null; then
-			pass "migrate reseed with a $bad manifest records extensions_reseed=branch_undeterminable"
+		if grep -q '"migration_action": "incomplete:preconditions"' "$_ds" 2>/dev/null; then
+			pass "migrate with a $bad manifest records migration_action=incomplete:preconditions"
 		else
-			fail "migrate reseed with a $bad manifest did not record extensions_reseed=branch_undeterminable: $(cat "$_ds" 2>/dev/null)"
+			fail "migrate with a $bad manifest did not record incomplete:preconditions: $(cat "$_ds" 2>/dev/null)"
 		fi
-		if grep -q '"klipper_reseed": "success"' "$_ds" 2>/dev/null; then
-			pass "migrate reseed with a $bad manifest still reseeded klipper (so the extensions half is provably the failing one)"
+		# THE amplifier assertion: a deterministic failure must cost zero
+		# storage. No backup directory may exist at all.
+		_nb=$(find "$S6/migration-backups" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+		if [ "$_nb" -eq "$_pre_backups" ]; then
+			pass "migrate with a $bad manifest created NO new backup directory (storage-neutral retry)"
 		else
-			fail "migrate reseed with a $bad manifest did not reseed klipper, so the assertions above do not isolate the extensions half: $(cat "$_ds" 2>/dev/null)"
+			fail "migrate with a $bad manifest grew backups $_pre_backups -> $_nb - the amplifier is back"
+		fi
+		# And nothing was cut over this run.
+		if [ "$(cat "$A6/klipper/f" 2>/dev/null)" = "$_pre_klipper" ]; then
+			pass "migrate with a $bad manifest left klipper untouched (no half-migrated stack)"
+		else
+			fail "migrate with a $bad manifest cut klipper over despite an unsatisfiable precondition"
 		fi
 	fi
 done
@@ -482,9 +498,13 @@ write_manifest production
 # disk. Failing closed is correct and unbounded. A real device has already
 # been observed at ~1.6GB/95% of 5.9GB from this amplifier.
 #
-# Fixing F-06 removes today's trigger; it does not remove the amplifier,
-# which needs its own change (failure counter + backoff, or create
-# BACKUP_DIR lazily on first actual cutover).
+# RESOLVED 2026-09-23 (D-01). The amplifier described above is fixed: a
+# zero-write precondition gate runs before anything is touched, BACKUP_DIR is
+# created lazily at the first real cutover, and a persisted attempt record
+# makes a retry reuse that directory instead of minting a new one. Growth is
+# now bounded at one directory per target migration version rather than one
+# per boot. See tests/migration-backup-growth-tests.sh, which drives 20
+# simulated boots per failure class and asserts the bound is constant.
 
 echo ""
 echo "extensions-branch-contract-tests: $PASS passed, $FAIL failed"

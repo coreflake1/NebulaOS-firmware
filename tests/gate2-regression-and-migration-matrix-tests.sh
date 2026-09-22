@@ -911,7 +911,14 @@ test_partial_klipper_ok_extensions_fail() {
 
 	recorded=$(get_migration_version "$SYSTEM/app-generation.json")
 
-	if [ "$recorded" = "$v1_version" ] && grep -q "did not migrate as a complete pair" "$WORK/pk.log"; then
+	# D-01: a MISSING SEED ARCHIVE is a deterministic precondition failure and
+	# is now caught by the zero-write gate, before any component is cut over -
+	# strictly stronger than the old behaviour, which cut the healthy half over
+	# first and only then reported an incomplete pair. Accept either refusal;
+	# what must hold either way is that the generation did NOT advance.
+	if [ "$recorded" = "$v1_version" ] && \
+	   { grep -q "did not migrate as a complete pair" "$WORK/pk.log" || \
+	     grep -q "migration NOT STARTED" "$WORK/pk.log"; }; then
 		pass "partial safety: klipper ok + extensions fail = generation NOT advanced (paired lifecycle)"
 	else
 		fail "partial safety: expected paired failure (recorded=$recorded log=$(tail -3 "$WORK/pk.log"))"
@@ -935,7 +942,14 @@ test_partial_extensions_ok_klipper_fail() {
 
 	recorded=$(get_migration_version "$SYSTEM/app-generation.json")
 
-	if [ "$recorded" = "$v1_version" ] && grep -q "did not migrate as a complete pair" "$WORK/pe.log"; then
+	# D-01: a MISSING SEED ARCHIVE is a deterministic precondition failure and
+	# is now caught by the zero-write gate, before any component is cut over -
+	# strictly stronger than the old behaviour, which cut the healthy half over
+	# first and only then reported an incomplete pair. Accept either refusal;
+	# what must hold either way is that the generation did NOT advance.
+	if [ "$recorded" = "$v1_version" ] && \
+	   { grep -q "did not migrate as a complete pair" "$WORK/pe.log" || \
+	     grep -q "migration NOT STARTED" "$WORK/pe.log"; }; then
 		pass "partial safety: extensions ok + klipper fail = generation NOT advanced (paired lifecycle)"
 	else
 		fail "partial safety: expected paired failure (recorded=$recorded)"

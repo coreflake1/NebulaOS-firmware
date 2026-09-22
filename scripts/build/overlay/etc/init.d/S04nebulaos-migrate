@@ -83,6 +83,12 @@ APPS="${APPS:-/usr/data/nebulaos/apps}"
 SYSTEM="${SYSTEM:-/usr/data/nebulaos/system}"
 LOCKDIR="${LOCKDIR:-/usr/data/nebulaos/updates/locks}"
 GENERATION_FILE="$SYSTEM/app-generation.json"
+# Records the in-progress migration attempt: which target version it is for,
+# and which backup directory it already created. Its whole purpose is to make
+# a RETRY reuse that directory instead of minting a new timestamped one, so a
+# persistent failure cannot grow one backup per boot. Cleared once the
+# generation is recorded. See ensure_backup_dir().
+ATTEMPT_FILE="$SYSTEM/migration-attempt.json"
 # The user-owned config tree this script performs its two narrow,
 # idempotent config migrations against. Overridable for tests like every
 # other path here.
@@ -202,6 +208,86 @@ fi
 # here can never leave a half-replaced application tree - either the new
 # checkout is fully verified and swapped in, or the OLD one is still
 # sitting untouched at $dest.
+# Zero-write precondition gate.
+#
+# Every check here is a pure read. Nothing below it may mutate $APPS or create
+# a backup directory, which is the whole point: the deterministic, image-wide
+# failure class (no seed archive, no seed manifest, no
+# /etc/nebulaos-seed-manifest.sh, therefore no derivable branch) repeats
+# identically on every boot of every device flashed with a bad image. Catching
+# it here makes that class STORAGE-NEUTRAL - it costs nothing per boot and
+# retries for free once the image is fixed.
+#
+# This does not cover failures that can only be detected after extraction
+# (corrupt archive, wrong branch/origin, dirty tree) or after cutover. Those
+# are bounded by ensure_backup_dir()'s attempt-record reuse instead.
+migration_preconditions_ok() {
+	_mp_ok=1
+
+	for _mp_c in klipper nebulaos-klipper-extensions moonraker; do
+		[ -e "$APPS/$_mp_c/.git" ] || continue
+		if [ ! -f "$SEEDS/$_mp_c.tar.gz" ]; then
+			log "PRECONDITION FAILED: seed archive missing ($SEEDS/$_mp_c.tar.gz) - refusing to start a migration that cannot complete"
+			_mp_ok=0
+		fi
+	done
+
+	# The extensions branch must be derivable BEFORE anything is touched.
+	# seed_manifest_branch() is undefined when $SEED_MANIFEST_LIB is missing
+	# from the image (the scripts source it tolerantly on purpose), so this
+	# also covers the missing-library case: an undefined command yields no
+	# output and the emptiness test below catches it.
+	if [ -e "$APPS/nebulaos-klipper-extensions/.git" ]; then
+		if [ -z "$(seed_manifest_branch "$SEEDS/seed-manifest.json" nebulaos-klipper-extensions 2>/dev/null)" ]; then
+			log "PRECONDITION FAILED: cannot determine the expected extensions branch from $SEEDS/seed-manifest.json (is $SEED_MANIFEST_LIB present in the image?) - refusing to start a migration that cannot complete"
+			_mp_ok=0
+		fi
+	fi
+
+	[ "$_mp_ok" = "1" ]
+}
+
+# Create the backup directory LAZILY - on the first cutover that is actually
+# about to happen - and reuse the one a previous failed attempt at this SAME
+# target version already created.
+#
+# Both halves matter. Lazy creation means a run that never reaches a cutover
+# leaves no empty directory behind. Reuse means a run that DOES reach a
+# cutover and then fails later (pair validation, record_generation, power loss
+# between the two) does not mint a second directory on the next boot. Together
+# they bound growth at one directory per target migration version, regardless
+# of how many times that version fails - which is the invariant. The previous
+# code created "$BACKUP_ROOT/<UTC timestamp to the second>" eagerly, before
+# any component was attempted, so every retry produced another one forever.
+ensure_backup_dir() {
+	[ -n "${BACKUP_DIR:-}" ] && [ -d "$BACKUP_DIR" ] && return 0
+
+	_ebd_prev=$(json_get "$ATTEMPT_FILE" backup_dir)
+	_ebd_ver=$(json_get "$ATTEMPT_FILE" target_version)
+	if [ -n "$_ebd_prev" ] && [ "$_ebd_ver" = "$_expected_version" ] && [ -d "$_ebd_prev" ]; then
+		BACKUP_DIR="$_ebd_prev"
+		log "reusing the backup directory from a previous failed attempt at $_expected_version: $BACKUP_DIR (not creating another one)"
+		return 0
+	fi
+
+	BACKUP_DIR="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)"
+	if ! mkdir -p "$BACKUP_DIR"; then
+		log "ERROR: cannot create backup directory $BACKUP_DIR"
+		BACKUP_DIR=""
+		return 1
+	fi
+	mkdir -p "$SYSTEM" 2>/dev/null || true
+	cat > "$ATTEMPT_FILE" <<ATTEMPTEOF
+{
+  "target_version": "$_expected_version",
+  "backup_dir": "$BACKUP_DIR",
+  "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+}
+ATTEMPTEOF
+	log "backing up the current application tree to $BACKUP_DIR before the first cutover"
+	return 0
+}
+
 reseed_git_app() {
 	name="$1"; archive="$SEEDS/$name.tar.gz"; dest="$APPS/$name"
 	branch="$2"; origin="$3"; dirty_exclude="${4:-}"
@@ -246,8 +332,30 @@ reseed_git_app() {
 
 	# Only reached once the new checkout is fully verified - the actual
 	# cutover is a single rename, minimizing the window where neither the
-	# old nor new tree is fully in place.
-	mv "$dest" "$BACKUP_DIR/$name"
+	# old nor new tree is fully in place. $APPS and $SYSTEM are on one
+	# partition, so this is rename(2): it moves directory entries and
+	# consumes no data blocks.
+	#
+	# The backup directory is created HERE, at the first cutover that is
+	# actually going to happen, not up front - see ensure_backup_dir().
+	if ! ensure_backup_dir; then
+		log "ERROR: cannot prepare a backup directory for $name - refusing to cut over, leaving existing installation untouched"
+		rm -rf "$dest.migrate-partial"
+		return 1
+	fi
+	if [ -e "$BACKUP_DIR/$name" ]; then
+		# A previous attempt at this same target version already preserved
+		# this component's genuine pre-migration tree here. Whatever is on
+		# disk now is that attempt's own replacement - byte-reproducible
+		# from the seed archive, so it has no recovery value, and moving it
+		# on top would either nest inside the real backup or destroy it.
+		# Discard it instead and keep the copy that is actually worth
+		# keeping.
+		log "$name: a pre-migration backup from an earlier attempt is already preserved at $BACKUP_DIR/$name - keeping it and discarding the interim tree"
+		rm -rf "$dest"
+	else
+		mv "$dest" "$BACKUP_DIR/$name"
+	fi
 	mv "$dest.migrate-partial" "$dest"
 	log "$name migrated successfully (branch $branch, $(git -C "$dest" rev-parse HEAD))"
 	return 0
@@ -1308,10 +1416,21 @@ start() {
 	fi
 	_gate_result="passed"
 
+	# Nothing below may mutate anything until the zero-write preconditions
+	# hold. A deterministic, image-wide failure must cost zero storage per
+	# boot, not one backup directory per boot.
+	if ! migration_preconditions_ok; then
+		_migration_action="incomplete:preconditions"
+		_last_error="migration preconditions not met"
+		log "migration NOT STARTED - preconditions failed (see errors above). Nothing was moved, no backup directory was created, and the generation was not advanced, so this retries next boot at no storage cost."
+		_diag_write_state
+		return 0
+	fi
+
 	_migration_action="migrating"
-	BACKUP_DIR="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)"
-	mkdir -p "$BACKUP_DIR"
-	log "backing up current application tree to $BACKUP_DIR before touching anything"
+	# Deliberately NOT created here. ensure_backup_dir() creates it at the
+	# first real cutover, and reuses a previous failed attempt's directory.
+	BACKUP_DIR=""
 
 	klipper_ok=1
 	extensions_ok=1
@@ -1404,20 +1523,33 @@ start() {
 	# retry instead of taking the version-match early return. The log said
 	# "NEITHER half is promoted" until 2026-09-22; that was simply false.
 	if [ "$klipper_ok" != "1" ] || [ "$extensions_ok" != "1" ]; then
-		log "ERROR: the Klipper stack did not migrate as a complete pair (klipper ok=$klipper_ok, extensions ok=$extensions_ok). Running new Klipper against old extensions, or the reverse, is exactly the mismatch this pairing exists to prevent. The generation is NOT advanced, so the next boot retries - but note the half that did succeed has already been cut over on disk, and the previous tree for it is in $BACKUP_DIR. Until this is resolved every boot repeats the migration and adds another backup there."
+		log "ERROR: the Klipper stack did not migrate as a complete pair (klipper ok=$klipper_ok, extensions ok=$extensions_ok). Running new Klipper against old extensions, or the reverse, is exactly the mismatch this pairing exists to prevent. The generation is NOT advanced, so the next boot retries - but note the half that did succeed has already been cut over on disk, and the previous tree for it is in $(backup_dir_desc). The next boot retries and REUSES that same directory rather than creating another one."
 	fi
 
 	if [ "$klipper_ok" = "1" ] && [ "$extensions_ok" = "1" ] && [ "$moonraker_ok" = "1" ]; then
 		record_generation "$_expected_version"
 		_generation_recorded="yes"
 		_migration_action="completed"
-		log "migration complete - generation now $_expected_version. Previous application tree preserved at $BACKUP_DIR (not deleted automatically - safe to remove by hand once the new generation is confirmed working)."
+		# The attempt is over; the next migration must start a fresh backup
+		# directory rather than reusing this one.
+		rm -f "$ATTEMPT_FILE"
+		log "migration complete - generation now $_expected_version. Previous application tree preserved at $(backup_dir_desc) (not deleted automatically - safe to remove by hand once the new generation is confirmed working)."
 		log "result: klipper=$_klipper_after extensions=$_extensions_after moonraker=$_moonraker_after"
 	else
 		_migration_action="incomplete"
-		log "migration INCOMPLETE - at least one component failed and was left at its previous version (see errors above). Generation NOT advanced, so this will retry next boot. Nothing was destroyed: any component that failed still has its pre-migration tree in place at $APPS, and $BACKUP_DIR holds whatever was successfully backed up before the failure."
+		log "migration INCOMPLETE - at least one component failed and was left at its previous version (see errors above). Generation NOT advanced, so this will retry next boot. Nothing was destroyed: any component that failed still has its pre-migration tree in place at $APPS, and $(backup_dir_desc) holds whatever was successfully backed up before the failure. A retry reuses that directory, so repeated failures do not accumulate backups."
 	fi
 	_diag_write_state
+}
+
+# Describes the backup directory for a log line. It can legitimately be empty
+# now: a run that fails before any cutover never creates one.
+backup_dir_desc() {
+	if [ -n "${BACKUP_DIR:-}" ] && [ -d "$BACKUP_DIR" ]; then
+		printf '%s' "$BACKUP_DIR"
+	else
+		printf '%s' "(none created - no component reached cutover)"
+	fi
 }
 
 record_generation() {
