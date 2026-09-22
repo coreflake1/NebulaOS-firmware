@@ -35,8 +35,17 @@ set -eu
 VARIANT="${1:?usage: $0 <R0|R1>}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
-FRAGMENT="$REPO_ROOT/artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config"
-MARKER="$REPO_ROOT/build-work/preempt-variant-applied.txt"
+# Both overridable, defaulting to the real repo paths so production behaviour
+# is bit-identical to before. This exists so the test suite can exercise the
+# state machine on a disposable COPY instead of mutating the tracked product
+# artifact in place: the suite used to snapshot-and-restore the real fragment,
+# which meant a crash, an OOM kill or a SIGKILL mid-run could leave the shipped
+# fragment without CONFIG_PREEMPT_RT=y and the next build would silently
+# produce a non-RT kernel - exactly the class of bug that suite exists to
+# catch. Mirrors the SEEDS/APPS/SYSTEM override convention used by the
+# init.d scripts. Changes no configuration.
+FRAGMENT="${NEBULAOS_VARIANT_FRAGMENT:-$REPO_ROOT/artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config}"
+MARKER="${NEBULAOS_VARIANT_MARKER:-$REPO_ROOT/build-work/preempt-variant-applied.txt}"
 
 BEGIN_MARK="#--- NEBULAOS_PREEMPT_RT_VARIANT_BEGIN ---"
 END_MARK="#--- NEBULAOS_PREEMPT_RT_VARIANT_END ---"
