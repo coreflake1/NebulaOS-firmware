@@ -69,8 +69,11 @@ HEAD=$(git -C "$FW" rev-parse HEAD 2>/dev/null) || die "cannot read firmware HEA
 [ "$HEAD" = "$EXPECT" ] || die "firmware HEAD $HEAD != requested $EXPECT - refusing to build a source generation that was not requested"
 
 # --- every active repo must be clean ---------------------------------------
-# .mcp.json is excluded: in some sandboxes it is a bind-mounted device node,
-# not a file any commit added.
+# .mcp.json is excluded: it is machine-local editor state, written by the MCP
+# integration at whatever depth the editor is opened, and never ours to commit.
+# The sync also git-excludes it in every active repo, so in a synced workspace
+# it does not reach this filter at all; the filter stays for a workspace synced
+# by an older version of that script.
 DIRTY=0
 for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
   [ -d "$ROOT/$r/.git" ] || continue
