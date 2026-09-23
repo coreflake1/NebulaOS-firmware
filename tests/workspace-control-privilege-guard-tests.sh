@@ -68,16 +68,35 @@ if a: d["agent_type"]=a
 print(json.dumps(d))'
 }
 
-# run_case <category> <expect ALLOW|DENY> <agent|""> <sandbox 0|1> <desc> <cmd> [tool] [cwd]
+# A DENY is only meaningful if it came from the guard under test. Asserting
+# the decision alone lets a case keep passing after the rule it covers is
+# deleted, because some earlier guard - the identity gate, the archive scan,
+# the reviewer guard - denies it for an unrelated reason. Independent review
+# had to establish non-vacuity by replaying every payload and parsing the
+# reason by hand; REASON makes that a permanent, cheap assertion instead.
+# Set it per section; override per case with argument 7.
+REASON=""
+
+# run_case <cat> <expect> <agent|""> <sandbox 0|1> <desc> <cmd> [reason] [tool] [cwd]
 run_case() {
   local cat=$1 expect=$2 agent=$3 sb=$4 desc=$5 cmd=$6
-  local tool=${7:-Bash}
-  local cwd=${8:-$ROOT}
+  local reason=${7:-$REASON}
+  local tool=${8:-Bash}
+  local cwd=${9:-$ROOT}
   local out got
 
   out=$(mkjson "$agent" "$cmd" "$sb" "$tool" "$cwd" | CLAUDE_PROJECT_DIR="$ROOT" "$HOOK" 2>/dev/null)
   got=ALLOW
   case "$out" in *'"permissionDecision":"deny"'*) got=DENY ;; esac
+
+  if [ "$got" = DENY ] && [ "$expect" = DENY ] && [ -n "$reason" ]; then
+    case "$out" in
+      *"$reason"*) : ;;
+      *) FAIL=$((FAIL+1))
+         printf '  FAIL  denied for the WRONG reason (wanted: %s)  %s\n' "$reason" "$desc"
+         return ;;
+    esac
+  fi
 
   if [ "$got" = "$expect" ]; then
     PASS=$((PASS+1))
@@ -116,30 +135,33 @@ run_case ctl   ALLOW ""             0 "main agent, sandboxed sync --apply"      
 run_case ctl   ALLOW ""             0 "main agent, ordinary sandboxed command"       "echo hello"
 echo
 
+REASON="Unsandboxed execution"
 echo "[ the authority layer may not be self-installed - must DENY ]"
 run_case ctl DENY "" 1 "main agent, unsandboxed sync"         "$SYNC"
 run_case ctl DENY "" 1 "main agent, unsandboxed sync --apply" "$SYNC --apply"
 echo
 
 # --- the sandbox escape, refused to everyone else --------------------------
+REASON="Unsandboxed execution"
 echo "[ sandbox escape - must DENY ]"
 run_case build DENY ""                1 "main agent, unsandboxed arbitrary command"       "id"
 run_case build DENY nebulaos-build    1 "build agent, unsandboxed arbitrary command"      "id"
-run_case build DENY nebulaos-build    1 "build agent, unsandboxed shell wrapper"          "bash $BUILDER $SHA"
-run_case build DENY nebulaos-build    1 "build agent, launcher with trailing command"     "$BUILDER $SHA; id"
-run_case build DENY nebulaos-build    1 "build agent, launcher with pipe"                 "$BUILDER $SHA | tee /x"
-run_case build DENY nebulaos-build    1 "build agent, launcher with substitution"         "$BUILDER \$(cat /etc/hostname)"
-run_case build DENY nebulaos-build    1 "build agent, launcher with no SHA"               "$BUILDER"
-run_case build DENY nebulaos-build    1 "build agent, launcher with short SHA"            "$BUILDER $BADSHA"
-run_case build DENY nebulaos-build    1 "build agent, launcher with two args"             "$BUILDER $SHA $SHA"
+run_case build DENY nebulaos-build    1 "build agent, unsandboxed shell wrapper"          "bash $BUILDER $SHA" "lone invocation"
+run_case build DENY nebulaos-build    1 "build agent, launcher with trailing command"     "$BUILDER $SHA; id" "lone invocation"
+run_case build DENY nebulaos-build    1 "build agent, launcher with pipe"                 "$BUILDER $SHA | tee /x" "lone invocation"
+run_case build DENY nebulaos-build    1 "build agent, launcher with substitution"         "$BUILDER \$(cat /etc/hostname)" "lone invocation"
+run_case build DENY nebulaos-build    1 "build agent, launcher with no SHA"               "$BUILDER" "exactly one argument"
+run_case build DENY nebulaos-build    1 "build agent, launcher with short SHA"            "$BUILDER $BADSHA" "exactly one argument"
+run_case build DENY nebulaos-build    1 "build agent, launcher with two args"             "$BUILDER $SHA $SHA" "exactly one argument"
 run_case build DENY nebulaos-build    1 "build agent, unsandboxed sync (not its file)"    "$SYNC --apply"
 run_case build DENY nebula-architect  1 "architect, unsandboxed sync"                     "$SYNC --apply"
 run_case build DENY nebula-verifier   1 "verifier, unsandboxed arbitrary command"         "id"
 run_case hw    DENY nebulaos-hardware 1 "hardware agent, unsandboxed arbitrary command"   "id"
-run_case build DENY ""                1 "main agent, unsandboxed non-Bash tool"           "$SYNC" Write
+run_case build DENY ""                1 "main agent, unsandboxed non-Bash tool"           "$SYNC" "non-Bash tool" Write
 echo
 
 # --- launchers are bound to their own agent, sandboxed or not --------------
+REASON="may only be invoked by the"
 echo "[ launcher binding - must DENY ]"
 run_case build DENY ""                0 "main agent, build launcher (sandboxed)"  "$BUILDER $SHA"
 run_case build DENY nebula-architect  0 "architect, build launcher"               "$BUILDER $SHA"
@@ -151,6 +173,7 @@ run_case hw    DENY nebula-verifier   1 "verifier, hardware launcher unsandboxed
 echo
 
 # --- direct container engine use, refused to every caller ------------------
+REASON="Direct use of the"
 echo "[ direct container engine - must DENY ]"
 run_case build DENY ""               0 "main agent, engine ps"                "$ENG ps"
 run_case build DENY nebulaos-build   0 "build agent, engine run"              "$ENG run --rm -v /:/host alpine sh"
@@ -165,6 +188,7 @@ echo
 # --- the engine NAME is not contraband, only the engine COMMAND ------------
 # Substring matching made ordinary diagnostics impossible: reading the build
 # script, or grepping docs for the engine name, is not privilege.
+REASON=""
 echo "[ engine mentioned, not invoked - must ALLOW ]"
 run_case ctl ALLOW "" 0 "main agent, grep for the engine name"   "grep -n '$ENG' NebulaOS-firmware/build.sh"
 run_case ctl ALLOW "" 0 "main agent, read a path containing it"  "cat /etc/$ENG/daemon.json"
@@ -179,6 +203,7 @@ echo
 # have the hook run it with host privilege. Every other case in this file
 # varies command SHAPE; these vary file CONTENT, which is the axis the first
 # version of this suite could not fail on.
+REASON="bound to the launcher CONTENT"
 echo "[ launcher content integrity - must DENY ]"
 # Kept beside the launcher: $TMPDIR is read-only under this sandbox, and a
 # SKIP here would silently drop the only cases that test file content - the
@@ -211,6 +236,7 @@ echo
 # Its constraints were prose only. Prose is not enforcement - that is this
 # layer's whole thesis - so they now have the same mechanical backing the
 # reviewers' read-only policy has.
+REASON="created but NOT enabled"
 echo "[ hardware agent device contact - must DENY ]"
 run_case hw DENY nebulaos-hardware 0 "hardware agent, ssh"                "ssh nebula-printer uname -a"
 run_case hw DENY nebulaos-hardware 0 "hardware agent, ping"               "ping -c1 nebula-printer"
@@ -220,11 +246,86 @@ run_case hw DENY nebulaos-hardware 0 "hardware agent, ssh after separator" "echo
 run_case ctl ALLOW nebulaos-hardware 0 "hardware agent, ordinary read"     "cat CURRENT_STATE.md"
 echo
 
+# --- typed payload edges -----------------------------------------------------
+# Everything above sends a string command and a boolean sandbox flag. These
+# send the JSON values a client might actually emit. Independent review found
+# two real holes here that no string-payload case could reach:
+#
+#   dangerouslyDisableSandbox: 1      -> ALLOWED (privilege never recognised)
+#   dangerouslyDisableSandbox: "yes"  -> ALLOWED
+#
+# Content-binding does not close that, because the escape branch is never
+# entered at all. Whether this client coerces truthy non-booleans upstream is
+# not knowable from inside the hook, so the guard must not depend on it.
+#
+# agent_type was also .strip()ed, so a padded value was promoted to a real
+# principal and a blank one read as the main agent.
+run_typed() { # <cat> <expect> <agent-json|OMIT> <sandbox-json|OMIT> <desc> <cmd> [reason]
+  local cat=$1 expect=$2 aj=$3 sj=$4 desc=$5 cmd=$6 reason=${7:-}
+  local out got
+  out=$(A_CMD=$cmd A_AJ=$aj A_SJ=$sj A_CWD=$ROOT python3 -c '
+import json,os
+ti={"command":os.environ["A_CMD"]}
+sj=os.environ["A_SJ"]
+if sj!="OMIT": ti["dangerouslyDisableSandbox"]=json.loads(sj)
+d={"tool_name":"Bash","tool_input":ti,"cwd":os.environ["A_CWD"]}
+aj=os.environ["A_AJ"]
+if aj!="OMIT": d["agent_type"]=json.loads(aj)
+print(json.dumps(d))' | CLAUDE_PROJECT_DIR="$ROOT" "$HOOK" 2>/dev/null)
+  got=ALLOW
+  case "$out" in *'"permissionDecision":"deny"'*) got=DENY ;; esac
+  if [ "$got" = DENY ] && [ "$expect" = DENY ] && [ -n "$reason" ]; then
+    case "$out" in
+      *"$reason"*) : ;;
+      *) FAIL=$((FAIL+1)); printf '  FAIL  denied for the WRONG reason (wanted: %s)  %s\n' "$reason" "$desc"; return ;;
+    esac
+  fi
+  if [ "$got" = "$expect" ]; then
+    PASS=$((PASS+1)); printf '  PASS  %-5s  %s\n' "$got" "$desc"
+  else
+    FAIL=$((FAIL+1)); printf '  FAIL  expected=%s got=%s  %s\n' "$expect" "$got" "$desc"
+    if [ "$expect" = DENY ] && [ "$got" = ALLOW ]; then
+      case "$cat" in build) BUILD_BYPASS=$((BUILD_BYPASS+1)) ;; hw) HW_BYPASS=$((HW_BYPASS+1)) ;; esac
+    fi
+  fi
+}
+
+echo "[ truthy privilege values - must DENY ]"
+run_typed build DENY OMIT '1'       "sandbox flag as int 1"        "id" "Unsandboxed execution"
+run_typed build DENY OMIT '"yes"'   "sandbox flag as yes"          "id" "Unsandboxed execution"
+run_typed build DENY OMIT '"TRUE"'  "sandbox flag as TRUE"         "id" "Unsandboxed execution"
+run_typed build DENY OMIT '"  True  "' "sandbox flag padded True"  "id" "Unsandboxed execution"
+run_typed build DENY OMIT '"on"'    "sandbox flag as on"           "id" "Unsandboxed execution"
+run_typed build DENY OMIT '{"a":1}' "sandbox flag as object"       "id" "Unsandboxed execution"
+echo
+
+echo "[ explicitly false privilege values - must ALLOW ]"
+run_typed ctl ALLOW OMIT 'false'   "sandbox flag false"        "echo hello"
+run_typed ctl ALLOW OMIT '"false"' "sandbox flag string false" "echo hello"
+run_typed ctl ALLOW OMIT '0'       "sandbox flag int 0"        "echo hello"
+run_typed ctl ALLOW OMIT '""'      "sandbox flag empty string" "echo hello"
+run_typed ctl ALLOW OMIT 'null'    "sandbox flag null"         "echo hello"
+echo
+
+echo "[ agent_type must not be normalised into a principal - must DENY ]"
+run_typed build DENY '"  nebulaos-build  "' 'true' "padded agent_type must not be promoted" "$BUILDER $SHA" "may only be invoked by the"
+run_typed build DENY '"   "'                'true' "blank agent_type must not read as main" "$SYNC --apply"  "Unsandboxed execution"
+run_typed build DENY '123'                  'true' "numeric agent_type is not a principal"  "$BUILDER $SHA" "may only be invoked by the"
+run_typed build DENY '["nebulaos-build"]'   'true' "list agent_type is not a principal"     "$BUILDER $SHA" "may only be invoked by the"
+run_typed build DENY 'null'                 'true' "null agent_type is not the build agent" "$BUILDER $SHA" "may only be invoked by the"
+echo
+
+echo "[ malformed command with privilege - must DENY ]"
+run_typed build DENY '"nebulaos-build"' 'true' "command as a list"   '["x"]'
+run_typed build DENY '"nebulaos-build"' 'true' "command as a number" '5'
+echo
+
 # --- pre-existing guards must still hold -----------------------------------
+REASON=""
 echo "[ regression: guards that predate this boundary ]"
-run_case ctl DENY nebula-verifier  0 "verifier may not commit"     "git -C $ROOT/NebulaOS-firmware commit -m x"
-run_case ctl DENY nebula-architect 0 "architect may not write"     "rm -rf $ROOT/NebulaOS-firmware/tests"
-run_case ctl DENY ""               0 "archive stays out of bounds" "ls $ARCHIVE"
+run_case ctl DENY nebula-verifier  0 "verifier may not commit"     "git -C $ROOT/NebulaOS-firmware commit -m x" "READ-ONLY with respect to source"
+run_case ctl DENY nebula-architect 0 "architect may not write"     "rm -rf $ROOT/NebulaOS-firmware/tests" "READ-ONLY with respect to source"
+run_case ctl DENY ""               0 "archive stays out of bounds" "ls $ARCHIVE" "archived workspace is out of bounds"
 echo
 
 echo "TESTS_PASS=$PASS"

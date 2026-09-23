@@ -139,21 +139,37 @@ def out(msg): print("DENY:"+msg); sys.exit(0)
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
 
-agent=(d.get("agent_type") or "")
+# agent_type is NOT stripped or coerced. Whitespace must not promote a caller
+# to a different principal, and a blank-but-present value must not read as the
+# main agent. A non-string is not a principal at all.
+agent=d.get("agent_type")
 if not isinstance(agent,str): agent=""
-agent=agent.strip()
 ti=d.get("tool_input") or {}
-tool=(d.get("tool_name") or "")
+if not isinstance(ti,dict): ti={}
+tool=d.get("tool_name")
+if not isinstance(tool,str): tool=""
 
+# Any value that is not absent, False, or an explicitly false string counts as
+# a privilege request. Recognising only True and "true" meant an int 1 or a
+# "yes" skipped the escape branch ENTIRELY - the bash fail-closed net does not
+# catch that, because the interpreter exits 0 with no verdict. Whether this
+# client coerces truthy non-booleans upstream is not knowable from in here, so
+# the guard does not depend on the answer.
 raw=ti.get("dangerouslyDisableSandbox")
-sandbox_off = raw is True or (isinstance(raw,str) and raw.strip().lower()=="true")
+if raw is None:               sandbox_off=False
+elif isinstance(raw,bool):    sandbox_off=raw
+elif isinstance(raw,str):     sandbox_off = raw.strip().lower() not in ("","false","0","no","off")
+else:
+    try: sandbox_off=bool(raw)
+    except Exception: sandbox_off=True
 
 if tool!="Bash":
     if sandbox_off: out("Unsandboxed execution was requested on a non-Bash tool. Refused.")
     sys.exit(0)
 
-cmd=ti.get("command") or ""
-if not isinstance(cmd,str) or not cmd.strip():
+cmd=ti.get("command")
+if not isinstance(cmd,str): cmd=""
+if not cmd.strip():
     if sandbox_off: out("Unsandboxed execution was requested with no command. Refused.")
     sys.exit(0)
 
