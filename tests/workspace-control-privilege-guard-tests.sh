@@ -178,7 +178,7 @@ run_case build DENY nebulaos-build 1 "--candidate with trailing command"  "$BUIL
 run_case build DENY nebulaos-build 1 "--candidate with and-chain"         "$BUILDER --candidate $SHA && id"     "lone invocation"
 run_case build DENY nebulaos-build 1 "--candidate with pipe"              "$BUILDER --candidate $SHA | tee /x"    "lone invocation"
 run_case build DENY nebulaos-build 1 "--candidate with substitution"      "$BUILDER --candidate \$(id -u)"        "lone invocation"
-run_case build DENY nebulaos-build 1 "env assignment before launcher"     "FOO=x $BUILDER --candidate $SHA"       "lone invocation"
+run_case build DENY nebulaos-build 1 "env assignment before launcher"     "FOO=x $BUILDER --candidate $SHA"       "Unsandboxed execution"
 run_case build DENY nebulaos-build 1 "shell wrapper around --candidate"   "bash $BUILDER --candidate $SHA"        "lone invocation"
 run_case build DENY nebulaos-build 1 "--candidate with no SHA"            "$BUILDER --candidate"                  "accepts exactly one of"
 run_case build DENY nebulaos-build 1 "--candidate with short SHA"         "$BUILDER --candidate $BADSHA"          "accepts exactly one of"
