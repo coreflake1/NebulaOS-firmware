@@ -307,7 +307,7 @@ ensure_backup_dir() {
 	# silence.
 	# Deliberately a plain heredoc followed by an explicit $? test, NOT
 	# `if ! cat <<EOF ... EOF then`. The latter is valid POSIX and passes
-	# shellcheck, but it would be the only heredoc-inside-if in the entire
+	# ShellCheck, but it would be the only heredoc-inside-if in the entire
 	# shipped overlay, so it has no precedent on this device's BusyBox ash -
 	# and the cost of being wrong is not a bad log line, it is this script
 	# failing to parse and the device never migrating again. The boring shape
@@ -319,6 +319,10 @@ ensure_backup_dir() {
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
 }
 ATTEMPTEOF
+	# Checking $? directly is deliberate here, not an oversight: the
+	# alternative ShellCheck suggests is `if ! cat <<EOF ... EOF then`, which
+	# is exactly the construct avoided above for BusyBox-precedent reasons.
+	# shellcheck disable=SC2181
 	if [ $? -ne 0 ]; then
 		log "ERROR: could not write the migration attempt record $ATTEMPT_FILE - a retry will not be able to reuse $BACKUP_DIR and may create another backup directory. Check free space and the writability of $SYSTEM."
 	fi
@@ -653,17 +657,17 @@ migrate_moonraker_legacy_sections() {
 
 	if ! _moonraker_legacy_sections_are_narrow "$f"; then
 		ts=$(date -u +%Y%m%dT%H%M%SZ)
-	# KNOWN, DEFERRED (recorded 2026-09-23, D-01 review): this refusal backup
-	# is written on EVERY boot. It is reached unconditionally, before the
-	# generation comparison, and an unrecognized shape never becomes
-	# recognized by itself, so a permanently-unrecognized file produces one
-	# new timestamped copy per boot. That is the same defect shape D-01
-	# removed from the component backups, bounded only by
-	# nebulaos-retention.sh's shape-2 pass (-mtime +7, keep 2). Deliberately
-	# NOT fixed in the D-01 change: these are small text files - steady state
-	# is (boots in the trailing 7 days) copies, order of hundreds of KB -
-	# against the ~1.6GB class D-01 addressed. An idempotence check (skip when
-	# an identical backup already exists) would close it.
+		# KNOWN, DEFERRED (recorded 2026-09-23, D-01 review): this refusal backup
+		# is written on EVERY boot. It is reached unconditionally, before the
+		# generation comparison, and an unrecognized shape never becomes
+		# recognized by itself, so a permanently-unrecognized file produces one
+		# new timestamped copy per boot. That is the same defect shape D-01
+		# removed from the component backups, bounded only by
+		# nebulaos-retention.sh's shape-2 pass (-mtime +7, keep 2). Deliberately
+		# NOT fixed in the D-01 change: these are small text files - steady state
+		# is (boots in the trailing 7 days) copies, order of hundreds of KB -
+		# against the ~1.6GB class D-01 addressed. An idempotence check (skip when
+		# an identical backup already exists) would close it.
 		mkdir -p "$BACKUP_ROOT/moonraker-conf-migration-refused"
 		cp -a "$f" "$BACKUP_ROOT/moonraker-conf-migration-refused/moonraker.conf.$ts" 2>/dev/null
 		log "ERROR: moonraker.conf has an [update_manager klipper] or [update_manager nebulaos_klipper_extensions] section that does not match the known legacy shape (channel-only) - refusing to guess which parts are NebulaOS-managed and which are the user's own. Backed up to $BACKUP_ROOT/moonraker-conf-migration-refused/moonraker.conf.$ts, LEFT UNTOUCHED. Manual migration required."
@@ -1047,17 +1051,17 @@ migrate_printer_cfg() {
 	fi
 	if [ "$known_shape" -ne 1 ] || [ "$anchor_count" -ne 1 ]; then
 		ts=$(date -u +%Y%m%dT%H%M%SZ)
-	# KNOWN, DEFERRED (recorded 2026-09-23, D-01 review): this refusal backup
-	# is written on EVERY boot. It is reached unconditionally, before the
-	# generation comparison, and an unrecognized shape never becomes
-	# recognized by itself, so a permanently-unrecognized file produces one
-	# new timestamped copy per boot. That is the same defect shape D-01
-	# removed from the component backups, bounded only by
-	# nebulaos-retention.sh's shape-2 pass (-mtime +7, keep 2). Deliberately
-	# NOT fixed in the D-01 change: these are small text files - steady state
-	# is (boots in the trailing 7 days) copies, order of hundreds of KB -
-	# against the ~1.6GB class D-01 addressed. An idempotence check (skip when
-	# an identical backup already exists) would close it.
+		# KNOWN, DEFERRED (recorded 2026-09-23, D-01 review): this refusal backup
+		# is written on EVERY boot. It is reached unconditionally, before the
+		# generation comparison, and an unrecognized shape never becomes
+		# recognized by itself, so a permanently-unrecognized file produces one
+		# new timestamped copy per boot. That is the same defect shape D-01
+		# removed from the component backups, bounded only by
+		# nebulaos-retention.sh's shape-2 pass (-mtime +7, keep 2). Deliberately
+		# NOT fixed in the D-01 change: these are small text files - steady state
+		# is (boots in the trailing 7 days) copies, order of hundreds of KB -
+		# against the ~1.6GB class D-01 addressed. An idempotence check (skip when
+		# an identical backup already exists) would close it.
 		mkdir -p "$BACKUP_ROOT/printer-cfg-migration-refused"
 		cp -a "$f" "$BACKUP_ROOT/printer-cfg-migration-refused/printer.cfg.$ts" 2>/dev/null
 		log "ERROR: printer.cfg does not match a recognized shape for automatic migration to the split /etc/nebulaos/klipper/ layout (known shape: $([ "$known_shape" -eq 1 ] && echo yes || echo no), anchor line count: $anchor_count) - backed up to $BACKUP_ROOT/printer-cfg-migration-refused/printer.cfg.$ts, LEFT UNTOUCHED. Manual migration required - see docs/NEBULAOS_PRINTER_CFG_MIGRATION.md"
