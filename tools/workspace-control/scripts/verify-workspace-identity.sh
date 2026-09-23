@@ -54,7 +54,12 @@ loc(){ git -C "$1" rev-parse HEAD 2>/dev/null || echo UNRESOLVED; }
 brof(){ git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo UNRESOLVED; }
 rem(){ git -C "$1" remote get-url origin 2>/dev/null || echo UNRESOLVED; }
 dirty(){ # full tree scan is the slow part; the hook gate does not need it
-  if [ "$STRICT_CLEAN" = 0 ]; then echo 0; return; fi
+  # Fast mode reports NOT_CHECKED, never 0. Printing "0" for a check that was
+  # deliberately skipped states a clean tree as a measured fact - the session
+  # banner repeats that figure every session, and it read as evidence of
+  # cleanliness while three files were modified. An unmeasured value has to
+  # look unmeasured.
+  if [ "$STRICT_CLEAN" = 0 ]; then echo NOT_CHECKED; return; fi
   local n; n=$(git -C "$1" status --porcelain 2>/dev/null | wc -l); echo "$n"; }
 wtcount(){ git -C "$1" worktree list 2>/dev/null | wc -l; }
 lsr(){ # repo branch -> remote sha
@@ -342,12 +347,16 @@ echo "LAUNCH_SENTINELS_OK=$SENTINELS_OK/5"
 echo "LAUNCH_SENTINELS_BAD=${#SENTINELS_BAD[@]}${SENTINELS_BAD[*]:+ (${SENTINELS_BAD[*]})}"
 [ "${#SENTINELS_BAD[@]}" = 0 ] || fail "sentinels: ${SENTINELS_BAD[*]}"
 echo
-DIRTY_ACTIVE_REPOS=0
-for e in "${EXPECTED[@]}"; do
-  [ -d "$WORKSPACE_ROOT/$e/.git" ] || continue
-  [ "$(dirty "$WORKSPACE_ROOT/$e")" = "0" ] || DIRTY_ACTIVE_REPOS=$((DIRTY_ACTIVE_REPOS+1))
-done
-echo "DIRTY_ACTIVE_REPOS=$DIRTY_ACTIVE_REPOS"
+if [ "$STRICT_CLEAN" = 0 ]; then
+  echo "DIRTY_ACTIVE_REPOS=NOT_CHECKED"
+else
+  DIRTY_ACTIVE_REPOS=0
+  for e in "${EXPECTED[@]}"; do
+    [ -d "$WORKSPACE_ROOT/$e/.git" ] || continue
+    [ "$(dirty "$WORKSPACE_ROOT/$e")" = "0" ] || DIRTY_ACTIVE_REPOS=$((DIRTY_ACTIVE_REPOS+1))
+  done
+  echo "DIRTY_ACTIVE_REPOS=$DIRTY_ACTIVE_REPOS"
+fi
 # Dirty trees are normal mid-development. They matter for an audit, never for
 # deciding whether this is the right source generation - so the PreToolUse
 # gate must not block edits just because an edit already happened.
