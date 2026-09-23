@@ -20,6 +20,8 @@ authority/WORKSPACE_RULES.md            WORKSPACE_RULES.md                      
 claude/settings.json                    .claude/settings.json                   644
 claude/agents/nebula-architect.md       .claude/agents/nebula-architect.md      644
 claude/agents/nebula-verifier.md        .claude/agents/nebula-verifier.md       644
+claude/agents/nebulaos-build.md         .claude/agents/nebulaos-build.md        644
+claude/agents/nebulaos-hardware.md      .claude/agents/nebulaos-hardware.md     644
 claude/rules/architecture-authority.md  .claude/rules/architecture-authority.md 644
 claude/hooks/session-start.sh           .claude/hooks/session-start.sh          755
 claude/hooks/pre-tool-use-identity.sh   .claude/hooks/pre-tool-use-identity.sh  755
@@ -27,3 +29,4 @@ claude/hooks/pre-tool-use-identity.sh   .claude/hooks/pre-tool-use-identity.sh  
 scripts/verify-workspace-identity.sh    tools/verify-workspace-identity.sh      755
 scripts/verify-architecture.sh          tools/verify-architecture.sh            755
 scripts/sync-workspace-control.sh       tools/sync-workspace-control.sh         755
+scripts/run-nebulaos-build.sh           tools/run-nebulaos-build.sh             755

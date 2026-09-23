@@ -72,6 +72,189 @@ NebulaOS-firmware/tools/workspace-control/historian/README.md."
     ;;
 esac
 
+# --- privileged execution boundary -----------------------------------------
+# The ONLY way a command escapes Claude sandbox in this build is the Bash
+# tool dangerouslyDisableSandbox parameter. Measured on this host: an
+# unsandboxed shell regains the user full supplementary group set, gid 972
+# included, which is the container group. So "may reach the container engine"
+# and "may do anything as this user" are the same grant, and the escape has to
+# be bound to exact files rather than to a command name or a prefix.
+#
+# Enforced here rather than in agent frontmatter because scoped Bash grants
+# are not enforced in this build - see the note under read-only reviewers.
+#
+# TWO files may run unsandboxed, each by exactly one caller:
+#   nebulaos-build   the build launcher
+#   main agent       the control-layer sync
+#
+# The second is not a convenience. This build sandboxes .claude/hooks as a
+# read-only path, so the sanctioned installer CANNOT install a hook change
+# while sandboxed. Without this allowance the control layer becomes
+# permanently un-maintainable - the same deadlock the drift-recovery
+# exception below exists to prevent, one level up. Measured, not assumed:
+# the sandboxed sync fails with "Read-only file system".
+#
+# Rules:
+#   1. the container engine invoked directly in COMMAND POSITION is refused
+#      for every caller including the main agent. Matching is by command
+#      position, not by substring, so ordinary diagnostics that merely
+#      mention the engine are unaffected. The build launcher reaches the
+#      engine through NebulaOS-firmware/build.sh, a subprocess this hook
+#      never sees - that is the containment, not an oversight.
+#   2. dangerouslyDisableSandbox is refused unless the request is one of the
+#      two caller/file pairs above: no chaining, no wrapper, no extra
+#      arguments.
+#   3. each launcher is refused to every caller but its own agent, sandboxed
+#      or not.
+#   4. the hardware launcher is not enabled yet; rule 3 covers it already, so
+#      it cannot be reached before the hardware mission binds a target.
+#
+# Fail-closed SCOPE: if the interpreter cannot run, the request is refused
+# only when it actually asked for privilege. A privilege guard that degrades
+# to allow is not a guard; one that degrades to "deny everything" takes the
+# repair path down with it.
+PRIV_VERDICT=$(printf '%s' "$INPUT" | NEBULA_ROOT="$ROOT" python3 -c '
+import json,os,re,shlex,sys
+
+BUILD_AGENT="nebulaos-build"
+HW_AGENT="nebulaos-hardware"
+
+def out(msg): print("DENY:"+msg); sys.exit(0)
+
+try: d=json.load(sys.stdin)
+except Exception: sys.exit(0)
+
+agent=(d.get("agent_type") or "").strip()
+ti=d.get("tool_input") or {}
+tool=(d.get("tool_name") or "")
+
+raw=ti.get("dangerouslyDisableSandbox")
+sandbox_off = raw is True or (isinstance(raw,str) and raw.strip().lower()=="true")
+
+if tool!="Bash":
+    if sandbox_off: out("Unsandboxed execution was requested on a non-Bash tool. Refused.")
+    sys.exit(0)
+
+cmd=(ti.get("command") or "")
+if not cmd.strip():
+    if sandbox_off: out("Unsandboxed execution was requested with an empty command. Refused.")
+    sys.exit(0)
+
+root=os.environ["NEBULA_ROOT"]
+def rp(*q): return os.path.realpath(os.path.join(root,*q))
+CANON="NebulaOS-firmware/tools/workspace-control/scripts/"
+BUILD={rp("tools/run-nebulaos-build.sh"), rp(CANON+"run-nebulaos-build.sh")}
+HW={rp("tools/run-nebulaos-hardware.sh"), rp(CANON+"run-nebulaos-hardware.sh")}
+SYNC={rp("tools/sync-workspace-control.sh"), rp(CANON+"sync-workspace-control.sh")}
+
+try: toks=shlex.split(cmd)
+except Exception: toks=[]
+
+# --- 1. container engine in command position, any caller -------------------
+ENGINES=("dock"+"er","pod"+"man")
+PREFIX=("sudo","env","nohup","time","stdbuf","nice","exec","command","builtin")
+
+# Split on shell separators FIRST, then tokenize each segment, and test only
+# the COMMAND POSITION of each segment.
+#
+# Walking shlex tokens directly got this wrong: shlex keeps a separator glued
+# to the preceding word ("hi;"), so `echo hi; <engine> ps` put the engine at a
+# non-initial index and the freshness flag never reset. The adversarial suite
+# caught it; reading the code had not. Segments also cover substitution, since
+# the split includes the substitution delimiters.
+SEGSPLIT="[;|&\n\r()"+chr(96)+"]"
+for seg in re.split(SEGSPLIT,cmd):
+    if not seg.strip(): continue
+    try: st=shlex.split(seg)
+    except Exception: st=seg.split()
+    k=0
+    while k < len(st):
+        w=st[k]
+        if w.split("/")[-1] in PREFIX or w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=",w):
+            k+=1; continue
+        break
+    if k < len(st):
+        base=st[k].split("/")[-1]
+        if base in ENGINES:
+            out("Direct use of the "+base+" command through the Bash tool is refused for every\n"
+                "caller, including the main agent.\n\n"
+                "Container access is not granted as a command. It is granted only as the approved\n"
+                "build launcher, which reaches the engine through NebulaOS-firmware/build.sh as a\n"
+                "subprocess:\n\n"
+                "  tools/run-nebulaos-build.sh <expected-firmware-sha>   (nebulaos-build agent only)\n\n"
+                "Main agent: delegate the build to the nebulaos-build subagent.")
+
+# one plain command: no chaining, redirection, substitution or expansion
+bad=set(";&|<>(){}$\n\r"); bad.add(chr(96))
+chained=any(c in cmd for c in bad)
+
+t2=list(toks)
+if t2 and t2[0] in ("bash","sh","/bin/bash","/bin/sh","/usr/bin/bash","/usr/bin/sh","source","."):
+    wrapped=True; t2=t2[1:]
+else:
+    wrapped=False
+
+target=None; args=[]
+if t2:
+    script,args=t2[0],t2[1:]
+    if os.path.isabs(script): cand=script
+    else:
+        cwd=d.get("cwd")
+        cand=os.path.join(cwd,script) if cwd else None
+    if cand:
+        try: target=os.path.realpath(cand)
+        except Exception: target=None
+
+is_build = bool(target) and target in BUILD
+is_hw    = bool(target) and target in HW
+is_sync  = bool(target) and target in SYNC
+
+# --- 3. launchers are bound to their own agent, sandboxed or not -----------
+if is_hw and agent!=HW_AGENT:
+    out("The hardware qualification launcher may only be invoked by the "+HW_AGENT+" agent.\n"
+        "Caller: "+(agent or "main agent")+".")
+
+if is_build and agent!=BUILD_AGENT:
+    out("The approved build launcher may only be invoked by the "+BUILD_AGENT+" agent.\n"
+        "Caller: "+(agent or "main agent")+".\n\n"
+        "Reviewers do not build, and the main agent delegates: use the nebulaos-build subagent.")
+
+# --- 2. the sandbox escape -------------------------------------------------
+if sandbox_off:
+    if chained or wrapped:
+        out("Unsandboxed execution must be a lone invocation of an approved file - no chaining,\n"
+            "redirection, substitution, expansion, or shell wrapper. Refused.")
+    if agent==BUILD_AGENT and is_build:
+        if len(args)!=1 or len(args[0])!=40 or any(c not in "0123456789abcdef" for c in args[0]):
+            out("The approved build launcher takes exactly one argument: the full 40-character\n"
+                "firmware SHA to build. Refused - a qualification build states its source\n"
+                "identity up front.")
+    elif agent=="" and is_sync:
+        if args not in ([],["--apply"]):
+            out("The control-layer sync takes no arguments, or --apply. Refused.")
+    else:
+        out("Unsandboxed execution is refused for "+(agent or "the main agent")+" running this\n"
+            "command.\n\n"
+            "Leaving the sandbox restores this user full host privilege, so it is granted to\n"
+            "exactly two caller/file pairs:\n\n"
+            "  nebulaos-build   tools/run-nebulaos-build.sh <sha>\n"
+            "  main agent       tools/sync-workspace-control.sh [--apply]\n\n"
+            "Resolved to: "+str(target))
+' 2>/dev/null); PRIV_RC=$?
+
+# Interpreter failure denies ONLY privilege requests - see fail-closed scope.
+if [ "$PRIV_RC" -ne 0 ]; then
+  case "$INPUT" in
+    *dangerouslyDisableSandbox*)
+      deny "NebulaOS guardrail: the privilege guard could not evaluate this request, and the
+request asked for unsandboxed execution. Refusing." ;;
+  esac
+fi
+
+case "${PRIV_VERDICT:-}" in
+  DENY:*) deny "${PRIV_VERDICT#DENY:}" ;;
+esac
+
 # --- read-only reviewers ---------------------------------------------------
 # nebula-architect and nebula-verifier have no Edit/Write/NotebookEdit tool,
 # but they DO have Bash - and this build's sandbox permits writes inside the
