@@ -324,5 +324,55 @@ else
 fi
 
 echo ""
+echo "=== Case 10: the duplicate branch honours clean AND identifiable ==="
+# The dedup arm ends in rm -rf, so it must apply the same two-part proof the
+# discard arm does. Keying on HEAD alone would destroy uncommitted edits
+# sitting on an already-preserved commit - and would make the promise in
+# docs/NEBULAOS_UPDATE_OWNERSHIP.md ("only removed when provably identical to
+# the incoming seed AND clean") false. Reaching this branch needs the SAME
+# HEAD to recur, so the commit is replayed with fixed author/committer dates.
+build_fixture c10 production
+printf 'not a gzip stream\n' > "$W/c10-seeds/moonraker.tar.gz"
+boot c10 >/dev/null 2>&1
+_ext10="$W/c10-apps/nebulaos-klipper-extensions"
+replay_commit() {
+	printf 'user work\n' > "$_ext10/replayed.py"
+	git -C "$_ext10" add -A
+	GIT_AUTHOR_DATE="2026-01-01T00:00:00Z" GIT_COMMITTER_DATE="2026-01-01T00:00:00Z" \
+		git -C "$_ext10" commit -q -m "replayed user commit"
+	git -C "$_ext10" rev-parse HEAD
+}
+_h1=$(replay_commit)
+boot c10 >/dev/null 2>&1              # preserves the diverged tree
+_h2=$(replay_commit)                  # same content+dates => same SHA
+if [ "$_h1" = "$_h2" ]; then
+	pass "the fixture reproduces an identical HEAD across retries (the dedup branch is reachable)"
+else
+	fail "could not reproduce an identical HEAD ($_h1 vs $_h2) - the dedup branch would not be exercised"
+fi
+# Now make it DIRTY at that already-preserved HEAD. The dedup arm must refuse.
+printf 'uncommitted edit that exists nowhere else\n' > "$_ext10/uncommitted.txt"
+boot c10 >/dev/null 2>&1
+if find "$W/c10-sys/migration-backups" -name uncommitted.txt 2>/dev/null | grep -q .; then
+	pass "a DIRTY tree at an already-preserved HEAD is preserved, not deduped away"
+else
+	fail "a dirty tree at an already-preserved HEAD was destroyed - the dedup branch ignores dirtiness"
+fi
+n10=$(backups c10)
+if [ "$n10" -le 1 ]; then
+	pass "honouring dirtiness in the dedup branch did not break the bound ($n10)"
+else
+	fail "the bound broke: $n10 backup directories"
+fi
+# A non-git $dest must not be treated as a duplicate of another non-git copy.
+rm -rf "$_ext10/.git"
+boot c10 >/dev/null 2>&1
+if [ "$(backups c10)" -le 1 ]; then
+	pass "an unidentifiable (non-git) tree does not resurrect unbounded growth"
+else
+	fail "an unidentifiable tree broke the bound"
+fi
+
+echo ""
 echo "migration-backup-growth-tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

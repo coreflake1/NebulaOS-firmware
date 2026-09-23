@@ -54,6 +54,13 @@ matters when you are reading its output:
 - `check_required` - **release-blocking**. A `MISS` on one of these prints
   `<== REQUIRED`, and the script exits **non-zero** at the end.
 
+There is also a third, unclassified category to be aware of: a few checks emit
+a bare `echo "MISS ..."` directly rather than going through either function -
+`check_seed_archive` and the `c_helper.so` comparison near it. Those are
+invisible to the required-miss counter and are reporting-only by default.
+Leaving them unclassified is deliberate for now, but do not assume every
+`MISS` line in the output has been through the classification above.
+
 Updated 2026-09-23 (D-02). This section previously said 06-verify "exits 0 and
 gates nothing", which was true of every check and was the problem: the script
 carried a comment claiming its seed-manifest-library check made absence
