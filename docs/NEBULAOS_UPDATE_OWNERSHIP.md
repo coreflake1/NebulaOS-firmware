@@ -98,6 +98,15 @@ intact to `$SYSTEM/migration-backups/<timestamp>/`, and the migration is
 all-or-nothing, so a partial failure advances no generation and retries on
 the next boot.
 
+A retry does **not** create a second backup directory. It reuses the one the
+first failed attempt created, so a persistent failure cannot accumulate one
+backup per boot. Your original pre-migration tree stays in that directory
+untouched across every retry. If you changed the checkout yourself between the
+failed attempt and the retry - a Mainsail update, or your own commit - that
+tree is not silently discarded either: it is only removed when it is provably
+identical to the incoming seed and clean, and otherwise it is preserved
+alongside as `<component>.diverged-<timestamp>` with a warning in the boot log.
+
 ## GuppyScreen
 
 **Owner: NebulaOS firmware/release only. No independent updater exists,

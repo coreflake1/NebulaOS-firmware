@@ -212,5 +212,117 @@ else
 fi
 
 echo ""
+echo "=== Case 6: a diverged live tree is PRESERVED, not discarded ==="
+# The retry path reuses the first attempt's backup directory, so the tree on
+# disk cannot simply be moved on top of it. It used to be discarded outright,
+# on the assumption it was always the previous attempt's own replacement and
+# therefore reproducible from the seed. That assumption is false: the
+# extensions checkout is a Moonraker update_manager git_repo and klipper is a
+# channel-dev slot, so a user can legitimately commit there between a failed
+# attempt and its retry - and that work exists in no backup.
+build_fixture c6 production
+printf 'not a gzip stream\n' > "$W/c6-seeds/moonraker.tar.gz"   # deterministic post-cutover failure
+boot c6 >/dev/null 2>&1                                          # boot 1: klipper cuts over, moonraker fails
+# Simulate what Mainsail's update manager (or the user) does between boots.
+printf 'user work\n' > "$W/c6-apps/nebulaos-klipper-extensions/user_module.py"
+git -C "$W/c6-apps/nebulaos-klipper-extensions" add -A
+git -C "$W/c6-apps/nebulaos-klipper-extensions" commit -q -m "user commit between attempts"
+_user_head=$(git -C "$W/c6-apps/nebulaos-klipper-extensions" rev-parse HEAD)
+boot c6 >/dev/null 2>&1                                          # boot 2: the retry
+if find "$W/c6-sys/migration-backups" -name user_module.py 2>/dev/null | grep -q .; then
+	pass "a user commit made between attempts survives the retry (preserved in a backup)"
+else
+	fail "a user commit made between attempts was DESTROYED by the retry - it exists nowhere"
+fi
+if find "$W/c6-sys/migration-backups" -maxdepth 2 -name '*.diverged-*' -type d 2>/dev/null | grep -q .; then
+	pass "the diverged tree is preserved under an explicit .diverged-<timestamp> name"
+else
+	fail "no .diverged-* preservation directory was created"
+fi
+n6=$(backups c6)
+if [ "$n6" -le 1 ]; then
+	pass "preserving the diverged tree did not create a second backup directory ($n6)"
+else
+	fail "preserving the diverged tree broke the bound: $n6 directories"
+fi
+# And a repeat of the same divergence must not accumulate copies.
+boot c6 >/dev/null 2>&1
+d6=$(find "$W/c6-sys/migration-backups" -maxdepth 2 -name '*.diverged-*' -type d 2>/dev/null | wc -l)
+if [ "$d6" -le 1 ]; then
+	pass "repeating the same divergence does not accumulate duplicate preserved copies ($d6)"
+else
+	fail "duplicate preserved copies accumulated: $d6"
+fi
+
+echo ""
+echo "=== Case 7: absent extensions + underivable branch is caught by the gate ==="
+# A pre-Phase-1 device has no extensions checkout; the migration PROVISIONS it.
+# The precondition gate used to skip both its archive check and its branch
+# check when the checkout was absent, so this device bypassed the gate
+# entirely and cut klipper over against extensions that could never arrive.
+build_fixture c7 ""
+rm -rf "$W/c7-apps/nebulaos-klipper-extensions"
+i=0; while [ "$i" -lt 5 ]; do boot c7 >/dev/null 2>&1; i=$((i+1)); done
+n7=$(backups c7)
+if [ "$n7" -eq 0 ]; then
+	pass "absent extensions + underivable branch creates ZERO backup directories"
+else
+	fail "absent extensions + underivable branch created $n7 backup directories - the gate was bypassed"
+fi
+if [ "$(cat "$W/c7-apps/klipper/f" 2>/dev/null)" = "old" ]; then
+	pass "absent extensions + underivable branch does not cut klipper over"
+else
+	fail "klipper was cut over on a device whose extensions could never be provisioned"
+fi
+
+echo ""
+echo "=== Case 8: the attempt record self-heals and stays bounded ==="
+build_fixture c8 production
+printf 'not a gzip stream\n' > "$W/c8-seeds/moonraker.tar.gz"
+boot c8 >/dev/null 2>&1
+printf 'this is not json' > "$W/c8-sys/migration-attempt.json"    # corrupt it
+i=0; while [ "$i" -lt 5 ]; do boot c8 >/dev/null 2>&1; i=$((i+1)); done
+n8=$(backups c8)
+if [ "$n8" -le 2 ]; then
+	pass "a corrupt attempt record self-heals and growth stays bounded ($n8)"
+else
+	fail "a corrupt attempt record resumed unbounded growth: $n8 directories"
+fi
+# Now delete the directory the record names, as retention eventually would.
+rm -rf "$W/c8-sys/migration-backups"/*
+i=0; while [ "$i" -lt 5 ]; do boot c8 >/dev/null 2>&1; i=$((i+1)); done
+n8b=$(backups c8)
+if [ "$n8b" -le 1 ]; then
+	pass "a pruned attempt directory is re-minted once, not once per boot ($n8b)"
+else
+	fail "a pruned attempt directory resumed unbounded growth: $n8b"
+fi
+
+echo ""
+echo "=== Case 9: a new target version does not disturb the old backup ==="
+build_fixture c9 production
+printf 'not a gzip stream\n' > "$W/c9-seeds/moonraker.tar.gz"
+boot c9 >/dev/null 2>&1
+_a_dir=$(find "$W/c9-sys/migration-backups" -mindepth 1 -maxdepth 1 -type d | head -1)
+_a_klipper=$(cat "$_a_dir/klipper/f" 2>/dev/null)
+sed -i 's/"gen-target"/"gen-target-2"/' "$W/c9-seeds/seed-manifest.json"
+# The backup directory name has per-second UTC granularity, so two boots
+# inside the same second would share one directory and make this assertion
+# meaningless. Real devices boot minutes apart; the test has to wait.
+sleep 1.1
+boot c9 >/dev/null 2>&1
+if [ -d "$_a_dir" ] && [ "$(cat "$_a_dir/klipper/f" 2>/dev/null)" = "$_a_klipper" ]; then
+	pass "the previous version's backup survives a target-version change untouched"
+else
+	fail "a target-version change disturbed the previous version's backup"
+fi
+n9=$(backups c9)
+if [ "$n9" -eq 2 ]; then
+	pass "a new target version creates exactly one additional backup directory ($n9 total)"
+else
+	fail "a new target version produced $n9 backup directories (expected 2)"
+fi
+
+echo ""
 echo "migration-backup-growth-tests: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

@@ -36,16 +36,29 @@ VARIANT="${1:?usage: $0 <R0|R1>}"
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 # Both overridable, defaulting to the real repo paths so production behaviour
-# is bit-identical to before. This exists so the test suite can exercise the
-# state machine on a disposable COPY instead of mutating the tracked product
-# artifact in place: the suite used to snapshot-and-restore the real fragment,
-# which meant a crash, an OOM kill or a SIGKILL mid-run could leave the shipped
-# fragment without CONFIG_PREEMPT_RT=y and the next build would silently
-# produce a non-RT kernel - exactly the class of bug that suite exists to
-# catch. Mirrors the SEEDS/APPS/SYSTEM override convention used by the
-# init.d scripts. Changes no configuration.
-FRAGMENT="${NEBULAOS_VARIANT_FRAGMENT:-$REPO_ROOT/artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config}"
-MARKER="${NEBULAOS_VARIANT_MARKER:-$REPO_ROOT/build-work/preempt-variant-applied.txt}"
+# is bit-identical when they are unset. This exists so the test suite can
+# exercise the state machine on a disposable COPY instead of mutating the
+# tracked product artifact in place: the suite used to snapshot-and-restore
+# the real fragment, which meant a crash, an OOM kill or a SIGKILL mid-run
+# could leave the shipped fragment without CONFIG_PREEMPT_RT=y and the next
+# build would silently produce a non-RT kernel - exactly the class of bug that
+# suite exists to catch. Mirrors the SEEDS/APPS/SYSTEM override convention
+# used by the init.d scripts.
+#
+# The names are PREEMPT-qualified on purpose. Five other scripts edit this
+# same fragment (display-vsync, backlight-final-controller, pwm-state-readback,
+# touch-final-qualification, accelerometer-eeprom-bus-enable), so an
+# unqualified NEBULAOS_VARIANT_FRAGMENT would invite exactly the collision
+# these overrides exist to prevent.
+#
+# Changes no configuration WHEN UNSET. Two things to know if you export them:
+# apply-qualified-baseline.sh invokes this script and would inherit them, so a
+# leaked variable makes a real baseline apply write CONFIG_PREEMPT_RT=y into a
+# scratch file while reporting success; and package-variant-artifacts.sh reads
+# the default marker path regardless, so an overridden marker desynchronises
+# the recorded preempt_variant= provenance field.
+FRAGMENT="${NEBULAOS_PREEMPT_VARIANT_FRAGMENT:-$REPO_ROOT/artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config}"
+MARKER="${NEBULAOS_PREEMPT_VARIANT_MARKER:-$REPO_ROOT/build-work/preempt-variant-applied.txt}"
 
 BEGIN_MARK="#--- NEBULAOS_PREEMPT_RT_VARIANT_BEGIN ---"
 END_MARK="#--- NEBULAOS_PREEMPT_RT_VARIANT_END ---"

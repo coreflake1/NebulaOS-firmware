@@ -218,6 +218,15 @@ fi
 # it here makes that class STORAGE-NEUTRAL - it costs nothing per boot and
 # retries for free once the image is fixed.
 #
+# Note what the component guards below do and do not skip. klipper and
+# moonraker are only ever RESEEDED, so an absent checkout means there is
+# nothing to do and their archives are not needed. The extensions checkout is
+# different: when it is absent the migration PROVISIONS it, so its archive and
+# its branch are required either way. An earlier version of this gate skipped
+# both for an absent extensions checkout, and a pre-Phase-1 device therefore
+# bypassed the gate entirely and cut klipper over against extensions that
+# could never arrive.
+#
 # This does not cover failures that can only be detected after extraction
 # (corrupt archive, wrong branch/origin, dirty tree) or after cutover. Those
 # are bounded by ensure_backup_dir()'s attempt-record reuse instead.
@@ -225,7 +234,16 @@ migration_preconditions_ok() {
 	_mp_ok=1
 
 	for _mp_c in klipper nebulaos-klipper-extensions moonraker; do
-		[ -e "$APPS/$_mp_c/.git" ] || continue
+		# klipper and moonraker are only reseeded when they already exist, so
+		# an absent checkout means "nothing to do" and its archive is not
+		# needed. nebulaos-klipper-extensions is different: when it is ABSENT
+		# the migration PROVISIONS it via seed_missing_extensions(), which
+		# needs the archive just as much. Skipping the check for it here is
+		# how a pre-Phase-1 device bypassed this gate entirely and cut klipper
+		# over against extensions that could never be provisioned.
+		if [ "$_mp_c" != "nebulaos-klipper-extensions" ]; then
+			[ -e "$APPS/$_mp_c/.git" ] || continue
+		fi
 		if [ ! -f "$SEEDS/$_mp_c.tar.gz" ]; then
 			log "PRECONDITION FAILED: seed archive missing ($SEEDS/$_mp_c.tar.gz) - refusing to start a migration that cannot complete"
 			_mp_ok=0
@@ -237,11 +255,14 @@ migration_preconditions_ok() {
 	# from the image (the scripts source it tolerantly on purpose), so this
 	# also covers the missing-library case: an undefined command yields no
 	# output and the emptiness test below catches it.
-	if [ -e "$APPS/nebulaos-klipper-extensions/.git" ]; then
-		if [ -z "$(seed_manifest_branch "$SEEDS/seed-manifest.json" nebulaos-klipper-extensions 2>/dev/null)" ]; then
-			log "PRECONDITION FAILED: cannot determine the expected extensions branch from $SEEDS/seed-manifest.json (is $SEED_MANIFEST_LIB present in the image?) - refusing to start a migration that cannot complete"
-			_mp_ok=0
-		fi
+	# Unconditional, deliberately: both arms need it. The reseed arm asserts
+	# the branch on an existing checkout, and seed_missing_extensions()
+	# refuses to provision without it, so "extensions absent" is not a reason
+	# to skip this - it was the gap that let an absent-extensions device
+	# through.
+	if [ -z "$(seed_manifest_branch "$SEEDS/seed-manifest.json" nebulaos-klipper-extensions 2>/dev/null)" ]; then
+		log "PRECONDITION FAILED: cannot determine the expected extensions branch from $SEEDS/seed-manifest.json (is $SEED_MANIFEST_LIB present in the image?) - refusing to start a migration that cannot complete"
+		_mp_ok=0
 	fi
 
 	[ "$_mp_ok" = "1" ]
@@ -277,13 +298,23 @@ ensure_backup_dir() {
 		return 1
 	fi
 	mkdir -p "$SYSTEM" 2>/dev/null || true
-	cat > "$ATTEMPT_FILE" <<ATTEMPTEOF
+	# Checked, because this one write IS the retry bound. If it fails - a
+	# full or read-only /usr/data, which is precisely the condition an
+	# unbounded amplifier produces - the next boot finds no record, mints a
+	# new timestamped directory, and boot-proportional growth silently
+	# resumes. Do not fail the migration for it (the backup directory exists
+	# and the cutover is about to be correct), but never let it pass in
+	# silence.
+	if ! cat > "$ATTEMPT_FILE" <<ATTEMPTEOF
 {
   "target_version": "$_expected_version",
   "backup_dir": "$BACKUP_DIR",
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
 }
 ATTEMPTEOF
+	then
+		log "ERROR: could not write the migration attempt record $ATTEMPT_FILE - a retry will not be able to reuse $BACKUP_DIR and may create another backup directory. Check free space and the writability of $SYSTEM."
+	fi
 	log "backing up the current application tree to $BACKUP_DIR before the first cutover"
 	return 0
 }
@@ -345,14 +376,54 @@ reseed_git_app() {
 	fi
 	if [ -e "$BACKUP_DIR/$name" ]; then
 		# A previous attempt at this same target version already preserved
-		# this component's genuine pre-migration tree here. Whatever is on
-		# disk now is that attempt's own replacement - byte-reproducible
-		# from the seed archive, so it has no recovery value, and moving it
-		# on top would either nest inside the real backup or destroy it.
-		# Discard it instead and keep the copy that is actually worth
-		# keeping.
-		log "$name: a pre-migration backup from an earlier attempt is already preserved at $BACKUP_DIR/$name - keeping it and discarding the interim tree"
-		rm -rf "$dest"
+		# this component's genuine pre-migration tree here, and moving the
+		# current tree on top would nest inside it or destroy it.
+		#
+		# The current tree is USUALLY that previous attempt's own
+		# replacement, which is reproducible from the seed archive and worth
+		# nothing. But not always, and the difference is user data:
+		# $APPS/nebulaos-klipper-extensions is a Moonraker update_manager
+		# git_repo (see /etc/nebulaos/moonraker/klipper-pin.conf) and
+		# $APPS/klipper is a reserved update_manager slot on channel dev with
+		# no pinned_commit, so between a failed attempt and its retry - a
+		# normal printer session, possibly days - the user can legitimately
+		# update or commit in either. Discarding unconditionally would
+		# destroy work that exists in no backup, which is exactly what
+		# docs/NEBULAOS_UPDATE_OWNERSHIP.md promises never happens.
+		#
+		# So prove reproducibility instead of assuming it: identical HEAD to
+		# the replacement about to be installed, and a clean tree.
+		_cut_live=$(git -C "$dest" rev-parse HEAD 2>/dev/null)
+		_cut_new=$(git -C "$dest.migrate-partial" rev-parse HEAD 2>/dev/null)
+		if [ -n "$dirty_exclude" ]; then
+			_cut_dirty=$(git -C "$dest" status --porcelain -- . ":!$dirty_exclude" 2>/dev/null)
+		else
+			_cut_dirty=$(git -C "$dest" status --porcelain 2>/dev/null)
+		fi
+		if [ -n "$_cut_live" ] && [ "$_cut_live" = "$_cut_new" ] && [ -z "$_cut_dirty" ]; then
+			log "$name: the interim tree ($_cut_live) is identical to the incoming seed and clean - discarding it and keeping the pre-migration backup already at $BACKUP_DIR/$name"
+			rm -rf "$dest"
+		else
+			# Do not destroy it. Preserve it alongside the pre-migration
+			# backup, inside the SAME reused directory, so the retry bound is
+			# untouched.
+			_cut_dup=0
+			for _cut_prev in "$BACKUP_DIR/$name".diverged-*; do
+				[ -d "$_cut_prev" ] || continue
+				if [ "$(git -C "$_cut_prev" rev-parse HEAD 2>/dev/null)" = "$_cut_live" ]; then
+					_cut_dup=1
+					break
+				fi
+			done
+			if [ "$_cut_dup" = "1" ]; then
+				log "WARNING: $name: the tree on disk (HEAD ${_cut_live:-unknown}) does not match the incoming seed, but an identical copy is already preserved in $BACKUP_DIR - discarding this duplicate rather than accumulating copies"
+				rm -rf "$dest"
+			else
+				_cut_keep="$BACKUP_DIR/$name.diverged-$(date -u +%Y%m%dT%H%M%SZ)"
+				log "WARNING: $name: the tree on disk (HEAD ${_cut_live:-unknown}${_cut_dirty:+, with uncommitted changes}) does NOT match the incoming seed - it may hold your own commits or local edits, made between the failed attempt and this retry. Preserving it at $_cut_keep instead of discarding it."
+				mv "$dest" "$_cut_keep"
+			fi
+		fi
 	else
 		mv "$dest" "$BACKUP_DIR/$name"
 	fi

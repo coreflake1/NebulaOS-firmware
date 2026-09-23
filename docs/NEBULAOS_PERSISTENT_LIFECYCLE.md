@@ -105,8 +105,14 @@ When a real migration runs (`S04nebulaos-migrate`'s `start()` →
 2. **Backup**: the entire current `$APPS/<name>` tree is moved (not copied -
    this is a 208MB-RAM device, and mv within the same partition is instant
    and atomic) to a timestamped directory under
-   `$SYSTEM/migration-backups/<UTC-timestamp>/` BEFORE anything new is
-   written. Not deleted automatically - left for the operator to remove by
+   `$SYSTEM/migration-backups/<UTC-timestamp>/`. The directory is created
+   lazily, at the first cutover that is actually going to happen, and a RETRY
+   of a failed attempt REUSES it rather than creating another - that is what
+   bounds backup growth under a persistent failure. On a retry, the tree
+   currently on disk is discarded only when it is provably identical to the
+   incoming seed and clean; if it diverges (you updated or committed to it
+   between attempts) it is preserved as `<name>.diverged-<timestamp>` in the
+   same directory instead. Not deleted automatically - left for the operator to remove by
    hand once the new generation is confirmed working.
 3. **Compare/update**: the new archive is extracted to a `.migrate-partial`
    sibling directory, then verified (correct branch, correct origin, clean

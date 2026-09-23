@@ -37,7 +37,7 @@
 # kill or a SIGKILL mid-run could leave the shipped fragment without
 # CONFIG_PREEMPT_RT=y and the next build would silently produce a non-RT
 # kernel - precisely the bug class this suite exists to catch. Everything now
-# runs on disposable copies via NEBULAOS_VARIANT_FRAGMENT/_MARKER.
+# runs on disposable copies via NEBULAOS_PREEMPT_VARIANT_FRAGMENT/_MARKER.
 #
 # Usage: sh tests/preempt-variant-tests.sh
 
@@ -66,7 +66,7 @@ CANON_SHA_BEFORE=$(sha256sum "$CANONICAL" | cut -d' ' -f1)
 # Run the variant script against a disposable copy.
 #   apply <fixture> <variant>
 apply() {
-	NEBULAOS_VARIANT_FRAGMENT="$1" NEBULAOS_VARIANT_MARKER="$W/marker" \
+	NEBULAOS_PREEMPT_VARIANT_FRAGMENT="$1" NEBULAOS_PREEMPT_VARIANT_MARKER="$W/marker" \
 		sh "$VARIANT_SCRIPT" "$2" >/dev/null 2>&1
 }
 fresh() { cp "$CANONICAL" "$W/$1"; echo "$W/$1"; }
@@ -192,7 +192,7 @@ else
 	fail "the applied-marker does not record R0"
 fi
 f=$(fresh bad)
-if NEBULAOS_VARIANT_FRAGMENT="$f" NEBULAOS_VARIANT_MARKER="$W/marker" \
+if NEBULAOS_PREEMPT_VARIANT_FRAGMENT="$f" NEBULAOS_PREEMPT_VARIANT_MARKER="$W/marker" \
 	sh "$VARIANT_SCRIPT" R7 >/dev/null 2>&1; then
 	fail "an unknown variant was accepted"
 else
