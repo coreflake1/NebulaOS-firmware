@@ -301,10 +301,25 @@ if sandbox_off:
     if chained or wrapped:
         out("Unsandboxed execution must be a lone invocation of the approved launcher - no\n"
             "chaining, redirection, substitution, expansion, or shell wrapper. Refused.")
-    if len(args)!=1 or len(args[0])!=40 or any(c not in "0123456789abcdef" for c in args[0]):
-        out("The approved build launcher takes exactly one argument: the full 40-character\n"
-            "firmware SHA to build. Refused - a qualification build states its source\n"
-            "identity up front.")
+    # Exactly three accepted argument shapes. The two flags are SEMANTIC MODES
+    # that the launcher maps internally, not pass-through options: --candidate
+    # sets NEBULAOS_CANDIDATE_BUILD=1 and nothing else. There is no general
+    # VAR=value facility and no route to the build.sh options, so the build
+    # agent gains one mode, not an environment.
+    #
+    #   <40-hex sha>
+    #   --candidate <40-hex sha>
+    #   --qualified <40-hex sha>
+    def is_sha(x): return len(x)==40 and all(c in "0123456789abcdef" for c in x)
+    ok_args = (len(args)==1 and is_sha(args[0])) or \
+              (len(args)==2 and args[0] in ("--candidate","--qualified") and is_sha(args[1]))
+    if not ok_args:
+        out("The approved build launcher accepts exactly one of:\n\n"
+            "  <40-hex sha>\n"
+            "  --candidate <40-hex sha>\n"
+            "  --qualified <40-hex sha>\n\n"
+            "and forwards no build options. Refused - a qualification build states its\n"
+            "source identity and its mode up front.")
     ok,why=content_is_canonical(target)
     if not ok:
         out("Unsandboxed execution is bound to the launcher CONTENT, not to its path.\n\n"

@@ -152,14 +152,49 @@ run_case build DENY nebulaos-build    1 "build agent, unsandboxed shell wrapper"
 run_case build DENY nebulaos-build    1 "build agent, launcher with trailing command"     "$BUILDER $SHA; id" "lone invocation"
 run_case build DENY nebulaos-build    1 "build agent, launcher with pipe"                 "$BUILDER $SHA | tee /x" "lone invocation"
 run_case build DENY nebulaos-build    1 "build agent, launcher with substitution"         "$BUILDER \$(cat /etc/hostname)" "lone invocation"
-run_case build DENY nebulaos-build    1 "build agent, launcher with no SHA"               "$BUILDER" "exactly one argument"
-run_case build DENY nebulaos-build    1 "build agent, launcher with short SHA"            "$BUILDER $BADSHA" "exactly one argument"
-run_case build DENY nebulaos-build    1 "build agent, launcher with two args"             "$BUILDER $SHA $SHA" "exactly one argument"
+run_case build DENY nebulaos-build    1 "build agent, launcher with no SHA"               "$BUILDER" "accepts exactly one of"
+run_case build DENY nebulaos-build    1 "build agent, launcher with short SHA"            "$BUILDER $BADSHA" "accepts exactly one of"
+run_case build DENY nebulaos-build    1 "build agent, launcher with two args"             "$BUILDER $SHA $SHA" "accepts exactly one of"
 run_case build DENY nebulaos-build    1 "build agent, unsandboxed sync (not its file)"    "$SYNC --apply"
 run_case build DENY nebula-architect  1 "architect, unsandboxed sync"                     "$SYNC --apply"
 run_case build DENY nebula-verifier   1 "verifier, unsandboxed arbitrary command"         "id"
 run_case hw    DENY nebulaos-hardware 1 "hardware agent, unsandboxed arbitrary command"   "id"
 run_case build DENY ""                1 "main agent, unsandboxed non-Bash tool"           "$SYNC" "non-Bash tool" Write
+echo
+
+REASON="Unsandboxed execution"
+echo "[ build modes - the sanctioned shapes must ALLOW ]"
+run_case build ALLOW nebulaos-build 1 "build agent, --candidate <sha>" "$BUILDER --candidate $SHA" ""
+run_case build ALLOW nebulaos-build 1 "build agent, --qualified <sha>" "$BUILDER --qualified $SHA" ""
+run_case build ALLOW nebulaos-build 1 "build agent, bare <sha> (implicit qualified)" "$BUILDER $SHA" ""
+echo
+
+# The two flags are semantic modes the launcher maps internally. They must not
+# become a general option or environment channel: --candidate maps to exactly
+# NEBULAOS_CANDIDATE_BUILD=1 and nothing reaches build.sh.
+REASON=""
+echo "[ build modes - everything else must DENY ]"
+run_case build DENY nebulaos-build 1 "--candidate with trailing command"  "$BUILDER --candidate $SHA; id"          "lone invocation"
+run_case build DENY nebulaos-build 1 "--candidate with and-chain"         "$BUILDER --candidate $SHA && id"     "lone invocation"
+run_case build DENY nebulaos-build 1 "--candidate with pipe"              "$BUILDER --candidate $SHA | tee /x"    "lone invocation"
+run_case build DENY nebulaos-build 1 "--candidate with substitution"      "$BUILDER --candidate \$(id -u)"        "lone invocation"
+run_case build DENY nebulaos-build 1 "env assignment before launcher"     "FOO=x $BUILDER --candidate $SHA"       "lone invocation"
+run_case build DENY nebulaos-build 1 "shell wrapper around --candidate"   "bash $BUILDER --candidate $SHA"        "lone invocation"
+run_case build DENY nebulaos-build 1 "--candidate with no SHA"            "$BUILDER --candidate"                  "accepts exactly one of"
+run_case build DENY nebulaos-build 1 "--candidate with short SHA"         "$BUILDER --candidate $BADSHA"          "accepts exactly one of"
+run_case build DENY nebulaos-build 1 "both mode flags"                    "$BUILDER --candidate --qualified $SHA" "accepts exactly one of"
+run_case build DENY nebulaos-build 1 "unknown flag"                       "$BUILDER --force $SHA"                 "accepts exactly one of"
+run_case build DENY nebulaos-build 1 "flag after the SHA"                 "$BUILDER $SHA --candidate"             "accepts exactly one of"
+run_case build DENY nebulaos-build 1 "build.sh option passthrough"        "$BUILDER --candidate $SHA --no-cache"  "accepts exactly one of"
+echo
+
+REASON="may only be invoked by the"
+echo "[ candidate mode is still bound to the build agent - must DENY ]"
+run_case build DENY ""                0 "main agent, --candidate"      "$BUILDER --candidate $SHA"
+run_case build DENY nebula-architect  0 "architect, --candidate"       "$BUILDER --candidate $SHA"
+run_case build DENY nebula-verifier   0 "verifier, --candidate"        "$BUILDER --candidate $SHA"
+run_case build DENY nebulaos-hardware 0 "hardware agent, --candidate"  "$BUILDER --candidate $SHA"
+run_case build DENY ""                1 "main agent, --candidate unsandboxed" "$BUILDER --candidate $SHA"
 echo
 
 # --- launchers are bound to their own agent, sandboxed or not --------------
