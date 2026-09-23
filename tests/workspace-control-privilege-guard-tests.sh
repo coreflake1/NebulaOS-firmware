@@ -60,7 +60,9 @@ bash -n "$CANON" || fatal "canonical hook is not valid bash"
 mkjson() {
   A_AGENT=$1 A_CMD=$2 A_SB=$3 A_TOOL=$4 A_CWD=$5 python3 -c '
 import json,os
-ti={"command":os.environ["A_CMD"]}
+c=os.environ["A_CMD"]
+if os.environ.get("A_CJ")=="1": c=json.loads(c)
+ti={"command":c}
 if os.environ["A_SB"]=="1": ti["dangerouslyDisableSandbox"]=True
 d={"tool_name":os.environ["A_TOOL"],"tool_input":ti,"cwd":os.environ["A_CWD"]}
 a=os.environ["A_AGENT"]
@@ -260,12 +262,19 @@ echo
 #
 # agent_type was also .strip()ed, so a padded value was promoted to a real
 # principal and a blank one read as the main agent.
-run_typed() { # <cat> <expect> <agent-json|OMIT> <sandbox-json|OMIT> <desc> <cmd> [reason]
-  local cat=$1 expect=$2 aj=$3 sj=$4 desc=$5 cmd=$6 reason=${7:-}
+# <cmd> is a plain string unless [cmdjson] is 1, in which case it is parsed as
+# a JSON literal. Without that, the typed-command cases sent the literal
+# STRINGS and were denied by the escape rule, not the no-command branch they
+# were named for - a case claiming coverage its harness could not deliver,
+# in the very section added to cover typed-payload holes.
+run_typed() { # <cat> <expect> <agent-json|OMIT> <sandbox-json|OMIT> <desc> <cmd> [reason] [cmdjson]
+  local cat=$1 expect=$2 aj=$3 sj=$4 desc=$5 cmd=$6 reason=${7:-} cmdjson=${8:-0}
   local out got
-  out=$(A_CMD=$cmd A_AJ=$aj A_SJ=$sj A_CWD=$ROOT python3 -c '
+  out=$(A_CMD=$cmd A_AJ=$aj A_SJ=$sj A_CWD=$ROOT A_CJ=$cmdjson python3 -c '
 import json,os
-ti={"command":os.environ["A_CMD"]}
+c=os.environ["A_CMD"]
+if os.environ.get("A_CJ")=="1": c=json.loads(c)
+ti={"command":c}
 sj=os.environ["A_SJ"]
 if sj!="OMIT": ti["dangerouslyDisableSandbox"]=json.loads(sj)
 d={"tool_name":"Bash","tool_input":ti,"cwd":os.environ["A_CWD"]}
@@ -316,11 +325,27 @@ run_typed build DENY 'null'                 'true' "null agent_type is not the b
 echo
 
 echo "[ malformed command with privilege - must DENY ]"
-run_typed build DENY '"nebulaos-build"' 'true' "command as a list"   '["x"]'
-run_typed build DENY '"nebulaos-build"' 'true' "command as a number" '5'
+run_typed build DENY '"nebulaos-build"' 'true' "command as a JSON list" '["x"]' "with no command" 1
+run_typed build DENY '"nebulaos-build"' 'true' "command as a JSON number" '5' "with no command" 1
+run_typed build DENY '"nebulaos-build"' 'true' "command as JSON null" 'null' "with no command" 1
 echo
 
 # --- pre-existing guards must still hold -----------------------------------
+echo "[ reviewer identity must not be evadable by padding - must DENY ]"
+# Pre-existing, and in the UNSAFE direction: the reviewer read-only guard
+# matched agent_type exactly, so a padded or re-cased value slipped past it and
+# a reviewer could mutate source. The privilege guard matches strictly because
+# there strictness DEMOTES an unexpected value; this guard matches loosely
+# because here breadth is what keeps a reviewer read-only. Same threat,
+# opposite safe direction.
+RM="rm -rf $ROOT/NebulaOS-firmware/tests"
+run_typed ctl DENY '" nebula-verifier"' 'false' "padded reviewer name" "$RM" "READ-ONLY with respect to source"
+run_typed ctl DENY '"nebula-verifier "' 'false' "trailing space reviewer" "$RM" "READ-ONLY with respect to source"
+run_typed ctl DENY '"NEBULA-VERIFIER"' 'false' "upper case reviewer" "$RM" "READ-ONLY with respect to source"
+run_typed ctl DENY '"Nebula-Architect"' 'false' "mixed case architect" "$RM" "READ-ONLY with respect to source"
+run_typed ctl DENY '"nebula-verifier"' 'false' "exact reviewer name" "$RM" "READ-ONLY with respect to source"
+echo
+
 REASON=""
 echo "[ regression: guards that predate this boundary ]"
 run_case ctl DENY nebula-verifier  0 "verifier may not commit"     "git -C $ROOT/NebulaOS-firmware commit -m x" "READ-ONLY with respect to source"

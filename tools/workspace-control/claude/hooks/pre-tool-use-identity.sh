@@ -136,8 +136,14 @@ HW_AGENT="nebulaos-hardware"
 
 def out(msg): print("DENY:"+msg); sys.exit(0)
 
+# Exit NON-ZERO on unparseable input so the bash fail-closed net below sees
+# it. Exiting 0 meant a truncated payload carrying a privilege request was
+# allowed: the interpreter reported no verdict, and the net only fires on a
+# non-zero exit. Measured. A guard whose header says it fails closed must not
+# have a shape of input that slips through silently.
 try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
+except Exception: sys.exit(3)
+if not isinstance(d,dict): sys.exit(3)
 
 # agent_type is NOT stripped or coerced. Whitespace must not promote a caller
 # to a different principal, and a blank-but-present value must not read as the
@@ -344,7 +350,15 @@ REVIEW_VERDICT=$(printf '%s' "$INPUT" | python3 -c '
 import json,shlex,sys
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
-if d.get("agent_type") not in ("nebula-architect","nebula-verifier"): sys.exit(0)
+# Matched LOOSELY, on purpose, and in the opposite direction to the privilege
+# guard above. There, a padded or re-cased agent_type must not be promoted to
+# a privileged principal, so matching is strict and anything unexpected is
+# demoted. Here, demoting means a reviewer escapes its read-only policy, so
+# anything that looks like a reviewer is treated as one. Same threat, opposite
+# safe direction.
+_at=d.get("agent_type")
+_at=_at.strip().lower() if isinstance(_at,str) else ""
+if _at not in ("nebula-architect","nebula-verifier"): sys.exit(0)
 cmd=(d.get("tool_input") or {}).get("command","") or ""
 
 # ignore redirections that discard output
