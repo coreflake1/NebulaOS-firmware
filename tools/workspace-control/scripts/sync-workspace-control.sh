@@ -43,7 +43,7 @@ echo
 [ -f "$MANIFEST" ] || { echo "FATAL: MANIFEST not found at $MANIFEST"; exit 1; }
 [ -d "$WORKSPACE_ROOT/NebulaOS-firmware" ] || { echo "FATAL: not a NebulaOS workspace root: $WORKSPACE_ROOT"; exit 1; }
 
-CHANGED=0; SAME=0
+CHANGED=0; SAME=0; FAILED=0
 while read -r src dst mode; do
   case "$src" in ''|\#*) continue;; esac
   [ -n "${dst:-}" ] || continue
@@ -52,15 +52,31 @@ while read -r src dst mode; do
   if [ -f "$d" ] && cmp -s "$s" "$d"; then
     SAME=$((SAME+1))
     # mode can drift independently of content
-    cur=$(stat -c %a "$d"); [ "$cur" = "$mode" ] || { echo "  CHMOD   $dst ($cur -> $mode)"; CHANGED=$((CHANGED+1)); [ "$APPLY" = 1 ] && chmod "$mode" "$d"; }
+    cur=$(stat -c %a "$d"); [ "$cur" = "$mode" ] || { echo "  CHMOD   $dst ($cur -> $mode)"; CHANGED=$((CHANGED+1)); [ "$APPLY" = 1 ] && { chmod "$mode" "$d" 2>/dev/null || { echo "  INSTALL_FAILED  $dst (mode)"; FAILED=$((FAILED+1)); }; }; }
     continue
   fi
   if [ -f "$d" ]; then echo "  UPDATE  $dst"; else echo "  CREATE  $dst"; fi
   CHANGED=$((CHANGED+1))
   if [ "$APPLY" = 1 ]; then
-    mkdir -p "$(dirname "$d")"
-    cp "$s" "$d"
-    chmod "$mode" "$d"
+    # An installer that prints APPLIED while cp failed is worse than one that
+    # fails: it hides drift behind a success line. Claude's sandbox makes
+    # .claude/hooks read-only, so this path DOES fail in normal operation.
+    # Install through a temp file and rename, NEVER by writing the
+    # destination in place. This script is itself one of the files it
+    # installs: bash reads a script lazily by byte offset, so overwriting the
+    # live file makes the running shell continue at a stale offset into new
+    # content. Observed directly - it produced a bogus "unbound variable" on
+    # a line the running version had never reached. rename() swaps the
+    # directory entry while the running shell keeps its original inode.
+    tmp=$d.sync-tmp.$$
+    if ! mkdir -p "$(dirname "$d")" 2>/dev/null \
+    || ! cp "$s" "$tmp" 2>/dev/null \
+    || ! chmod "$mode" "$tmp" 2>/dev/null \
+    || ! mv -f "$tmp" "$d" 2>/dev/null; then
+      echo "  INSTALL_FAILED  $dst"
+      FAILED=$((FAILED+1))
+      rm -f "$tmp" 2>/dev/null
+    fi
   fi
 done < "$MANIFEST"
 
@@ -75,15 +91,28 @@ if [ -f "$SENTINEL_SRC" ]; then
     if [ -f "$t" ] && cmp -s "$SENTINEL_SRC" "$t"; then :; else
       echo "  SENTINEL $e/.claude/settings.local.json"
       CHANGED=$((CHANGED+1))
-      if [ "$APPLY" = 1 ]; then mkdir -p "$repo/.claude"; cp "$SENTINEL_SRC" "$t"; chmod 644 "$t"; fi
+      if [ "$APPLY" = 1 ]; then
+        if ! mkdir -p "$repo/.claude" 2>/dev/null \
+        || ! cp "$SENTINEL_SRC" "$t" 2>/dev/null \
+        || ! chmod 644 "$t" 2>/dev/null; then
+          echo "  INSTALL_FAILED  $e/.claude/settings.local.json"
+          FAILED=$((FAILED+1))
+        fi
+      fi
     fi
-    # git-exclude it locally so the repo never goes dirty and it is never committed
+    # git-exclude machine-local tool state so the repo never goes dirty and it
+    # is never committed. .mcp.json is written by the editor's MCP integration
+    # at whatever depth it is opened, so the pattern is intentionally
+    # unanchored. These files are not ours and must not enter history, but a
+    # dirty tree blocks the build launcher's clean-source precondition.
     exc=$repo/.git/info/exclude
-    if ! grep -qx '\.claude/' "$exc" 2>/dev/null; then
-      echo "  GIT_EXCLUDE $e/.git/info/exclude += .claude/"
-      CHANGED=$((CHANGED+1))
-      if [ "$APPLY" = 1 ]; then mkdir -p "$(dirname "$exc")"; printf '.claude/\n' >> "$exc"; fi
-    fi
+    for pat in '.claude/' '.mcp.json'; do
+      if ! grep -qxF "$pat" "$exc" 2>/dev/null; then
+        echo "  GIT_EXCLUDE $e/.git/info/exclude += $pat"
+        CHANGED=$((CHANGED+1))
+        if [ "$APPLY" = 1 ]; then mkdir -p "$(dirname "$exc")"; printf '%s\n' "$pat" >> "$exc"; fi
+      fi
+    done
   done
 else
   echo "  (no sentinel template at $SENTINEL_SRC)"
@@ -92,7 +121,17 @@ fi
 echo
 echo "UNCHANGED=$SAME"
 echo "CHANGED=$CHANGED"
+echo "INSTALL_FAILURES=$FAILED"
 if [ "$APPLY" = 1 ]; then
+  if [ "$FAILED" -gt 0 ]; then
+    echo "SYNC=FAILED"
+    echo "$FAILED file(s) could not be installed. The root is NOT in sync, and the"
+    echo "identity gate will keep reporting drift until they are."
+    echo
+    echo "If the failure is 'Read-only file system' under .claude/, Claude's own Bash"
+    echo "sandbox denies that path. Re-run this exact command outside the sandbox."
+    exit 1
+  fi
   echo "SYNC=APPLIED"
   echo "Next: tools/verify-workspace-identity.sh"
 else
