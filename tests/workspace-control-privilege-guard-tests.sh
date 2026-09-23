@@ -30,6 +30,7 @@ ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd -P)
 HOOK=$ROOT/.claude/hooks/pre-tool-use-identity.sh
 CANON=$ROOT/NebulaOS-firmware/tools/workspace-control/claude/hooks/pre-tool-use-identity.sh
 
+CANONDIR=$ROOT/NebulaOS-firmware/tools/workspace-control/scripts
 SYNC=$ROOT/tools/sync-workspace-control.sh
 BUILDER=$ROOT/tools/run-nebulaos-build.sh
 HWRUN=$ROOT/tools/run-nebulaos-hardware.sh
@@ -101,17 +102,23 @@ echo "PRIVILEGE GUARD ADVERSARIAL TESTS"
 echo "HOOK=$HOOK"
 echo
 
-# --- the two sanctioned caller/file pairs ----------------------------------
-# The control-layer allowance is not a convenience: this build sandboxes
-# .claude/hooks read-only, so a SANDBOXED sync cannot install a hook change.
-# If the sync cases below ever flip to DENY, the control layer becomes
-# permanently unmaintainable and this suite is the thing that says so.
-echo "[ sanctioned pairs - must ALLOW ]"
+# --- the single sanctioned caller/file pair --------------------------------
+# The control-layer sync is deliberately NOT a privileged pair. An earlier
+# revision granted the main agent an unsandboxed sync to escape what looked
+# like a deadlock. That read-only .claude/hooks path is also what stops an
+# agent installing its own authority layer: the main agent may edit the
+# canonical hook, settings, agent definitions and authority documents, and
+# before that grant the edit was inert. Installing them is a human action.
+echo "[ sanctioned pair - must ALLOW ]"
 run_case build ALLOW nebulaos-build 1 "build agent, unsandboxed launcher, valid SHA" "$BUILDER $SHA"
-run_case ctl   ALLOW ""             1 "main agent, unsandboxed sync (dry run)"       "$SYNC"
-run_case ctl   ALLOW ""             1 "main agent, unsandboxed sync --apply"         "$SYNC --apply"
 run_case ctl   ALLOW ""             0 "main agent, sandboxed sync"                   "$SYNC"
+run_case ctl   ALLOW ""             0 "main agent, sandboxed sync --apply"           "$SYNC --apply"
 run_case ctl   ALLOW ""             0 "main agent, ordinary sandboxed command"       "echo hello"
+echo
+
+echo "[ the authority layer may not be self-installed - must DENY ]"
+run_case ctl DENY "" 1 "main agent, unsandboxed sync"         "$SYNC"
+run_case ctl DENY "" 1 "main agent, unsandboxed sync --apply" "$SYNC --apply"
 echo
 
 # --- the sandbox escape, refused to everyone else --------------------------
@@ -129,7 +136,6 @@ run_case build DENY nebulaos-build    1 "build agent, unsandboxed sync (not its 
 run_case build DENY nebula-architect  1 "architect, unsandboxed sync"                     "$SYNC --apply"
 run_case build DENY nebula-verifier   1 "verifier, unsandboxed arbitrary command"         "id"
 run_case hw    DENY nebulaos-hardware 1 "hardware agent, unsandboxed arbitrary command"   "id"
-run_case ctl   DENY ""                1 "main agent, unsandboxed sync with extra arg"     "$SYNC --apply --force"
 run_case build DENY ""                1 "main agent, unsandboxed non-Bash tool"           "$SYNC" Write
 echo
 
@@ -163,6 +169,55 @@ echo "[ engine mentioned, not invoked - must ALLOW ]"
 run_case ctl ALLOW "" 0 "main agent, grep for the engine name"   "grep -n '$ENG' NebulaOS-firmware/build.sh"
 run_case ctl ALLOW "" 0 "main agent, read a path containing it"  "cat /etc/$ENG/daemon.json"
 run_case ctl ALLOW "" 0 "main agent, engine name as an argument" "echo using $ENG for builds"
+echo
+
+# --- the binding is to CONTENT, not to the path ----------------------------
+# Comparing realpath(allowed) to realpath(typed) is satisfied by NAMING the
+# path - both sides derive from the same string, so it holds for whatever file
+# occupies it. tools/ is unversioned derived state this sandbox permits
+# writing, so a path-only check would let a caller replace the launcher and
+# have the hook run it with host privilege. Every other case in this file
+# varies command SHAPE; these vary file CONTENT, which is the axis the first
+# version of this suite could not fail on.
+echo "[ launcher content integrity - must DENY ]"
+# Kept beside the launcher: $TMPDIR is read-only under this sandbox, and a
+# SKIP here would silently drop the only cases that test file content - the
+# exact axis the first version of this suite could not fail on.
+BACKUP=$ROOT/tools/.launcher-content-test-backup.$$
+restore_launcher() {
+  if [ -s "$BACKUP" ]; then cp "$BACKUP" "$BUILDER" 2>/dev/null; chmod 755 "$BUILDER" 2>/dev/null; fi
+  rm -f "$BACKUP" 2>/dev/null
+}
+trap restore_launcher EXIT INT TERM
+
+if cp "$BUILDER" "$BACKUP" 2>/dev/null; then
+  printf '#!/usr/bin/env bash\necho substituted\n' > "$BUILDER"
+  chmod 755 "$BUILDER"
+  run_case build DENY nebulaos-build 1 "build agent, launcher content replaced" "$BUILDER $SHA"
+  restore_launcher
+  trap - EXIT INT TERM
+  if cmp -s "$BUILDER" "$CANONDIR/run-nebulaos-build.sh"; then
+    PASS=$((PASS+1)); printf '  PASS  %-5s  %s\n' "OK" "launcher restored after the content test"
+  else
+    FAIL=$((FAIL+1)); printf '  FAIL  launcher NOT restored - repair with tools/sync-workspace-control.sh --apply\n'
+  fi
+  run_case build ALLOW nebulaos-build 1 "build agent, launcher restored, valid SHA" "$BUILDER $SHA"
+else
+  echo "  SKIP  launcher content cases (could not back up the launcher)"
+fi
+echo
+
+# --- the hardware agent may not reach a device -----------------------------
+# Its constraints were prose only. Prose is not enforcement - that is this
+# layer's whole thesis - so they now have the same mechanical backing the
+# reviewers' read-only policy has.
+echo "[ hardware agent device contact - must DENY ]"
+run_case hw DENY nebulaos-hardware 0 "hardware agent, ssh"                "ssh nebula-printer uname -a"
+run_case hw DENY nebulaos-hardware 0 "hardware agent, ping"               "ping -c1 nebula-printer"
+run_case hw DENY nebulaos-hardware 0 "hardware agent, scp"                "scp fw.bin nebula-printer:/tmp/"
+run_case hw DENY nebulaos-hardware 0 "hardware agent, serial console"     "picocom /dev/ttyUSB0"
+run_case hw DENY nebulaos-hardware 0 "hardware agent, ssh after separator" "echo hi; ssh nebula-printer ls"
+run_case ctl ALLOW nebulaos-hardware 0 "hardware agent, ordinary read"     "cat CURRENT_STATE.md"
 echo
 
 # --- pre-existing guards must still hold -----------------------------------

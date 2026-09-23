@@ -73,48 +73,63 @@ NebulaOS-firmware/tools/workspace-control/historian/README.md."
 esac
 
 # --- privileged execution boundary -----------------------------------------
-# The ONLY way a command escapes Claude sandbox in this build is the Bash
-# tool dangerouslyDisableSandbox parameter. Measured on this host: an
-# unsandboxed shell regains the user full supplementary group set, gid 972
-# included, which is the container group. So "may reach the container engine"
-# and "may do anything as this user" are the same grant, and the escape has to
-# be bound to exact files rather than to a command name or a prefix.
+# The ONLY way a command escapes Claude sandbox in this build is the Bash tool
+# dangerouslyDisableSandbox parameter. Measured on this host: an unsandboxed
+# shell regains the user full supplementary group set, gid 972 included, which
+# is the container group. So "may reach the container engine" and "may do
+# anything as this user" are the same grant.
 #
 # Enforced here rather than in agent frontmatter because scoped Bash grants
 # are not enforced in this build - see the note under read-only reviewers.
 #
-# TWO files may run unsandboxed, each by exactly one caller:
-#   nebulaos-build   the build launcher
-#   main agent       the control-layer sync
+# EXACTLY ONE caller/file pair may run unsandboxed:
 #
-# The second is not a convenience. This build sandboxes .claude/hooks as a
-# read-only path, so the sanctioned installer CANNOT install a hook change
-# while sandboxed. Without this allowance the control layer becomes
-# permanently un-maintainable - the same deadlock the drift-recovery
-# exception below exists to prevent, one level up. Measured, not assumed:
-# the sandboxed sync fails with "Read-only file system".
+#   nebulaos-build   tools/run-nebulaos-build.sh <40-hex sha>
+#
+# The control-layer sync is deliberately NOT such a pair. An earlier revision
+# granted the main agent an unsandboxed sync, to resolve what looked like a
+# deadlock: this build sandboxes .claude/hooks read-only, so a sandboxed sync
+# cannot install a hook change, and an agent that edits the canonical hook then
+# cannot install it. That read-only path is not only an obstacle - it is the
+# property that stops an agent installing its own authority layer. The main
+# agent CAN edit canonical hooks, settings, agent definitions and the authority
+# documents, because those are ordinary tracked source; before that grant the
+# edit was inert, and after it one sanctioned command made it live. Installing
+# the authority layer requires a human running the sync out of band. That is
+# the control, not a defect, and the installer says so when it fails.
+#
+# BINDING IS BY CONTENT, NOT BY PATH. Comparing realpath(allowed) against
+# realpath(typed) is satisfied by NAMING the path: both sides derive from the
+# same string, so it is true for whatever file occupies it. The workspace root
+# is not a git repository and tools/ is unversioned derived state that this
+# sandbox permits writing, so a path-only check would let any caller overwrite
+# the launcher and have this hook run it with host privilege. Before allowing
+# the escape, the target bytes are compared against the tracked canonical blob
+# at firmware HEAD. An uncommitted or altered launcher is refused.
 #
 # Rules:
-#   1. the container engine invoked directly in COMMAND POSITION is refused
-#      for every caller including the main agent. Matching is by command
-#      position, not by substring, so ordinary diagnostics that merely
-#      mention the engine are unaffected. The build launcher reaches the
-#      engine through NebulaOS-firmware/build.sh, a subprocess this hook
-#      never sees - that is the containment, not an oversight.
-#   2. dangerouslyDisableSandbox is refused unless the request is one of the
-#      two caller/file pairs above: no chaining, no wrapper, no extra
+#   1. the container engine invoked directly in COMMAND POSITION is refused for
+#      every caller. This is an affordance against accident, NOT containment:
+#      indirect forms (xargs, find -exec, sh -c) are not matched, and cannot be
+#      in general. The real containment is that a sandboxed caller has no
+#      socket, and that the launcher reaches the engine through build.sh as a
+#      subprocess this hook structurally never observes.
+#   2. dangerouslyDisableSandbox is refused unless the request is the pair
+#      above, with verified content, no chaining, no wrapper and no extra
 #      arguments.
-#   3. each launcher is refused to every caller but its own agent, sandboxed
-#      or not.
-#   4. the hardware launcher is not enabled yet; rule 3 covers it already, so
-#      it cannot be reached before the hardware mission binds a target.
+#   3. each launcher is refused to every caller but its own agent, sandboxed or
+#      not.
+#   4. the hardware agent is refused device-contact commands outright, so its
+#      stated constraints have the same mechanical backing the reviewers have.
+#      Its launcher path is reserved and bound to it alone, and no such file
+#      exists.
 #
-# Fail-closed SCOPE: if the interpreter cannot run, the request is refused
-# only when it actually asked for privilege. A privilege guard that degrades
-# to allow is not a guard; one that degrades to "deny everything" takes the
-# repair path down with it.
+# Fail-closed SCOPE: if the interpreter cannot run, the request is refused when
+# it asked for privilege, OR named a launcher path, OR names an engine. Rules
+# that apply to sandboxed requests would otherwise vanish silently along with
+# the interpreter.
 PRIV_VERDICT=$(printf '%s' "$INPUT" | NEBULA_ROOT="$ROOT" python3 -c '
-import json,os,re,shlex,sys
+import json,os,re,shlex,subprocess,sys
 
 BUILD_AGENT="nebulaos-build"
 HW_AGENT="nebulaos-hardware"
@@ -124,7 +139,9 @@ def out(msg): print("DENY:"+msg); sys.exit(0)
 try: d=json.load(sys.stdin)
 except Exception: sys.exit(0)
 
-agent=(d.get("agent_type") or "").strip()
+agent=(d.get("agent_type") or "")
+if not isinstance(agent,str): agent=""
+agent=agent.strip()
 ti=d.get("tool_input") or {}
 tool=(d.get("tool_name") or "")
 
@@ -135,54 +152,64 @@ if tool!="Bash":
     if sandbox_off: out("Unsandboxed execution was requested on a non-Bash tool. Refused.")
     sys.exit(0)
 
-cmd=(ti.get("command") or "")
-if not cmd.strip():
-    if sandbox_off: out("Unsandboxed execution was requested with an empty command. Refused.")
+cmd=ti.get("command") or ""
+if not isinstance(cmd,str) or not cmd.strip():
+    if sandbox_off: out("Unsandboxed execution was requested with no command. Refused.")
     sys.exit(0)
 
 root=os.environ["NEBULA_ROOT"]
+FW=os.path.join(root,"NebulaOS-firmware")
+CANON="tools/workspace-control/scripts/"
 def rp(*q): return os.path.realpath(os.path.join(root,*q))
-CANON="NebulaOS-firmware/tools/workspace-control/scripts/"
-BUILD={rp("tools/run-nebulaos-build.sh"), rp(CANON+"run-nebulaos-build.sh")}
-HW={rp("tools/run-nebulaos-hardware.sh"), rp(CANON+"run-nebulaos-hardware.sh")}
-SYNC={rp("tools/sync-workspace-control.sh"), rp(CANON+"sync-workspace-control.sh")}
+BUILD={rp("tools/run-nebulaos-build.sh"), rp("NebulaOS-firmware/"+CANON+"run-nebulaos-build.sh")}
+HW={rp("tools/run-nebulaos-hardware.sh"), rp("NebulaOS-firmware/"+CANON+"run-nebulaos-hardware.sh")}
 
 try: toks=shlex.split(cmd)
 except Exception: toks=[]
 
-# --- 1. container engine in command position, any caller -------------------
 ENGINES=("dock"+"er","pod"+"man")
 PREFIX=("sudo","env","nohup","time","stdbuf","nice","exec","command","builtin")
+DEVICE=("ssh","scp","sftp","ping","ping6","telnet","nc","ncat","socat",
+        "picocom","minicom","cu","stty","avrdude","dfu-util","esptool.py","esptool")
 
-# Split on shell separators FIRST, then tokenize each segment, and test only
-# the COMMAND POSITION of each segment.
-#
-# Walking shlex tokens directly got this wrong: shlex keeps a separator glued
-# to the preceding word ("hi;"), so `echo hi; <engine> ps` put the engine at a
-# non-initial index and the freshness flag never reset. The adversarial suite
-# caught it; reading the code had not. Segments also cover substitution, since
-# the split includes the substitution delimiters.
 SEGSPLIT="[;|&\n\r()"+chr(96)+"]"
-for seg in re.split(SEGSPLIT,cmd):
-    if not seg.strip(): continue
-    try: st=shlex.split(seg)
-    except Exception: st=seg.split()
-    k=0
-    while k < len(st):
-        w=st[k]
-        if w.split("/")[-1] in PREFIX or w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=",w):
-            k+=1; continue
-        break
-    if k < len(st):
-        base=st[k].split("/")[-1]
-        if base in ENGINES:
-            out("Direct use of the "+base+" command through the Bash tool is refused for every\n"
-                "caller, including the main agent.\n\n"
-                "Container access is not granted as a command. It is granted only as the approved\n"
-                "build launcher, which reaches the engine through NebulaOS-firmware/build.sh as a\n"
-                "subprocess:\n\n"
-                "  tools/run-nebulaos-build.sh <expected-firmware-sha>   (nebulaos-build agent only)\n\n"
-                "Main agent: delegate the build to the nebulaos-build subagent.")
+def command_words(text):
+    words=[]
+    for seg in re.split(SEGSPLIT,text):
+        if not seg.strip(): continue
+        try: st=shlex.split(seg)
+        except Exception: st=seg.split()
+        k=0
+        while k < len(st):
+            w=st[k]
+            if w.split("/")[-1] in PREFIX or w.startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=",w):
+                k+=1; continue
+            break
+        if k < len(st): words.append(st[k].split("/")[-1])
+    return words
+
+CW=command_words(cmd)
+
+# --- 1. container engine in command position, any caller -------------------
+for base in CW:
+    if base in ENGINES:
+        out("Direct use of the "+base+" command through the Bash tool is refused for every\n"
+            "caller, including the main agent.\n\n"
+            "Container access is not granted as a command. It is granted only as the approved\n"
+            "build launcher, which reaches the engine through NebulaOS-firmware/build.sh as a\n"
+            "subprocess:\n\n"
+            "  tools/run-nebulaos-build.sh <expected-firmware-sha>   (nebulaos-build agent only)\n\n"
+            "Main agent: delegate the build to the nebulaos-build subagent.")
+
+# --- 4. the hardware agent may not touch a device --------------------------
+if agent==HW_AGENT:
+    for base in CW:
+        if base in DEVICE:
+            out("The "+HW_AGENT+" agent is refused the "+base+" command.\n\n"
+                "This agent is created but NOT enabled: it has no bound target, no credentials\n"
+                "and no launcher. Its no-device-contact constraint is mechanical, not advisory,\n"
+                "so it cannot reach a printer before a mission binds one.\n\n"
+                "If you were asked to qualify hardware, report HARDWARE_QUALIFIED=NOT_ATTEMPTED.")
 
 # one plain command: no chaining, redirection, substitution or expansion
 bad=set(";&|<>(){}$\n\r"); bad.add(chr(96))
@@ -200,14 +227,13 @@ if t2:
     if os.path.isabs(script): cand=script
     else:
         cwd=d.get("cwd")
-        cand=os.path.join(cwd,script) if cwd else None
+        cand=os.path.join(cwd,script) if isinstance(cwd,str) and cwd else None
     if cand:
         try: target=os.path.realpath(cand)
         except Exception: target=None
 
 is_build = bool(target) and target in BUILD
 is_hw    = bool(target) and target in HW
-is_sync  = bool(target) and target in SYNC
 
 # --- 3. launchers are bound to their own agent, sandboxed or not -----------
 if is_hw and agent!=HW_AGENT:
@@ -219,35 +245,62 @@ if is_build and agent!=BUILD_AGENT:
         "Caller: "+(agent or "main agent")+".\n\n"
         "Reviewers do not build, and the main agent delegates: use the nebulaos-build subagent.")
 
+def content_is_canonical(path):
+    # The executed bytes must equal the tracked canonical blob at firmware HEAD.
+    # Path identity is not enough: the installed copy is unversioned derived
+    # state in a directory this sandbox permits writing.
+    try:
+        with open(path,"rb") as fh: have=fh.read()
+    except Exception:
+        return (False,"the launcher could not be read")
+    try:
+        r=subprocess.run(["git","-C",FW,"cat-file","blob",
+                          "HEAD:"+CANON+os.path.basename(path)],
+                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=15)
+    except Exception:
+        return (False,"the canonical blob could not be read from git")
+    if r.returncode!=0:
+        return (False,"the launcher is not tracked at firmware HEAD")
+    if have!=r.stdout:
+        return (False,"the launcher on disk differs from the tracked canonical blob")
+    return (True,"")
+
 # --- 2. the sandbox escape -------------------------------------------------
 if sandbox_off:
-    if chained or wrapped:
-        out("Unsandboxed execution must be a lone invocation of an approved file - no chaining,\n"
-            "redirection, substitution, expansion, or shell wrapper. Refused.")
-    if agent==BUILD_AGENT and is_build:
-        if len(args)!=1 or len(args[0])!=40 or any(c not in "0123456789abcdef" for c in args[0]):
-            out("The approved build launcher takes exactly one argument: the full 40-character\n"
-                "firmware SHA to build. Refused - a qualification build states its source\n"
-                "identity up front.")
-    elif agent=="" and is_sync:
-        if args not in ([],["--apply"]):
-            out("The control-layer sync takes no arguments, or --apply. Refused.")
-    else:
+    if agent!=BUILD_AGENT or not is_build:
         out("Unsandboxed execution is refused for "+(agent or "the main agent")+" running this\n"
             "command.\n\n"
             "Leaving the sandbox restores this user full host privilege, so it is granted to\n"
-            "exactly two caller/file pairs:\n\n"
-            "  nebulaos-build   tools/run-nebulaos-build.sh <sha>\n"
-            "  main agent       tools/sync-workspace-control.sh [--apply]\n\n"
+            "exactly one caller running exactly one file:\n\n"
+            "  nebulaos-build   tools/run-nebulaos-build.sh <40-hex sha>\n\n"
+            "The control-layer sync is NOT in that set. Installing the authority layer\n"
+            "requires a human running it out of band - that is the control, not a defect.\n\n"
             "Resolved to: "+str(target))
+    if chained or wrapped:
+        out("Unsandboxed execution must be a lone invocation of the approved launcher - no\n"
+            "chaining, redirection, substitution, expansion, or shell wrapper. Refused.")
+    if len(args)!=1 or len(args[0])!=40 or any(c not in "0123456789abcdef" for c in args[0]):
+        out("The approved build launcher takes exactly one argument: the full 40-character\n"
+            "firmware SHA to build. Refused - a qualification build states its source\n"
+            "identity up front.")
+    ok,why=content_is_canonical(target)
+    if not ok:
+        out("Unsandboxed execution is bound to the launcher CONTENT, not to its path.\n\n"
+            "Refused: "+why+".\n\n"
+            "Naming an allowed path is not enough. tools/ is unversioned derived state that\n"
+            "this sandbox permits writing, so a path-only check would let any caller replace\n"
+            "the launcher and have this hook run it with host privilege. Commit the launcher\n"
+            "and re-sync, then retry.")
 ' 2>/dev/null); PRIV_RC=$?
 
-# Interpreter failure denies ONLY privilege requests - see fail-closed scope.
+# Interpreter failure denies any request that asked for privilege, named a
+# launcher, or names an engine - see fail-closed scope above.
 if [ "$PRIV_RC" -ne 0 ]; then
   case "$INPUT" in
-    *dangerouslyDisableSandbox*)
+    *dangerouslyDisableSandbox*|*run-nebulaos-*|*dock"er"*|*pod"man"*)
       deny "NebulaOS guardrail: the privilege guard could not evaluate this request, and the
-request asked for unsandboxed execution. Refusing." ;;
+request asked for unsandboxed execution, named a launcher, or named a container
+engine. Refusing." ;;
   esac
 fi
 
