@@ -45,6 +45,10 @@ completed cleanly on retry. Result:
   ~18.6MB from a broader `linux-firmware` set - traced, not a loss, still
   well under the 500MB rootfs2 budget - and the usual non-reproducible
   `xImage`/`rootfs.squashfs` hashes from embedded build timestamps).
+  (CORRECTION 2026-09-24, dated record kept as written: the non-reproducibility
+  is real, but "from embedded build timestamps" was a guess and is measured to
+  be insufficient - 1,454,891 bytes differ beyond the uImage header. Cause not
+  established. See `docs/REPRODUCIBILITY.md`.)
 - `scripts/build/package-deployment.sh`: package produced at
   `build-work/deploy-packages/z-compensate-guppyscreen-20260807T224746Z/`
   (local to the throwaway clone - not committed; canonical per

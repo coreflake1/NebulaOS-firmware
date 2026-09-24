@@ -1266,7 +1266,21 @@ check /usr/libexec/nebulaos-wifi-power-save
 check /etc/nebulaos-wifi-boot-wait.sh
 check /etc/init.d/S99confirm-good
 check /etc/ota_marker.sh
-check_absent /opt/printer_data/config/GuppyScreen/scripts/static_ip.py
+# RESTORED 2026-09-24 after architecture review. This was `check` until
+# 8889ef0e (2026-09-05) flipped it in place, in the same commit that wrongly
+# deleted the file - so the check_absent never guarded anything on its own, it
+# mirrored a deletion that was itself the bug. 40a9ff61 (2026-09-10) restored
+# the file and added the seeds-side assertion above, but missed flipping this
+# line back.
+#
+# The image copy is NOT stale pre-population: S01persistent-datastore runs
+# seed_once /opt/printer_data BEFORE its bind mount, so this file is the actual
+# first-boot materialization source, and stage 04 copies this same overlay tree
+# to build /opt/nebulaos-seeds. Asserting absence here and presence there is
+# unsatisfiable by construction. Restored as `check` rather than deleted,
+# because the seeds-side assertion alone would leave the more load-bearing copy
+# unasserted.
+check /opt/printer_data/config/GuppyScreen/scripts/static_ip.py
 
 echo "=== NebulaOS memory resilience (docs/NEBULAOS_MEMORY_RESILIENCE.md) ==="
 check /sbin/mkswap

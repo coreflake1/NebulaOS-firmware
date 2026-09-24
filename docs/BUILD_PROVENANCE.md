@@ -52,9 +52,20 @@ came from:
    **at that commit** (`git show <git_commit_main>:manifests/dependencies.conf`), not the current
    tip of the branch.
 4. Re-running `./build.sh` at that exact commit, with that exact image digest, should get you
-   something functionally identical — not byte-for-byte, since Buildroot's own version string,
-   BusyBox's build timestamp, and the fact that the toolchain gets rebuilt from source each time all
-   introduce some expected variation.
+   something functionally identical. It will **not** be byte-for-byte: `xImage` and
+   `rootfs.squashfs` are measurably not reproducible.
+
+   Corrected 2026-09-24: this step used to explain that away with "Buildroot's own version
+   string, BusyBox's build timestamp, and the fact that the toolchain gets rebuilt from source
+   each time". Those are plausible, and they were never measured. The project has since
+   retracted the same shape of claim elsewhere for being a guess presented as an explanation
+   and then used to justify not checking. What IS measured: the uImage header embeds
+   wall-clock build time, and beyond that 64-byte header 1,454,891 bytes of ~5.5 MB still
+   differ, so a header-only cause is insufficient. The root cause is **not established**.
+   See `docs/REPRODUCIBILITY.md`, which is the canonical record.
+
+   Note this does not apply to `guppyscreen`, which now reproduces byte-for-byte for a fixed
+   `GUPPYSCREEN_PIN` and container digest.
 
 ## Related docs
 

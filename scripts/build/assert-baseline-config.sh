@@ -57,7 +57,7 @@ DEPS_MANIFEST="$REPO_ROOT/manifests/dependencies.conf"
 . "$DEPS_MANIFEST"
 
 FAILED=0
-# RC, and the `&& RC=0 || RC=$?` suffix on every predicate below, exist because
+# RC, and the `&& RC=0 || RC=$?` suffix on each assertion predicate below, exist because
 # this script runs under `set -eu`. The previous idiom was a bare predicate
 # followed by `check "..." $?`. Under errexit a FAILING predicate terminates the
 # script AT THE PREDICATE, so the check never ran, no FAIL: line was ever
@@ -113,7 +113,12 @@ pre-build)
 	grep -q "nebulaos_backlight_final:" "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null && RC=0 || RC=$?
 	check "nebulaos_backlight_final DT node present" "$RC"
 
-	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null)
+	# Command substitution needs the same errexit treatment as the predicates:
+	# a non-zero sed here would abort the script at the ASSIGNMENT, skipping
+	# every remaining assertion with no diagnostic. Demonstrated with the DTS
+	# absent: 10 of 17 assertions silently skipped, exit 2. pre-build has no
+	# prior existence check on the DTS, so this path is genuinely reachable.
+	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null) || msc1_block=""
 	echo "$msc1_block" | grep -q 'cap-sd-highspeed;' && RC=0 || RC=$?
 	check "W3 cap-sd-highspeed present in &msc1" "$RC"
 	echo "$msc1_block" | grep -q 'cap-sdio-irq;' && RC=0 || RC=$?
@@ -227,7 +232,10 @@ post-build|candidate-post-build)
 	grep -q "nebulaos_backlight_final:" "$DTS" && RC=0 || RC=$?
 	check "nebulaos_backlight_final DT node present in resolved DTS" "$RC"
 
-	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$DTS")
+	# Same errexit treatment as line ~116. Lower risk here because the FATAL
+	# existence check above already guarantees $DTS is readable, but an
+	# assignment that can abort the run is not worth leaving asymmetric.
+	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$DTS") || msc1_block=""
 	echo "$msc1_block" | grep -q 'cap-sd-highspeed;' && RC=0 || RC=$?
 	check "W3 cap-sd-highspeed present in resolved &msc1" "$RC"
 	echo "$msc1_block" | grep -q 'cap-sdio-irq;' && RC=0 || RC=$?
