@@ -83,6 +83,35 @@ unchanged - confirmed unmodified by this mission), not by binary hash
 matching, which is not a meaningful comparison for either artifact given
 this nondeterminism.
 
+> **CORRECTION (2026-09-24, final release closure mission).** The paragraph
+> above is a dated record and is kept as written, but two of its claims have
+> since been measured and one of them is wrong. It must not be relied on.
+>
+> - **The guppyscreen half is now false.** `guppyscreen` IS byte-reproducible.
+>   The cause of the variation observed above was specific, not "build-
+>   environment-dependent nondeterminism": libhv expands the compiler
+>   `__DATE__`/`__TIME__` macros (`libhv/base/htime.c` `hv_compile_datetime`),
+>   and libhv links into `guppyscreen` but not into `guppybeep`. Stage 04 now
+>   pins `SOURCE_DATE_EPOCH` to the GuppyScreen commit date and verifies the
+>   expected date is embedded. Two independent builds, of two different
+>   firmware commits, in two freshly cloned workspaces, produced an identical
+>   `guppyscreen` (`1b34e7b7…`) and an identical `guppybeep` (`fe2a7d3b…`).
+>
+> - **The `xImage` half is still true, and has been measured.** `xImage`
+>   remains non-reproducible from identical inputs: the uImage header embeds
+>   wall-clock build time (bytes 8-11), and beyond the 64-byte header
+>   1,454,891 of ~5.5 MB still differ, so the compressed payload is itself
+>   non-deterministic. That is a real open defect with its own scope, recorded
+>   in `evidence/guppyscreen-reproducibility/`.
+>
+> - **The reasoning pattern is the thing to avoid**, not just the fact. The
+>   original text attributed an observation to a guessed cause ("most likely an
+>   embedded build timestamp"), promoted that guess to "expected", and then
+>   used it to justify not checking binary hashes at all. Verifying
+>   `GUPPYSCREEN_CHANGED` by source pin identity remains reasonable; declaring
+>   hash comparison "not a meaningful comparison" on the strength of an
+>   unverified cause was not.
+
 ## What changed to reach this candidate
 
 - **Overnight closure mission (Missions A–L)**: checkpoint execution

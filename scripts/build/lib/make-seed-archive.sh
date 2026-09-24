@@ -193,7 +193,16 @@ make_seed_archive() {
 	# reachable from current refs to physically remove the orphan.
 	head_sha=$(git -C "$tmp" rev-parse HEAD)
 	if [ -f "$tmp/.git/shallow" ]; then
-		stale_count=$(grep -cv "^$head_sha$" "$tmp/.git/shallow" 2>/dev/null || echo 0)
+		# `|| echo 0` APPENDS, it does not substitute. grep -c prints its
+		# count (0) AND exits 1 when nothing matches, so the substitution
+		# captured both and stale_count became the two-line string "0\n0",
+		# which `[ -gt ]` rejects with "Illegal number: 0" - visible in every
+		# build log. It was harmless only by accident: the malformed value
+		# arises exactly when the count is zero, and a failing `[` makes the
+		# branch false, which is the correct action for a zero count. Relying
+		# on an error path to land on the right branch is not a check.
+		stale_count=$(grep -cv "^$head_sha$" "$tmp/.git/shallow" 2>/dev/null || true)
+		case "$stale_count" in ''|*[!0-9]*) stale_count=0 ;; esac
 		if [ "$stale_count" -gt 0 ]; then
 			echo "$head_sha" > "$tmp/.git/shallow"
 			rm -rf "$tmp/.git/logs"

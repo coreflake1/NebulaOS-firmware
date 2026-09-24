@@ -221,7 +221,11 @@ check_artifact_sha256 vendor/mainsail-dist/mainsail.zip \
 # CORRECTED 2026-09-24. This comment used to justify the approach by asserting
 # that the bytes are "NOT deterministic across builds (the toolchain embeds a
 # build timestamp), even from byte-identical source". That was wrong in two
-# ways and it is the fourth place the same wrong claim was written down:
+# ways. It was also not the only place it had been written down - successive
+# passes each believed they had found the last copy and each was wrong, so no
+# count is asserted here. The canonical retraction lives in
+# evidence/guppyscreen-reproducibility/; if you find another copy, correct it
+# and point it there rather than re-counting.
 #   - The cause was specific, not "the toolchain": libhv expands __DATE__ and
 #     __TIME__ (libhv/base/htime.c hv_compile_datetime). Stage 04 now pins
 #     SOURCE_DATE_EPOCH to the GuppyScreen commit date and verifies the
