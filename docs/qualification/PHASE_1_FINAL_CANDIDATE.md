@@ -87,7 +87,14 @@ this nondeterminism.
 > above is a dated record and is kept as written, but two of its claims have
 > since been measured and one of them is wrong. It must not be relied on.
 >
-> - **The guppyscreen half is now false.** `guppyscreen` IS byte-reproducible.
+> - **The guppyscreen half is now false as stated.** `guppyscreen` reproduced
+>   byte-for-byte across three separate builds, from three different firmware
+>   commits, in three freshly cloned workspaces, under one fixed
+>   `GUPPYSCREEN_PIN` and one fixed build-container digest. That refutes
+>   "differs from build to build despite identical pinned source". It is not
+>   the same as establishing full byte-reproducibility under varying hosts,
+>   toolchain images or pins, which has NOT been demonstrated - see
+>   `scripts/build/05-final-build.sh`, which deliberately says so.
 >   The cause of the variation observed above was specific, not "build-
 >   environment-dependent nondeterminism": libhv expands the compiler
 >   `__DATE__`/`__TIME__` macros (`libhv/base/htime.c` `hv_compile_datetime`),

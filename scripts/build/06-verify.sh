@@ -223,9 +223,9 @@ check_artifact_sha256 vendor/mainsail-dist/mainsail.zip \
 # build timestamp), even from byte-identical source". That was wrong in two
 # ways. It was also not the only place it had been written down - successive
 # passes each believed they had found the last copy and each was wrong, so no
-# count is asserted here. The canonical retraction lives in
-# evidence/guppyscreen-reproducibility/; if you find another copy, correct it
-# and point it there rather than re-counting.
+# count is asserted here. The canonical retraction is docs/REPRODUCIBILITY.md,
+# in this repository, so it is reachable from a plain clone; if you find another
+# copy, correct it and point it there rather than re-counting.
 #   - The cause was specific, not "the toolchain": libhv expands __DATE__ and
 #     __TIME__ (libhv/base/htime.c hv_compile_datetime). Stage 04 now pins
 #     SOURCE_DATE_EPOCH to the GuppyScreen commit date and verifies the

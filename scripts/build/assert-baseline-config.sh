@@ -57,6 +57,23 @@ DEPS_MANIFEST="$REPO_ROOT/manifests/dependencies.conf"
 . "$DEPS_MANIFEST"
 
 FAILED=0
+# RC, and the `&& RC=0 || RC=$?` suffix on every predicate below, exist because
+# this script runs under `set -eu`. The previous idiom was a bare predicate
+# followed by `check "..." $?`. Under errexit a FAILING predicate terminates the
+# script AT THE PREDICATE, so the check never ran, no FAIL: line was ever
+# printed, and every assertion after it was skipped. Observed directly: twelve
+# PASS lines, zero FAIL lines, exit 1, with five assertions silently never
+# evaluated - in a gate whose own header promises it "fails loudly and
+# immediately". A release gate that exits non-zero with no diagnostic is one
+# nobody can read under pressure.
+#
+# `&& RC=0 || RC=$?` is errexit-safe because the status is consumed by `||`,
+# and it binds to a whole pipeline, which the `echo ... | grep -q` assertions
+# need. Do NOT "simplify" it to `|| true`: that would make RC always 0 and turn
+# every assertion into an unconditional PASS, which is far worse than the bug
+# it replaced.
+RC=0
+
 check() {
 	desc="$1"
 	if [ "$2" = "0" ]; then
@@ -75,45 +92,45 @@ pre-build)
 	# tree - if a patch failed to apply, the symbol simply won't be defined
 	# anywhere, and later feeding it into a fragment would just be silently
 	# dropped by `make olddefconfig` (exactly the 2026-08-06 regression).
-	grep -rlq "NEBULAOS_BACKLIGHT_FINAL_CONTROLLER" "$KERNEL_DIR" 2>/dev/null
-	check "backlight-final-controller Kconfig symbol defined in kernel tree" $?
+	grep -rlq "NEBULAOS_BACKLIGHT_FINAL_CONTROLLER" "$KERNEL_DIR" 2>/dev/null && RC=0 || RC=$?
+	check "backlight-final-controller Kconfig symbol defined in kernel tree" "$RC"
 
-	grep -rlq "TOUCHSCREEN_NS2009_FINAL_QUALIFICATION" "$KERNEL_DIR" 2>/dev/null
-	check "touch-final-qualification Kconfig symbol defined in kernel tree" $?
+	grep -rlq "TOUCHSCREEN_NS2009_FINAL_QUALIFICATION" "$KERNEL_DIR" 2>/dev/null && RC=0 || RC=$?
+	check "touch-final-qualification Kconfig symbol defined in kernel tree" "$RC"
 
-	grep -rlq "PWM_INGENIC_V2_GET_STATE" "$KERNEL_DIR" 2>/dev/null
-	check "pwm-state-readback Kconfig symbol defined in kernel tree" $?
+	grep -rlq "PWM_INGENIC_V2_GET_STATE" "$KERNEL_DIR" 2>/dev/null && RC=0 || RC=$?
+	check "pwm-state-readback Kconfig symbol defined in kernel tree" "$RC"
 
-	grep -rlq "FB_INGENIC_PAN_VSYNC_GATE" "$KERNEL_DIR" 2>/dev/null
-	check "display-vsync (DISPLAY-V1) Kconfig symbol defined in kernel tree" $?
+	grep -rlq "FB_INGENIC_PAN_VSYNC_GATE" "$KERNEL_DIR" 2>/dev/null && RC=0 || RC=$?
+	check "display-vsync (DISPLAY-V1) Kconfig symbol defined in kernel tree" "$RC"
 
-	[ -f "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/drivers/misc/nebulaos_backlight_final_controller.c" ]
-	check "nebulaos_backlight_final_controller.c driver file present" $?
+	[ -f "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/drivers/misc/nebulaos_backlight_final_controller.c" ] && RC=0 || RC=$?
+	check "nebulaos_backlight_final_controller.c driver file present" "$RC"
 
-	[ -f "$KERNEL_DIR/kernel/kernel-6.6/drivers/input/touchscreen/ns2009_final_qualification.c" ]
-	check "ns2009_final_qualification.c driver file present" $?
+	[ -f "$KERNEL_DIR/kernel/kernel-6.6/drivers/input/touchscreen/ns2009_final_qualification.c" ] && RC=0 || RC=$?
+	check "ns2009_final_qualification.c driver file present" "$RC"
 
-	grep -q "nebulaos_backlight_final:" "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null
-	check "nebulaos_backlight_final DT node present" $?
+	grep -q "nebulaos_backlight_final:" "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null && RC=0 || RC=$?
+	check "nebulaos_backlight_final DT node present" "$RC"
 
 	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null)
-	echo "$msc1_block" | grep -q 'cap-sd-highspeed;'
-	check "W3 cap-sd-highspeed present in &msc1" $?
-	echo "$msc1_block" | grep -q 'cap-sdio-irq;'
-	check "W3 cap-sdio-irq present in &msc1" $?
+	echo "$msc1_block" | grep -q 'cap-sd-highspeed;' && RC=0 || RC=$?
+	check "W3 cap-sd-highspeed present in &msc1" "$RC"
+	echo "$msc1_block" | grep -q 'cap-sdio-irq;' && RC=0 || RC=$?
+	check "W3 cap-sdio-irq present in &msc1" "$RC"
 
 	# The tracked Kconfig fragment should now (post apply-qualified-baseline.sh,
 	# pre 02) carry every accepted variant's marker block.
 	FRAGMENT="$ARTIFACT_DIR/halley5-nebulaos-fragment.config"
-	grep -q "CONFIG_PREEMPT_RT=y" "$FRAGMENT" 2>/dev/null
-	check "CONFIG_PREEMPT_RT=y present in tracked fragment" $?
+	grep -q "CONFIG_PREEMPT_RT=y" "$FRAGMENT" 2>/dev/null && RC=0 || RC=$?
+	check "CONFIG_PREEMPT_RT=y present in tracked fragment" "$RC"
 
 	# 2026-08-07: wifi-roamoff-disable-variant.sh ROAMOFF1 - not a Kconfig
 	# symbol (see that script's own header), so the only real source-level
 	# proof is the patched module_param default itself.
 	grep -qF "static int brcmf_roamoff = 1;" \
-		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null
-	check "wifi-roamoff-disable (ROAMOFF1) patch applied to brcmfmac common.c" $?
+		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null && RC=0 || RC=$?
+	check "wifi-roamoff-disable (ROAMOFF1) patch applied to brcmfmac common.c" "$RC"
 
 	# 9th accepted variant (Phase 1.9A/1.9B, accelerometer-eeprom-bus-
 	# enable-variant.sh) - this script never checked for it at all before
@@ -148,20 +165,20 @@ pre-build)
 		echo "  FAIL: no FIX1 accelerometer-eeprom-bus-enable applied-marker at $VARIANT_MARKER - the 9th variant did not run as FIX1 in this build tree"
 		FAILED=1
 	fi
-	grep -q "CONFIG_SPI_GPIO=y" "$FRAGMENT" 2>/dev/null
-	check "CONFIG_SPI_GPIO=y present in tracked fragment (accelerometer-eeprom-bus-enable)" $?
-	grep -q "CONFIG_EEPROM_AT24=y" "$FRAGMENT" 2>/dev/null
-	check "CONFIG_EEPROM_AT24=y present in tracked fragment (accelerometer-eeprom-bus-enable)" $?
+	grep -q "CONFIG_SPI_GPIO=y" "$FRAGMENT" 2>/dev/null && RC=0 || RC=$?
+	check "CONFIG_SPI_GPIO=y present in tracked fragment (accelerometer-eeprom-bus-enable)" "$RC"
+	grep -q "CONFIG_EEPROM_AT24=y" "$FRAGMENT" 2>/dev/null && RC=0 || RC=$?
+	check "CONFIG_EEPROM_AT24=y present in tracked fragment (accelerometer-eeprom-bus-enable)" "$RC"
 	if grep -q "^CONFIG_I2C_CHARDEV=y$" "$FRAGMENT" 2>/dev/null; then
 		echo "  FAIL: CONFIG_I2C_CHARDEV=y present in tracked fragment - Phase 1.9B retired this (no consumer remains, see machine.cfg)"
 		FAILED=1
 	else
 		echo "  PASS: CONFIG_I2C_CHARDEV not set in tracked fragment (retired, Phase 1.9B)"
 	fi
-	grep -q 'eeprom@50 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null
-	check "eeprom@50 (at24) DT node present" $?
-	grep -q 'spi_gpio_adxl345 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null
-	check "spi_gpio_adxl345 DT node present" $?
+	grep -q 'eeprom@50 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null && RC=0 || RC=$?
+	check "eeprom@50 (at24) DT node present" "$RC"
+	grep -q 'spi_gpio_adxl345 {' "$KERNEL_DIR/kernel/kernel-6.6/module_drivers/dts/x2000/halley5_v30.dts" 2>/dev/null && RC=0 || RC=$?
+	check "spi_gpio_adxl345 DT node present" "$RC"
 	;;
 
 post-build|candidate-post-build)
@@ -176,20 +193,20 @@ post-build|candidate-post-build)
 	[ -f "$KCONFIG" ] || { echo "FATAL: $KCONFIG not found - run 05-final-build.sh first" >&2; exit 1; }
 	[ -f "$DTS" ] || { echo "FATAL: $DTS not found - run 05-final-build.sh first" >&2; exit 1; }
 
-	grep -q "^CONFIG_PREEMPT_RT=y$" "$KCONFIG"
-	check "CONFIG_PREEMPT_RT=y" $?
+	grep -q "^CONFIG_PREEMPT_RT=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_PREEMPT_RT=y" "$RC"
 
-	grep -q "^CONFIG_HZ=100$" "$KCONFIG"
-	check "CONFIG_HZ=100" $?
+	grep -q "^CONFIG_HZ=100$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_HZ=100" "$RC"
 
-	grep -q "^CONFIG_NEBULAOS_BACKLIGHT_FINAL_CONTROLLER=y$" "$KCONFIG"
-	check "CONFIG_NEBULAOS_BACKLIGHT_FINAL_CONTROLLER=y (qualified backlight/PWM controller)" $?
+	grep -q "^CONFIG_NEBULAOS_BACKLIGHT_FINAL_CONTROLLER=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_NEBULAOS_BACKLIGHT_FINAL_CONTROLLER=y (qualified backlight/PWM controller)" "$RC"
 
-	grep -q "^CONFIG_TOUCHSCREEN_NS2009_FINAL_QUALIFICATION=y$" "$KCONFIG"
-	check "CONFIG_TOUCHSCREEN_NS2009_FINAL_QUALIFICATION=y" $?
+	grep -q "^CONFIG_TOUCHSCREEN_NS2009_FINAL_QUALIFICATION=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_TOUCHSCREEN_NS2009_FINAL_QUALIFICATION=y" "$RC"
 
-	grep -q "^CONFIG_TOUCHSCREEN_NS2009=y$" "$KCONFIG"
-	check "CONFIG_TOUCHSCREEN_NS2009=y (base driver present - polling touch retained)" $?
+	grep -q "^CONFIG_TOUCHSCREEN_NS2009=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_TOUCHSCREEN_NS2009=y (base driver present - polling touch retained)" "$RC"
 
 	# Touch must remain polling-based: the OLDER, rejected IRQ-based
 	# touch-irq-variant.sh/touch-qualification-variant.sh symbols must NOT
@@ -201,20 +218,20 @@ post-build|candidate-post-build)
 		echo "  PASS: CONFIG_TOUCHSCREEN_NS2009_QUALIFICATION absent (touch remains polling-based)"
 	fi
 
-	grep -q "^CONFIG_PWM_INGENIC_V2_GET_STATE=y$" "$KCONFIG"
-	check "CONFIG_PWM_INGENIC_V2_GET_STATE=y (PWM brightness readback)" $?
+	grep -q "^CONFIG_PWM_INGENIC_V2_GET_STATE=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_PWM_INGENIC_V2_GET_STATE=y (PWM brightness readback)" "$RC"
 
-	grep -q "^CONFIG_FB_INGENIC_PAN_VSYNC_GATE=y$" "$KCONFIG"
-	check "CONFIG_FB_INGENIC_PAN_VSYNC_GATE=y (DISPLAY-V1)" $?
+	grep -q "^CONFIG_FB_INGENIC_PAN_VSYNC_GATE=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_FB_INGENIC_PAN_VSYNC_GATE=y (DISPLAY-V1)" "$RC"
 
-	grep -q "nebulaos_backlight_final:" "$DTS"
-	check "nebulaos_backlight_final DT node present in resolved DTS" $?
+	grep -q "nebulaos_backlight_final:" "$DTS" && RC=0 || RC=$?
+	check "nebulaos_backlight_final DT node present in resolved DTS" "$RC"
 
 	msc1_block=$(sed -n '/^&msc1 {/,/^};/p' "$DTS")
-	echo "$msc1_block" | grep -q 'cap-sd-highspeed;'
-	check "W3 cap-sd-highspeed present in resolved &msc1" $?
-	echo "$msc1_block" | grep -q 'cap-sdio-irq;'
-	check "W3 cap-sdio-irq present in resolved &msc1" $?
+	echo "$msc1_block" | grep -q 'cap-sd-highspeed;' && RC=0 || RC=$?
+	check "W3 cap-sd-highspeed present in resolved &msc1" "$RC"
+	echo "$msc1_block" | grep -q 'cap-sdio-irq;' && RC=0 || RC=$?
+	check "W3 cap-sdio-irq present in resolved &msc1" "$RC"
 
 	# 2026-08-07: wifi-roamoff-disable (ROAMOFF1) - not a Kconfig symbol,
 	# so kernel.config can't prove it. vendor/x2000_kernel_6.6 is not
@@ -222,25 +239,25 @@ post-build|candidate-post-build)
 	# still applies and is the only real proof available short of
 	# extracting strings from the compiled kernel image.
 	grep -qF "static int brcmf_roamoff = 1;" \
-		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null
-	check "wifi-roamoff-disable (ROAMOFF1) patch present in source tree used for this build" $?
+		"$KERNEL_DIR/kernel/kernel-6.6/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c" 2>/dev/null && RC=0 || RC=$?
+	check "wifi-roamoff-disable (ROAMOFF1) patch present in source tree used for this build" "$RC"
 
 	# 9th accepted variant (Phase 1.9A/1.9B) - resolved-artifact equivalents
 	# of the pre-build checks above.
-	grep -q "^CONFIG_SPI_GPIO=y$" "$KCONFIG"
-	check "CONFIG_SPI_GPIO=y (resolved kernel.config)" $?
-	grep -q "^CONFIG_EEPROM_AT24=y$" "$KCONFIG"
-	check "CONFIG_EEPROM_AT24=y (resolved kernel.config)" $?
+	grep -q "^CONFIG_SPI_GPIO=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_SPI_GPIO=y (resolved kernel.config)" "$RC"
+	grep -q "^CONFIG_EEPROM_AT24=y$" "$KCONFIG" && RC=0 || RC=$?
+	check "CONFIG_EEPROM_AT24=y (resolved kernel.config)" "$RC"
 	if grep -q "^CONFIG_I2C_CHARDEV=y$" "$KCONFIG" 2>/dev/null; then
 		echo "  FAIL: CONFIG_I2C_CHARDEV=y present in resolved kernel.config - Phase 1.9B retired this"
 		FAILED=1
 	else
 		echo "  PASS: CONFIG_I2C_CHARDEV not set in resolved kernel.config (retired, Phase 1.9B)"
 	fi
-	grep -q 'eeprom@50 {' "$DTS"
-	check "eeprom@50 (at24) DT node present in resolved DTS" $?
-	grep -q 'spi_gpio_adxl345 {' "$DTS"
-	check "spi_gpio_adxl345 DT node present in resolved DTS" $?
+	grep -q 'eeprom@50 {' "$DTS" && RC=0 || RC=$?
+	check "eeprom@50 (at24) DT node present in resolved DTS" "$RC"
+	grep -q 'spi_gpio_adxl345 {' "$DTS" && RC=0 || RC=$?
+	check "spi_gpio_adxl345 DT node present in resolved DTS" "$RC"
 
 	if [ "$MODE" = "candidate-post-build" ]; then
 		# BUILD_VERIFIED stops here - every accepted variant (1-9) is proven
