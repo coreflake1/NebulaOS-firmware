@@ -147,10 +147,35 @@ fi
 # POSIX sh has no arrays, so the optional extra mount is built as
 # positional parameters instead of a conditionally-included string (unsafe
 # with paths containing spaces).
+# REPRODUCIBILITY. One deterministic SOURCE_DATE_EPOCH for the whole build,
+# derived from the committer date of the firmware commit being built. Every
+# consumer that honours it - Buildroot under BR2_REPRODUCIBLE, mkimage, gzip,
+# mksquashfs, Python bytecode - then stops reading the wall clock.
+#
+# Derived, never hardcoded: it follows the commit. A build from a dirty or
+# non-git tree has no defensible epoch, so it fails rather than silently
+# falling back to `date +%s` and producing an unreproducible image.
+#
+# NOTE this is the IMAGE epoch. scripts/build/04 separately derives a
+# GuppyScreen epoch from GUPPYSCREEN_PIN, scoped to that subshell, because that
+# binary should track its pin rather than the firmware commit. Two epochs, two
+# deliberate scopes.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+	SOURCE_DATE_EPOCH=$(git -C "$SCRIPT_DIR" show -s --format=%ct HEAD 2>/dev/null || echo "")
+fi
+case "${SOURCE_DATE_EPOCH:-}" in
+	''|*[!0-9]*)
+		echo "FATAL: cannot derive SOURCE_DATE_EPOCH from the firmware commit - refusing to produce an image whose bytes depend on the wall clock" >&2
+		exit 1 ;;
+esac
+export SOURCE_DATE_EPOCH
+echo "== build.sh: SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH ($(date -u -d "@$SOURCE_DATE_EPOCH" '+%Y-%m-%dT%H:%M:%SZ')) =="
+
 set -- "$ENGINE" run --rm \
 	--user "$(id -u):$(id -g)" \
 	-e HOME=/tmp \
 	-e NEBULAOS_REPO_ROOT="$NEBULAOS_REPO_ROOT" \
+	-e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
 	-v "$SCRIPT_DIR:$NEBULAOS_REPO_ROOT"
 # Phase 1.5 closure mission (2026-08-19): forwarded from the host
 # environment so `NEBULAOS_REQUIRE_CLEAN_TREE=1 ./build.sh` actually reaches

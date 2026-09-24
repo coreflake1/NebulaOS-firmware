@@ -161,7 +161,16 @@ chelper_enforce_mtime() {
 chelper_write_verdict() {
 	kdir="$1"
 	out="$kdir/$NEBULAOS_CHELPER_VERDICT_NAME"
-	now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	# This script runs BOTH at build time (writing into the image) and at boot on
+	# the device. When SOURCE_DATE_EPOCH is set, this is the build; use it, so the
+	# verdict file does not carry a fresh wall-clock stamp into every image. When
+	# it is unset, this is a real boot and the wall clock is the right answer -
+	# which is what the checked_at_caveat below is about.
+	if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+		now=$(date -u -d "@$SOURCE_DATE_EPOCH" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+	else
+		now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+	fi
 
 	chelper_check_mtime "$kdir"
 	rc=$?

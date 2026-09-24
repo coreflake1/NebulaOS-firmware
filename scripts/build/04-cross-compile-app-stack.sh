@@ -972,7 +972,11 @@ moonraker_seed_commit=$(make_seed_archive "$VENDOR/moonraker" master \
 	"$HOST_PYTHON3" "/opt/moonraker")
 moonraker_is_shallow=$(git -C "$VENDOR/moonraker" rev-parse --is-shallow-repository)
 mainsail_version=$(cat "$VENDOR/mainsail-dist/dist/.version" 2>/dev/null || echo "unknown")
-build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Derived from SOURCE_DATE_EPOCH so the same source yields the same image.
+# This is release IDENTITY and stays meaningful - it is the commit date, not a
+# fabricated constant - but it must not be the wall clock, which put a fresh
+# timestamp into four shipped JSON files on every build.
+build_date=$(date -u -d "@${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set by build.sh}" +%Y-%m-%dT%H:%M:%SZ)
 
 # --- Build-integrity assertions (Phase 1.8 candidate-002) ---
 # Candidate-001 shipped the wrong extensions because make_seed_archive switched

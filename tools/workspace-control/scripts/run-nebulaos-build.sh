@@ -130,15 +130,18 @@ ORIGIN=$(git -C "$FW" remote get-url origin 2>/dev/null) || die "cannot read the
 # is worse than one in a fixed, boring location.
 BUILD_BASE=/var/tmp/nebulaos-build
 case "$BUILD_BASE" in "$ROOT"*) die "build workspace would fall inside the canonical workspace root" ;; esac
-WORK="$BUILD_BASE/$EXPECT"
-mkdir -p "$BUILD_BASE" || die "cannot create the build workspace base at $BUILD_BASE"
-
-# A previous attempt at the same SHA is replaced, never reused: reusing build
-# state is exactly what build.sh's own header warns produces a result that is
-# not a clean-room result.
-if [ -e "$WORK" ]; then
-  rm -rf "$WORK" || die "cannot clear the previous build workspace at $WORK"
-fi
+# One workspace per RUN, not per SHA. Proving reproducibility requires two
+# independent builds of the SAME commit to exist at the same time, and the
+# previous per-SHA layout made the second build delete the first. The run id
+# also gives the two builds different absolute path LENGTHS, which is what
+# exposes build-path leakage if any survives.
+#
+# Nothing is ever reused: each run gets a fresh clone, which is what build.sh's
+# own header requires for a clean-room result.
+RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
+WORK="$BUILD_BASE/$EXPECT/run-$RUN_ID"
+mkdir -p "$BUILD_BASE/$EXPECT" || die "cannot create the build workspace base at $BUILD_BASE/$EXPECT"
+[ -e "$WORK" ] && die "build workspace $WORK already exists"
 
 printf 'RUN_NEBULAOS_BUILD=CLONING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_WORKSPACE=%s\nORIGIN=%s\n' \
   "$EXPECT" "$MODE" "$WORK" "$ORIGIN"
@@ -202,7 +205,7 @@ if [ -d "$BUILD_BASE" ]; then
     [ "$old" = "$WORK" ] && continue
     case "$old" in "$BUILD_BASE"/*) ;; *) continue ;; esac
     rm -rf -- "$old" 2>/dev/null && PRUNED=$((PRUNED+1))
-  done < <(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d -mtime +14 -print0 2>/dev/null)
+  done < <(find "$BUILD_BASE" -mindepth 2 -maxdepth 2 -type d -mtime +14 -print0 2>/dev/null)
 fi
 RETAINED=$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
 DISK=$(du -sh "$BUILD_BASE" 2>/dev/null | cut -f1)
