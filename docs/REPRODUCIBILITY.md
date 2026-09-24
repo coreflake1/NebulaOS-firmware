@@ -93,6 +93,35 @@ squashfs mtimes and entry ordering are the usual suspects. **They are
 hypotheses. Naming them is not a result**, and this file will not record them
 as one.
 
+## 3a. Corrections to claims made while producing this record
+
+This series exists to stop unverified claims being restated. Two of its own
+commit messages contained measurably wrong numbers. Published history is not
+rewritten for this; the corrections live here.
+
+- **"all 19 assertions" is wrong. The number is 17.** Stated in the commit
+  messages of `36e83c1` and `40762c2`. Measured across all three modes against
+  the real repository: pre-build 17, candidate-post-build 17, post-build 17
+  (plus 3 baseline comparisons). The count is static in
+  `scripts/build/assert-baseline-config.sh` — 15 `check()` sites plus 2 inline
+  PASS/FAIL blocks per section — so it does not vary with the build and no real
+  build can produce 19. The figure had no source in the repository.
+
+- **"byte-identical to the baseline tag" is wrong. They are SEMANTICALLY
+  identical.** Stated in the commit message of `40762c2` about the recorded
+  artifacts. Measured by blob SHA against
+  `nebulaos-canonical-baseline-2026-08-14-prtouch-qualified`: only
+  `halley5_v30.dts` is byte-identical; `kernel.config` and `buildroot.config`
+  differ, in exactly the two documented excluded fields
+  (`CONFIG_CC_VERSION_TEXT`, `CONFIG_EXTRA_FIRMWARE_DIR`) and nothing else. The
+  gate that produced the wording says "semantically" itself. The substantive
+  conclusion — that the recorded artifacts are the 2026-08-14 eight-variant
+  snapshot and predate the ninth — is unaffected.
+
+Both were caught by independent verification, not by the author. That is the
+same failure mode this file documents: a number repeated until it sounds
+established.
+
 ## 4. Consequence for release qualification
 
 A metadata-only commit followed by a rebuild still yields different flashable
