@@ -211,14 +211,29 @@ check_artifact_sha256 vendor/mainsail-dist/mainsail.zip \
 
 # 2026-08-07: GuppyScreen is no longer a fixed prebuilt binary (see
 # manifests/dependencies.conf's GUPPYSCREEN_PIN and
-# 04-cross-compile-app-stack.sh) - it's rebuilt from pinned source every
-# run, and the resulting bytes are NOT deterministic across builds (the
-# toolchain embeds a build timestamp), even from byte-identical source. A
-# fixed expected hash here would report a false MISS on every correct
-# build. Check self-consistency against THIS run's own build-manifest.txt
-# instead (already-recorded guppyscreen_sha256/guppybeep_sha256, right
-# next to the source pin git_commit_guppyscreen that actually determines
-# correctness) plus a real MIPS-ELF sanity check.
+# 04-cross-compile-app-stack.sh) - it is rebuilt from pinned source every run,
+# so a fixed expected hash here would have to be re-derived on every pin bump.
+# Check self-consistency against THIS run's own build-manifest.txt instead
+# (already-recorded guppyscreen_sha256/guppybeep_sha256, right next to the
+# source pin git_commit_guppyscreen that actually determines correctness) plus
+# a real MIPS-ELF sanity check.
+#
+# CORRECTED 2026-09-24. This comment used to justify the approach by asserting
+# that the bytes are "NOT deterministic across builds (the toolchain embeds a
+# build timestamp), even from byte-identical source". That was wrong in two
+# ways and it is the fourth place the same wrong claim was written down:
+#   - The cause was specific, not "the toolchain": libhv expands __DATE__ and
+#     __TIME__ (libhv/base/htime.c hv_compile_datetime). Stage 04 now pins
+#     SOURCE_DATE_EPOCH to the GuppyScreen commit date and verifies the
+#     expected date is embedded, so guppyscreen is no longer expected to
+#     change with the calendar.
+#   - It was never true of guppybeep at all. guppybeep does not link libhv and
+#     embeds no date string, and it has reproduced byte-for-byte across builds.
+#     A guppybeep hash change is therefore a REAL finding, not a known-benign
+#     rebuild artifact - see baseline-difference-gate.sh, which no longer lists
+#     it as an expected difference.
+# The self-consistency check below is unchanged and is still the right check;
+# only the reasoning attached to it was wrong.
 check_guppyscreen_binary() {
 	gb_path="$REPO_ROOT/$1"
 	gb_manifest_key="$2"

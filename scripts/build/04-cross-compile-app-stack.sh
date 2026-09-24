@@ -697,9 +697,18 @@ echo "== cross-compiling GuppyScreen (Migration A: Bootlin mips32el-musl toolcha
 # whatever HEAD happens to be matters: run this stage standalone against a
 # drifted checkout and a HEAD-anchored check would compare HEAD against itself,
 # pass, and still produce a binary that is not a function of the manifest.
-GUPPY_REF=${GUPPYSCREEN_PIN:-HEAD}
+# An unset or empty pin is FATAL, not a fallback to HEAD. Falling back was
+# demonstrated to reproduce exactly the defect this block exists to close: with
+# no pin, the epoch is taken from whatever the checkout happens to be and the
+# refusal below never fires, so the check compares HEAD against itself, passes,
+# and still yields a binary that is not a function of the manifest.
+if [ -z "${GUPPYSCREEN_PIN:-}" ]; then
+	echo "FATAL: GUPPYSCREEN_PIN is unset or empty - refusing to anchor the GuppyScreen build date to an unpinned checkout" >&2
+	exit 1
+fi
+GUPPY_REF=$GUPPYSCREEN_PIN
 GUPPY_HEAD=$(git -C "$GUPPYSCREEN_SRC" rev-parse HEAD 2>/dev/null || echo "")
-if [ -n "${GUPPYSCREEN_PIN:-}" ] && [ "$GUPPY_HEAD" != "$GUPPYSCREEN_PIN" ]; then
+if [ "$GUPPY_HEAD" != "$GUPPYSCREEN_PIN" ]; then
 	echo "FATAL: GuppyScreen checkout is at $GUPPY_HEAD but the manifest pins $GUPPYSCREEN_PIN - refusing to build a binary that is not a function of the pin" >&2
 	exit 1
 fi

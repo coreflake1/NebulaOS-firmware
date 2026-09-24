@@ -188,15 +188,21 @@ done
 # distinct SHA ever built. Keep the current one and anything recent enough to
 # still be useful for comparison; drop the rest. Failures to prune are
 # reported, never fatal: a retention problem must not fail a good build.
+# NUL-delimited, not newline-delimited. find -print splits on newlines, so a
+# directory whose NAME contains a newline yields two read lines, and the second
+# is a RELATIVE path that rm resolves against the current directory - outside
+# the build base entirely. That was demonstrated, not theorised: the launcher
+# runs with the workspace root as its working directory, and /var/tmp is
+# world-writable and sticky, so a hostile local user can pre-create the base
+# and choose the name. -print0 with read -d removes the class.
 PRUNED=0
 if [ -d "$BUILD_BASE" ]; then
-  while IFS= read -r old; do
+  while IFS= read -r -d '' old; do
     [ -n "$old" ] || continue
     [ "$old" = "$WORK" ] && continue
-    rm -rf "$old" 2>/dev/null && PRUNED=$((PRUNED+1))
-  done <<EOF
-$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d -mtime +14 2>/dev/null)
-EOF
+    case "$old" in "$BUILD_BASE"/*) ;; *) continue ;; esac
+    rm -rf -- "$old" 2>/dev/null && PRUNED=$((PRUNED+1))
+  done < <(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d -mtime +14 -print0 2>/dev/null)
 fi
 RETAINED=$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
 DISK=$(du -sh "$BUILD_BASE" 2>/dev/null | cut -f1)

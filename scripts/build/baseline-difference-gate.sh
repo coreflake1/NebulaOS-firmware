@@ -1,9 +1,15 @@
 #!/bin/sh
 # Phase 5 baseline-difference gate. Compares the just-built package against
 # the pinned qualified baseline package and hard-stops on any unexplained
-# difference. Allowed differences are exactly: the GuppyScreen binary/hash,
-# z_compensate.py, explicit build/version metadata, and associated tests/
-# manifests - everything else must be byte-identical to the baseline tag.
+# difference. Allowed differences are exactly: the guppyscreen binary/hash
+# (NOT guppybeep - see the Allowed differences section below), z_compensate.py,
+# explicit build/version metadata, and associated tests/manifests.
+#
+# Scope of what is actually GATED, stated plainly because the wording used to
+# overstate it: the pass/fail signal in this script is the tracked
+# config/DTS comparison. The "Allowed differences" section is prose echoed into
+# baseline-difference.txt for a human reader - it documents expectations, it
+# does not enforce them.
 #
 # Requires unsquashfs (squashfs-tools) on the host to compare rootfs
 # contents; falls back to a kernel.config/DTS-only comparison with a loud
