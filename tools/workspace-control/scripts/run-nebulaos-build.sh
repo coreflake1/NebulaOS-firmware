@@ -145,7 +145,11 @@ printf 'RUN_NEBULAOS_BUILD=CLONING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_W
 
 git clone --quiet "$ORIGIN" "$WORK" || die "cannot clone $ORIGIN into $WORK"
 git -C "$WORK" checkout --quiet --detach "$EXPECT" 2>/dev/null \
-  || die "commit $EXPECT does not exist on the canonical remote - a release build is built from PUBLISHED source, so push it first"
+  || die "commit $EXPECT did not resolve in a fresh clone of $ORIGIN.
+       A release build is built from PUBLISHED source. Either the commit is not on the
+       remote at all (push it to a branch), or it is reachable only from refs that a
+       plain clone does not fetch - a pull-request head under refs/pull/* is published
+       on the forge but is not on any branch, and will not resolve here."
 
 GOT=$(git -C "$WORK" rev-parse HEAD 2>/dev/null) || die "cannot read the build workspace HEAD"
 [ "$GOT" = "$EXPECT" ] || die "build workspace HEAD $GOT != requested $EXPECT"
@@ -176,6 +180,28 @@ for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-
   n=$(git -C "$ROOT/$r" status --porcelain --untracked-files=all 2>/dev/null | grep -vc '^?? \.mcp\.json$' || true)
   [ "$n" -eq 0 ] || { printf 'CANONICAL_REPO_DIRTIED=%s (%s file(s))\n' "$r" "$n" >&2; CANON_DIRTY=1; }
 done
+
+# --- retention -------------------------------------------------------------
+# Each build workspace is a full clone plus a fetched vendor tree, which is
+# tens of GB. Nothing else ever removes them, and /var/tmp here is on the root
+# filesystem, so without a rule this grows without bound - one tree per
+# distinct SHA ever built. Keep the current one and anything recent enough to
+# still be useful for comparison; drop the rest. Failures to prune are
+# reported, never fatal: a retention problem must not fail a good build.
+PRUNED=0
+if [ -d "$BUILD_BASE" ]; then
+  while IFS= read -r old; do
+    [ -n "$old" ] || continue
+    [ "$old" = "$WORK" ] && continue
+    rm -rf "$old" 2>/dev/null && PRUNED=$((PRUNED+1))
+  done <<EOF
+$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d -mtime +14 2>/dev/null)
+EOF
+fi
+RETAINED=$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+DISK=$(du -sh "$BUILD_BASE" 2>/dev/null | cut -f1)
+printf 'BUILD_WORKSPACES_PRUNED=%s\nBUILD_WORKSPACES_RETAINED=%s\nBUILD_WORKSPACE_DISK=%s\n' \
+  "$PRUNED" "$RETAINED" "${DISK:-unknown}"
 
 printf 'RUN_NEBULAOS_BUILD=FINISHED\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_WORKSPACE=%s\nBUILD_EXIT_CODE=%s\nCANONICAL_ACTIVE_REPOS_CLEAN=%s\nFINISHED_AT=%s\n' \
   "$EXPECT" "$MODE" "$WORK" "$RC" "$([ "$CANON_DIRTY" -eq 0 ] && echo YES || echo NO)" \

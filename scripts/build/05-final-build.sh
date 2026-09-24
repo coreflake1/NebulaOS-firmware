@@ -86,19 +86,37 @@ if [ "${NEBULAOS_REQUIRE_CLEAN_TREE:-0}" = "1" ]; then
 	# this gate (previously unreachable through build.sh at all - see that
 	# script's own history) found it trips on artifacts/guppyscreen-mips/{
 	# guppyscreen,guppybeep} - tracked binaries that stage 04
-	# (cross-compile-app-stack.sh) deterministically rewrites on every
-	# build, BEFORE this gate ever runs, as this project's own already-
-	# established convention of committing build-proof artifacts (see the
-	# Phase 0+1 integration closeout's own note on
-	# artifacts/buildroot-halley5-v30-image/halley5-nebulaos-fragment.config
-	# being "a regenerated tracked artifact... rewrites on every build").
-	# Not a source change and not evidence of an in-progress, uncommitted
-	# edit - excluding it here is the same narrow, named pathspec-exclusion
-	# pattern 06-verify.sh already uses for klippy/chelper/c_helper.so.
-	# Nothing else is excluded; any other uncommitted change still fails
-	# this gate.
+	# (cross-compile-app-stack.sh) rewrites on every build, BEFORE this
+	# gate ever runs, as this project's own already-established convention
+	# of committing build-proof artifacts. Excluding it here is the same
+	# narrow, named pathspec-exclusion pattern 06-verify.sh already uses
+	# for klippy/chelper/c_helper.so. Nothing else is excluded; any other
+	# uncommitted change still fails this gate.
+	#
+	# CORRECTION (final release closure mission, 2026-09-24). The original
+	# wording justified this exclusion with the claim that stage 04
+	# "deterministically rewrites" those binaries. That was NOT true, and a
+	# release gate rested on it: libhv embeds the compiler __DATE__/__TIME__
+	# macros, so guppyscreen changed with the calendar - same pin, same
+	# container digest, different day, different bytes. guppybeep, which
+	# does not link libhv, reproduced byte-for-byte throughout, which is
+	# what made the asymmetry visible.
+	#
+	# What is true today, stated narrowly: the ONE identified wall-clock
+	# input (__DATE__/__TIME__ via libhv) is now pinned to the source
+	# commit, and stage 04 verifies that the expected date is present in the
+	# binary, failing the build if it is not.
+	#
+	# Full byte-reproducibility of these binaries is NOT demonstrated. The
+	# check is a substring match on one date string; archive member
+	# ordering, embedded build paths, and the parallel-object behaviour of
+	# scripts/build-mips.sh are untested for byte-stability. Replacing one
+	# unproven determinism claim with another is exactly what this
+	# correction exists to avoid, so the exclusion below is kept on the
+	# narrow ground that stage 04 rewrites these tracked binaries, not on a
+	# claim that the rewrite is byte-identical.
 	if [ -n "$(cd "$REPO_ROOT" && git status --porcelain -- . ":!artifacts/guppyscreen-mips/")" ]; then
-		echo "FATAL: NEBULAOS_REQUIRE_CLEAN_TREE=1 but the main repository has uncommitted changes outside the known, deterministically-regenerated artifacts/guppyscreen-mips/ path - a release build must come from a clean, committed tree" >&2
+		echo "FATAL: NEBULAOS_REQUIRE_CLEAN_TREE=1 but the main repository has uncommitted changes outside the known build-regenerated artifacts/guppyscreen-mips/ path - a release build must come from a clean, committed tree" >&2
 		echo "$(cd "$REPO_ROOT" && git status --porcelain -- . ":!artifacts/guppyscreen-mips/")" >&2
 		exit 1
 	fi
