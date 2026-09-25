@@ -185,6 +185,45 @@ else
   rm -rf "$W"
 fi
 
+echo "[ POSIX sh compatibility of the build scripts ]"
+# This section exists because of a real build failure, not as a style rule.
+# A `read -r -d ''` added to lib/make-seed-archive.sh passed every test here
+# and then broke a full build: these scripts are #!/bin/sh and build.sh runs
+# the pipeline with `sh`, which is dash in the container. The tests source
+# the library into BASH, where `read -d` works, so the suite was green while
+# the build was not. bash -n cannot see this class of defect either.
+#
+# shellcheck -s sh is the closest available proxy - neither dash nor busybox
+# is installed on this host (tests/overlay-shell-lint-tests.sh documents the
+# same constraint for the shipped init scripts).
+#
+# SC3043 (`local` is undefined in POSIX sh) is deliberately EXCLUDED: dash,
+# busybox ash and bash all implement `local`, this codebase uses it widely on
+# purpose, and it has never failed a build. Everything else in the SC3xxx
+# family - read -d, [[ ]], arrays, <<< - genuinely does not exist in dash and
+# fails at runtime. This is a scoped exclusion of one checked, benign code,
+# not a blanket relaxation to obtain a PASS.
+if ! command -v shellcheck >/dev/null 2>&1; then
+  bad "shellcheck is unavailable - POSIX compatibility of the build scripts is unchecked"
+else
+  scanned=0
+  offenders=""
+  for f in $(grep -rl '^#!/bin/sh' "$ROOT/scripts/build" --include='*.sh' 2>/dev/null | sort); do
+    scanned=$((scanned+1))
+    hits=$(shellcheck -s sh "$f" 2>/dev/null \
+      | grep -oE 'SC3[0-9]{3}' | grep -v '^SC3043$' | sort -u | tr '\n' ',')
+    [ -n "$hits" ] && offenders="$offenders
+    ${f#$ROOT/} -> ${hits%,}"
+  done
+  if [ "$scanned" -eq 0 ]; then
+    bad "found no #!/bin/sh scripts under scripts/build - the scan is not doing anything"
+  elif [ -z "$offenders" ]; then
+    ok "all $scanned #!/bin/sh build scripts are free of non-POSIX constructs (bar 'local')"
+  else
+    bad "non-POSIX constructs in #!/bin/sh build scripts - these run under dash and will fail:$offenders"
+  fi
+fi
+
 echo
 echo "[ kernel payload gzip ]"
 if have scripts/build/apply-qualified-baseline.sh 'kernel-gzip-determinism-variant.sh" GZIPN1'; then

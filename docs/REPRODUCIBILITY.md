@@ -161,10 +161,21 @@ There are deliberately **two** epochs: the image epoch above, and the GuppyScree
 epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
 rather than the firmware commit.
 
-`tests/reproducibility-assertions-tests.sh` asserts all of it (23 assertions).
+`tests/reproducibility-assertions-tests.sh` asserts all of it (24 assertions).
 Four of them are functional rather than grep-level, and each assertion was
 verified to FAIL when its fix is reverted - an assertion that cannot go red
 proves nothing.
+
+One of them guards a defect these fixes themselves introduced. The first
+version of the sparse skip-worktree step used `read -r -d ''`, a bashism. These
+scripts are `#!/bin/sh` and `build.sh` runs the pipeline with `sh`, which is
+dash in the container; dash's `read` has no `-d`, so the loop body never ran,
+the bits were never re-applied, and the packaging guard correctly refused a
+tree it now saw as entirely deleted. It failed closed, but it failed a real
+build. The tests did not catch it because they source the library into **bash**,
+where `read -d` works, and `bash -n` cannot see this class of defect at all. A
+`shellcheck -s sh` gate over every `#!/bin/sh` script under `scripts/build` now
+does, and it was verified against the exact construct that broke the build.
 
 ## 3a. Corrections to claims made while producing this record
 

@@ -375,10 +375,18 @@ make_seed_archive() {
 	# tracked file EXPECTED. Outside the sparse path a missing file is a real
 	# defect and must keep failing the clean-tree check below rather than
 	# being quietly marked as intentional.
+	#
+	# `git ls-files --deleted` IS that set - tracked entries with no file on
+	# disk - so git computes it and no shell loop is needed. The first
+	# version of this did the walk in shell with `read -r -d ''`, which is a
+	# BASHISM: this file is #!/bin/sh and build.sh runs the pipeline with
+	# `sh`, which is dash in the container. dash's read has no -d, the loop
+	# body never ran, no bits were re-applied, and the guard below then saw
+	# the entire klipper tree as deleted and refused to package it. It failed
+	# closed, but it failed a real build - hence no shell loop here.
 	if [ -n "$sparse_exclude" ]; then
-		git -C "$tmp" ls-files -z | while IFS= read -r -d '' _f; do
-			[ -e "$tmp/$_f" ] || printf '%s\0' "$_f"
-		done | xargs -0 -r git -C "$tmp" update-index --skip-worktree -- || {
+		git -C "$tmp" ls-files --deleted -z \
+			| xargs -0 -r git -C "$tmp" update-index --skip-worktree -- || {
 			echo "ERROR: refusing to package $src - could not re-apply sparse skip-worktree bits" >&2
 			rm -rf "$tmp"
 			return 1
