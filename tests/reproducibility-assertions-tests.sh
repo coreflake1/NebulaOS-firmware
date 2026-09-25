@@ -224,6 +224,27 @@ else
   fi
 fi
 
+# BR2_REPRODUCIBLE clamps target mtimes to SOURCE_DATE_EPOCH, which flattens
+# chelper sources and c_helper.so to the SAME timestamp. That is safe only
+# because both rebuild checks are STRICTLY greater-than, so equal mtimes do
+# not trigger a rebuild. The margin chelper_enforce_mtime's bare `touch` used
+# to provide is gone, and this now holds by exact equality. If upstream
+# Klipper ever changes `>` to `>=`, every device would try to invoke a gcc it
+# does not have, at boot. Assert both halves of the inequality.
+KCH=vendor/klipper/klippy/chelper/__init__.py
+if [ ! -f "$ROOT/$KCH" ]; then
+  ok "vendor klipper not fetched - chelper rebuild-check comparison not verifiable here (skipped)"
+elif grep -qF 'return not obj_times or max(src_times) > min(obj_times)' "$ROOT/$KCH"; then
+  ok "Klipper's check_build_code is strictly > (equal mtimes do not trigger a gcc rebuild)"
+else
+  bad "Klipper's check_build_code comparison changed - equal mtimes under BR2_REPRODUCIBLE may now force a gcc rebuild on a device with no toolchain"
+fi
+if grep -q -- '-newer "\$target"' "$ROOT/$CH"; then
+  ok "chelper_check_mtime uses -newer (strict), so flattened mtimes stay safe"
+else
+  bad "chelper_check_mtime no longer uses a strict -newer test"
+fi
+
 echo
 echo "[ kernel payload gzip ]"
 if have scripts/build/apply-qualified-baseline.sh 'kernel-gzip-determinism-variant.sh" GZIPN1'; then

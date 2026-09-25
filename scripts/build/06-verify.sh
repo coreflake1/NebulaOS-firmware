@@ -105,6 +105,11 @@ check_vendor_pin pellcorp-creality "$PELLCORP_CREALITY_PIN" \
 # deterministically copied in by 02-configure-buildroot.sh from tracked
 # sources in this repo (scripts/build/vendor-patches/, this project's own
 # config layer) - expected every time, not accidental drift.
+# board/nebulaos-post-build.sh is the same thing: copied in by
+# 02-configure-buildroot.sh from the tracked scripts/build/nebulaos-post-build.sh
+# because BR2_ROOTFS_POST_BUILD_SCRIPT names it by a buildroot-relative path,
+# so it has to sit inside the vendor tree. Listed here for the same reason the
+# board/ configs are - it is a deterministic, tracked-source copy, not drift.
 # squashfs.mk/squashfs.hash: 02-configure-buildroot.sh idempotently
 # switches squashfs-tools from GitHub's mutable auto-generated archive to
 # the stable release asset (upstream Buildroot fix backported to our
@@ -114,6 +119,7 @@ check_vendor_pin buildroot-x2000 "$BUILDROOT_PIN" \
 	package/python-matplotlib/python-matplotlib.mk \
 	board/halley5-nebulaos-busybox-fragment.config \
 	board/halley5-nebulaos-fragment.config \
+	board/nebulaos-post-build.sh \
 	board/halley5-nebulaos-overlay/ \
 	board/halley5-nebulaos-wheels/ \
 	local.mk \

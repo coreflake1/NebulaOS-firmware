@@ -161,7 +161,7 @@ There are deliberately **two** epochs: the image epoch above, and the GuppyScree
 epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
 rather than the firmware commit.
 
-`tests/reproducibility-assertions-tests.sh` asserts all of it (24 assertions).
+`tests/reproducibility-assertions-tests.sh` asserts all of it (26 assertions).
 Four of them are functional rather than grep-level, and each assertion was
 verified to FAIL when its fix is reverted - an assertion that cannot go red
 proves nothing.
@@ -205,6 +205,30 @@ rewritten for this; the corrections live here.
 Both were caught by independent verification, not by the author. That is the
 same failure mode this file documents: a number repeated until it sounds
 established.
+
+## 3c. One consequence to carry into hardware qualification
+
+`BR2_REPRODUCIBLE=y` clamps target-filesystem mtimes to `SOURCE_DATE_EPOCH`.
+That flattens the chelper sources and the prebuilt `c_helper.so` to the **same**
+timestamp, which removes the margin `chelper_enforce_mtime`'s bare `touch` used
+to provide - its own comment still describes a "now" that is no longer there.
+
+It is safe, but it is now safe by exact equality rather than by margin, because
+both rebuild checks are strictly greater-than:
+
+```
+klippy/chelper/__init__.py   max(src_times) > min(obj_times)
+chelper_check_mtime          find ... -newer "$target"
+```
+
+Equal mtimes therefore produce no rebuild. If either ever becomes `>=`, every
+device would try to invoke a gcc it does not have, at boot. Both halves are
+asserted in `tests/reproducibility-assertions-tests.sh`.
+
+This is not a defect and it does not block reproducibility. It belongs on the
+hardware-qualification list because `BR2_REPRODUCIBLE=y` changes the shipped
+rootfs bytes, so the resulting image is by definition **not** the one qualified
+on 2026-08-14.
 
 ## 4. Consequence for release qualification
 
