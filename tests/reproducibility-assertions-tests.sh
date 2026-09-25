@@ -133,6 +133,18 @@ else
     git -C "$W/src" add -A
     git -C "$W/src" -c user.email=t@e -c user.name=t \
       -c commit.gpgsign=false commit -q -m seed
+    # Leave a reflog entry pointing at an object NO REF REACHES. A throwaway
+    # commit followed by `reset --hard` is the same state `checkout -B`
+    # produces on a real vendor clone. The repack packs only ref-reachable
+    # objects and deletes the clone's pack, so without dropping the reflogs
+    # first that entry dangles and `git fsck` refuses the whole package -
+    # measured on the real moonraker clone ("invalid reflog entry").
+    printf 'throwaway\n' > "$W/src/throwaway.txt"
+    git -C "$W/src" add -A
+    git -C "$W/src" -c user.email=t@e -c user.name=t \
+      -c commit.gpgsign=false commit -q -m throwaway
+    git -C "$W/src" -c user.email=t@e -c user.name=t reset -q --hard HEAD~1
+
     # Created AFTER the commit, so it is UNTRACKED - exactly how a vendor
     # build leaves it behind. A sparse checkout removes tracked files under
     # the excluded path but not untracked ones, which is how a stale,

@@ -205,9 +205,30 @@ make_seed_archive() {
 		case "$stale_count" in ''|*[!0-9]*) stale_count=0 ;; esac
 		if [ "$stale_count" -gt 0 ]; then
 			echo "$head_sha" > "$tmp/.git/shallow"
-			rm -rf "$tmp/.git/logs"
 		fi
 	fi
+
+	# Drop the reflogs BEFORE repacking, and unconditionally.
+	#
+	# The repack below packs only objects reachable from REFS and then deletes
+	# the pack the clone came with. A reflog entry can name an object that no
+	# ref reaches - `checkout -B` above moves a branch and leaves its previous
+	# tip behind in exactly that state - so after the repack that entry points
+	# at an object the repository no longer has, and `git fsck` (run further
+	# down, and load-bearing) reports "invalid reflog entry" and the build
+	# refuses to package. Measured on the real moonraker clone:
+	#
+	#   error: refs/heads/master: invalid reflog entry 1cfb0c41e468...
+	#   ERROR: refusing to package .../vendor/moonraker - git fsck reported
+	#          repository damage
+	#
+	# The shallow path used to delete the reflogs just before repacking, which
+	# is why klipper never hit this and moonraker did the moment the repack
+	# became unconditional. Reflogs are purely local history, they are dropped
+	# later anyway so the archive is deterministic, and git recreates them on
+	# the device at the next ref update - so dropping them here costs nothing
+	# and keeps the object store and the refs consistent with each other.
+	rm -rf "$tmp/.git/logs"
 
 	# Repack ALWAYS, not only on the shallow-fix path.
 	#
@@ -247,6 +268,15 @@ make_seed_archive() {
 	# one pack. `prune-packed` only removes objects that the pack already
 	# contains, so nothing reachable can be lost.
 	git -C "$tmp" prune-packed 2>/dev/null || true
+	# prune-packed only drops loose objects the pack already contains. Objects
+	# no ref reaches are in neither - `checkout -B` above strands the previous
+	# branch tip exactly this way - so they would ship as loose cruft whose
+	# presence depends on what the clone happened to carry. Now that the
+	# reflogs are gone, they are genuinely unreachable and `git prune` removes
+	# them, leaving the object store as exactly one pack. Verified safe on a
+	# shallow clone: .git/shallow survives, fsck stays clean, the repo remains
+	# usable.
+	git -C "$tmp" prune --expire=now 2>/dev/null || true
 
 	# Discard a wrong-architecture klippy/chelper/c_helper.so before
 	# packaging (e.g. a host-recompiled x86 .so left over from a

@@ -134,6 +134,17 @@ differing. The repack is now unconditional, so every seed's pack is built
 locally from its own objects rather than by whichever bytes a server happened
 to send.
 
+Making that repack unconditional then broke the build, which is worth
+recording rather than smoothing over. The repack packs only objects reachable
+from REFS and deletes the clone's pack; a reflog entry can name an object no
+ref reaches (`checkout -B` strands the previous branch tip exactly so), and
+`git fsck` - which runs afterwards and is load-bearing - then reported
+`invalid reflog entry` and the packaging guard correctly refused moonraker.
+The shallow path had always deleted the reflogs just before repacking, which
+is why klipper never hit it. Reflogs are now dropped before the repack for
+every seed, and unreachable loose objects are pruned afterwards, so the
+archived object store is exactly one locally-built pack.
+
 Causes 12 and 13 were found by the two-build proof itself, after causes 1-11
 were fixed: xImage matched byte for byte and `rootfs.squashfs` was down to
 three differing files, of which one was `seed-manifest.json`, derived from the
