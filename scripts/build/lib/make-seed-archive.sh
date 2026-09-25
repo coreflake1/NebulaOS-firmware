@@ -252,7 +252,17 @@ make_seed_archive() {
 		return 1
 	}
 	git -C "$tmp" rev-list --objects --all > "$_reachable"
-	_pack_hash=$(git -C "$tmp" pack-objects --threads=1 "$tmp/.git/objects/pack/pack" < "$_reachable")
+	# --no-reuse-delta --no-reuse-object are the load-bearing flags, and
+	# --threads=1 alone was NOT enough. By default pack-objects REUSES the
+	# deltas and compressed object data it finds in the existing pack - and
+	# that pack came from the remote server, so its bytes leak straight into
+	# the "locally built" one. Measured on the two real moonraker clones:
+	# repacking each with reuse allowed reproduced the shipped mismatch
+	# exactly (pack-c473fcc2... vs pack-6c404824...), while repacking the
+	# same two with reuse disabled converged both to pack-6ad84128... These
+	# flags force every delta to be recomputed, which is what makes the pack
+	# a function of the objects rather than of whatever a server once sent.
+	_pack_hash=$(git -C "$tmp" pack-objects --threads=1 --no-reuse-delta --no-reuse-object "$tmp/.git/objects/pack/pack" < "$_reachable")
 	rm -f "$_reachable"
 	if [ -z "$_pack_hash" ]; then
 		echo "ERROR: refusing to package $src - deterministic repack produced no pack" >&2

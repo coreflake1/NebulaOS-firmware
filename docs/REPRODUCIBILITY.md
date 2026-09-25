@@ -11,7 +11,7 @@ was wrong.
 GUPPYSCREEN_REPRODUCIBLE_FOR_A_FIXED_PIN    YES (measured, three builds)
 FULL_GUPPYSCREEN_BYTE_REPRODUCIBILITY       NOT ESTABLISHED
 IMAGE_REPRODUCIBLE (xImage, rootfs.squashfs) NOT YET PROVEN at the fixed HEAD
-IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 14 causes)
+IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 15 causes)
 ```
 
 The earlier value of `IMAGE_NON_DETERMINISM_ROOT_CAUSE` was `NOT ESTABLISHED`,
@@ -125,6 +125,7 @@ Each was read out of the differing bytes of two builds whose `kernel.config`,
 | 12 | `opt/nebulaos-seeds/klipper.tar.gz` | one stale `__pycache__/*.pyc` copied in from the vendor tree: PEP 552 flag word 0 (timestamp-based), header carrying the source mtime. `__pycache__` is gitignored so the clean-tree guard never saw it, and untracked files survive a sparse checkout even when their `.py` source does not |
 | 13 | `opt/nebulaos-seeds/moonraker.tar.gz` | `git pack-objects` delta compression is multithreaded, so the pack is timing-dependent; two builds produced packs with different names, and a pack is named by its own content hash |
 | 14 | `opt/nebulaos-seeds/moonraker.tar.gz` (again) | the repack ran only for SHALLOW clones, so a non-shallow seed shipped the pack **the remote server sent**, which is not a function of the repository's content |
+| 15 | `opt/nebulaos-seeds/moonraker.tar.gz` (third time) | `pack-objects` REUSES deltas and compressed object data from the existing pack by default - and that pack came from the server, so its bytes leaked into the locally-built one even after the repack became unconditional |
 
 Cause 14 has an exact control. klipper HAS `.git/shallow`, so the repack ran
 for it and klipper came out byte-identical; moonraker has none, so it shipped
@@ -188,7 +189,7 @@ There are deliberately **two** epochs: the image epoch above, and the GuppyScree
 epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
 rather than the firmware commit.
 
-`tests/reproducibility-assertions-tests.sh` asserts all of it (30 assertions).
+`tests/reproducibility-assertions-tests.sh` asserts all of it (31 assertions).
 Four of them are functional rather than grep-level, and each assertion was
 verified to FAIL when its fix is reverted - an assertion that cannot go red
 proves nothing.

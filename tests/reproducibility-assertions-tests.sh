@@ -237,10 +237,18 @@ if have "$MSA" "clean -fdx -- '*__pycache__*'"; then
 else
   bad "stale __pycache__ is no longer cleared - a vendor-built .pyc with a per-build mtime can ship"
 fi
-if have "$MSA" 'pack-objects --threads=1'; then
+PACKLINE='^[[:space:]]*_pack_hash=.*pack-objects'
+if grep -qE "$PACKLINE .*--threads=1" "$ROOT/$MSA"; then
   ok "git pack-objects is single-threaded (packing is not timing-dependent)"
 else
   bad "git pack-objects is multithreaded again - pack bytes become timing-dependent"
+fi
+# Threads alone were NOT enough. Delta/object reuse pulls bytes out of the
+# pack the REMOTE SERVER sent, so the "local" pack inherits them.
+if grep -qE "$PACKLINE .*--no-reuse-delta .*--no-reuse-object" "$ROOT/$MSA"; then
+  ok "pack-objects recomputes deltas (no reuse of the server's pack bytes)"
+else
+  bad "pack-objects reuses deltas from the fetched pack - the seed inherits whatever the server sent"
 fi
 
 echo
