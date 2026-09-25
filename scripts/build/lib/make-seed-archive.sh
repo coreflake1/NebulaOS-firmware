@@ -334,6 +334,66 @@ make_seed_archive() {
 		fi
 	fi
 
+	# The archived .git carries two files that are written by the BUILD, not
+	# by the content, and both differed between two runs of the same commit
+	# (measured - they were the only differing members):
+	#
+	#   .git/index      records per-file stat data (mtime, ctime, ino, dev)
+	#                   for the working tree. $tmp is a fresh copy every run,
+	#                   so every one of those fields is new every run.
+	#   .git/logs/HEAD  the reflog, whose every entry carries the wall-clock
+	#                   time of the ref update this function just performed.
+	#
+	# Deterministic tar flags cannot fix either: the variation is inside the
+	# member contents, not in the tar headers.
+	#
+	# The reflog is purely local history - nothing in the update path reads
+	# it, and git recreates it on the device at the next ref update - so it
+	# is removed. The index is rebuilt from HEAD with `read-tree` (no -u),
+	# which writes the entries with ZEROED stat data and does not touch the
+	# working tree. It still honours core.sparseCheckout, so the
+	# skip-worktree bits from the sparse path above are preserved.
+	#
+	# This removes build-time noise; it hides nothing. Both files are still
+	# present-or-absent identically in every build and are fully compared.
+	rm -rf "$tmp/.git/logs"
+	rm -f "$tmp/.git/index"
+	if ! git -C "$tmp" read-tree HEAD; then
+		echo "ERROR: refusing to package $src - could not rebuild a deterministic .git/index" >&2
+		rm -rf "$tmp"
+		return 1
+	fi
+	# A plain `read-tree HEAD` does NOT re-apply skip-worktree bits (sparse
+	# handling lives in the -m/--reset paths), so on the sparse path the
+	# freshly rebuilt index lists the excluded paths as present while they
+	# are deliberately absent on disk - git then reports them as deleted.
+	# Re-mark exactly the tracked-but-absent files. `update-index
+	# --skip-worktree` only sets the flag bit; it does not stat the file, so
+	# the zeroed stat data (and with it determinism) survives.
+	#
+	# Deliberately guarded on $sparse_exclude: only there is an absent
+	# tracked file EXPECTED. Outside the sparse path a missing file is a real
+	# defect and must keep failing the clean-tree check below rather than
+	# being quietly marked as intentional.
+	if [ -n "$sparse_exclude" ]; then
+		git -C "$tmp" ls-files -z | while IFS= read -r -d '' _f; do
+			[ -e "$tmp/$_f" ] || printf '%s\0' "$_f"
+		done | xargs -0 -r git -C "$tmp" update-index --skip-worktree -- || {
+			echo "ERROR: refusing to package $src - could not re-apply sparse skip-worktree bits" >&2
+			rm -rf "$tmp"
+			return 1
+		}
+	fi
+	# --no-optional-locks so this check does not itself refresh (and rewrite)
+	# the index it is verifying. c_helper.so is excluded for the same reason
+	# as the clean-tree guard above: it is a prebuilt artifact, not content.
+	if [ -n "$(git --no-optional-locks -C "$tmp" status --porcelain -- . ':!klippy/chelper/c_helper.so')" ]; then
+		echo "ERROR: refusing to package $src - the rebuilt index does not match the working tree" >&2
+		git --no-optional-locks -C "$tmp" status --porcelain -- . ':!klippy/chelper/c_helper.so' >&2
+		rm -rf "$tmp"
+		return 1
+	fi
+
 	# gzip, not a plain tar: real bug found at the first full build after
 	# this archive format landed - a plain tar of vendor/klipper's real
 	# working tree (~226MB uncommitted source, mostly its own vendored
@@ -344,7 +404,35 @@ make_seed_archive() {
 	# made it ~11.5MB; gzip here brings a real tar back down to a
 	# comparable order of magnitude (~40MB measured) while still
 	# preserving real, non-synthetic history.
-	tar -C "$tmp" -czf "$out" .
+	# Deterministic tar: without --sort the member order follows readdir, and
+	# without --mtime/--owner the member headers carry build-time mtimes and
+	# the builder uid/gid. All three differed between two builds of the same
+	# commit. The gzip header itself was already clean (tar -z compresses a
+	# stream, so no filename or mtime is stored).
+	#
+	# The mtime comes from the archived tree's OWN HEAD commit date, not from
+	# SOURCE_DATE_EPOCH. This function is shared - the tests and the offline
+	# fixtures call it directly - so requiring a build-time variable would
+	# break every caller outside build.sh (measured: it did). The commit date
+	# is also the more honest value: the archive *is* that commit, and it is
+	# fixed for a given pin, so two builds of the same pin agree.
+	seed_epoch=$(git -C "$tmp" show -s --format=%ct HEAD 2>/dev/null || echo "")
+	case "$seed_epoch" in
+		''|*[!0-9]*) seed_epoch=${SOURCE_DATE_EPOCH:-} ;;
+	esac
+	case "$seed_epoch" in
+		''|*[!0-9]*)
+			echo "ERROR: refusing to package $src - no deterministic archive mtime available (no readable HEAD commit date and no SOURCE_DATE_EPOCH)" >&2
+			rm -rf "$tmp"
+			return 1
+			;;
+	esac
+	# Flattening every member to one mtime is safe for the chelper invariant
+	# enforced above: both Klipper's check_build_code() (max(src) > min(obj))
+	# and chelper_check_mtime()'s `find -newer` are STRICTLY greater, so equal
+	# mtimes do not trigger a gcc rebuild. Verified against
+	# vendor/klipper/klippy/chelper/__init__.py.
+	tar -C "$tmp" --sort=name --mtime="@$seed_epoch" --owner=0 --group=0 --numeric-owner -czf "$out" .
 	git -C "$tmp" rev-parse HEAD
 	rm -rf "$tmp"
 }

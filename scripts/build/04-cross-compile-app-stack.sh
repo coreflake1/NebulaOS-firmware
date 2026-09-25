@@ -1204,7 +1204,8 @@ PYVENVCFG
 			[ -f "$vdir/bin/$af" ] && sed -i "s#$vdir#$envdir#g" "$vdir/bin/$af"
 		done
 		[ -f "$vdir/pyvenv.cfg" ] || return 1
-		tar -C "$vdir" -czf "$seed_out" .
+		# Deterministic tar - see lib/make-seed-archive.sh for the measured cause.
+		tar -C "$vdir" --sort=name --mtime="@${SOURCE_DATE_EPOCH:?SOURCE_DATE_EPOCH must be set by build.sh}" --owner=0 --group=0 --numeric-owner -czf "$seed_out" .
 	}
 	if build_venv_seed klipper /usr/data/nebulaos/envs/klipper "$OVERLAY/opt/nebulaos-seeds/klipper-venv-seed.tar.gz"; then
 		echo "== klipper venv seed created: $(ls -la "$OVERLAY/opt/nebulaos-seeds/klipper-venv-seed.tar.gz") =="

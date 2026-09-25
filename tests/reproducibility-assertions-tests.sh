@@ -49,14 +49,16 @@ else
   bad "BR2_REPRODUCIBLE is not enabled"
 fi
 
-# Buildroot salts a PLAINTEXT root password randomly at build time, which
-# rewrote /etc/shadow on every build. A pre-computed hash fixes the salt. That
-# the hash is for the same password is not checkable here, only that it is a
-# hash; changing it is a deliberate act.
-if grep -qE '^BR2_TARGET_GENERIC_ROOT_PASSWD="\$[0-9]\$' "$ROOT/$BRC"; then
-  ok "root password is a pre-computed hash (deterministic /etc/shadow)"
+# BR2_TARGET_GENERIC_ROOT_PASSWD stays PLAINTEXT on purpose. A pre-computed
+# hash cannot survive Kconfig -> make: .config is included by make, which
+# expands `$5` before Buildroot's already-hashed test can match it (measured).
+# Determinism is supplied by the post-build script instead, and plaintext here
+# remains a working fallback. The assertion is therefore that the post-build
+# script carries the fixed hash - not that this value is hashed.
+if have scripts/build/nebulaos-post-build.sh "ROOT_HASH='\$5\$"; then
+  ok "the post-build script pins a fixed-salt root hash"
 else
-  bad "root password is plaintext - Buildroot will salt it randomly per build"
+  bad "the post-build script no longer carries a fixed root hash - /etc/shadow will vary"
 fi
 
 echo
@@ -77,6 +79,165 @@ if have "$CH" 'if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then'; then
   ok "chelper preflight uses the epoch at build time, the wall clock at boot"
 else
   bad "chelper preflight writes a wall-clock checked_at into the image"
+fi
+
+echo
+echo "[ deterministic archives ]"
+DET='--sort=name'
+if grep -q -- "$DET" "$ROOT/scripts/build/lib/make-seed-archive.sh"; then
+  ok "seed archive tar is sorted, epoch-stamped and numeric-owner"
+else
+  bad "seed archive tar is not deterministic - member order and mtimes will vary"
+fi
+if grep -q -- "$DET" "$ROOT/$S04"; then
+  ok "venv seed tar is deterministic"
+else
+  bad "venv seed tar is not deterministic"
+fi
+
+# Grepping for a tar flag cannot prove the archive is reproducible. Build a
+# real repo twice and compare the bytes. This also guards the chelper mtime
+# invariant, which the flattened --mtime must not break: both Klipper's
+# check_build_code() and chelper_check_mtime() are strictly-greater, so equal
+# mtimes are safe - but a future change to either would surface here.
+W=$(mktemp -d "${TMPDIR:-/tmp}/repro-seed.XXXXXX" 2>/dev/null) || W=""
+case "$W" in
+  */repro-seed.*) : ;;
+  *) W="" ;;
+esac
+if [ -z "$W" ]; then
+  bad "could not create a temp dir - the seed-archive determinism test did not run"
+else
+  (
+    set -e
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
+    git init -q -b master "$W/src"
+    mkdir -p "$W/src/klippy/chelper"
+    printf 'int main(void){return 0;}\n' > "$W/src/klippy/chelper/pyhelper.c"
+    printf 'x\n' > "$W/src/klippy/chelper/__init__.py"
+    # lib/ exists so the sparse path below has something to exclude - this is
+    # the shape the real klipper seed uses (sparse_exclude "/lib/").
+    mkdir -p "$W/src/lib/vendored"
+    printf 'blob\n' > "$W/src/lib/vendored/big.bin"
+    # A minimal but genuine MIPS ELF header (e_type=DYN, e_machine=EM_MIPS),
+    # so make_seed_archive's `file`-based wrong-architecture check accepts it,
+    # exactly as tests/factory-seed-git-tests.sh builds its own fixture.
+    printf '%b' '\0177ELF\001\001\001\0\0\0\0\0\0\0\0\0\003\0\010\0\001\0\0\0' \
+      > "$W/src/klippy/chelper/c_helper.so"
+    printf 'nebulaos determinism fixture padding' >> "$W/src/klippy/chelper/c_helper.so"
+    git -C "$W/src" add -A
+    git -C "$W/src" -c user.email=t@e -c user.name=t \
+      -c commit.gpgsign=false commit -q -m seed
+  ) >/dev/null 2>&1
+  if [ ! -d "$W/src/.git" ]; then
+    bad "could not build the seed-archive fixture - determinism test did not run"
+  else
+    # Deliberately run with SOURCE_DATE_EPOCH UNSET: this function is shared
+    # with callers that have no build-time epoch, and requiring one broke all
+    # of them. The second run also touches a source file first, so a
+    # build-time mtime leaking into the archive would show up as a difference.
+    (
+      unset SOURCE_DATE_EPOCH
+      . "$ROOT/scripts/build/lib/make-seed-archive.sh"
+      make_seed_archive "$W/src" master "https://example.invalid/s.git" "$W/a.tar.gz"
+      sleep 1
+      touch "$W/src/klippy/chelper/pyhelper.c"
+      make_seed_archive "$W/src" master "https://example.invalid/s.git" "$W/b.tar.gz"
+    ) > "$W/mksa.log" 2>&1
+    if [ ! -f "$W/a.tar.gz" ] || [ ! -f "$W/b.tar.gz" ]; then
+      bad "make_seed_archive did not produce both archives without SOURCE_DATE_EPOCH: $(tail -2 "$W/mksa.log" | tr '\n' ' ')"
+    elif cmp -s "$W/a.tar.gz" "$W/b.tar.gz"; then
+      ok "two make_seed_archive runs of one commit are byte-identical"
+    else
+      bad "make_seed_archive is not reproducible - two runs of the same commit differ"
+    fi
+    # The sparse path is a DIFFERENT code path (skip-worktree bits have to be
+    # re-applied after the index is rebuilt) and it is the one the real
+    # klipper seed uses, so it gets its own determinism check.
+    (
+      unset SOURCE_DATE_EPOCH
+      . "$ROOT/scripts/build/lib/make-seed-archive.sh"
+      make_seed_archive "$W/src" master "https://example.invalid/s.git" "$W/sa.tar.gz" "/lib/"
+      sleep 1
+      make_seed_archive "$W/src" master "https://example.invalid/s.git" "$W/sb.tar.gz" "/lib/"
+    ) > "$W/mksa-sparse.log" 2>&1
+    if [ ! -f "$W/sa.tar.gz" ] || [ ! -f "$W/sb.tar.gz" ]; then
+      bad "sparse make_seed_archive did not produce both archives: $(tail -2 "$W/mksa-sparse.log" | tr '\n' ' ')"
+    elif cmp -s "$W/sa.tar.gz" "$W/sb.tar.gz"; then
+      ok "two sparse make_seed_archive runs are byte-identical (the klipper seed's path)"
+    else
+      bad "the sparse make_seed_archive path is not reproducible - two runs differ"
+    fi
+
+    if [ -f "$W/a.tar.gz" ]; then
+      mkdir -p "$W/x" && tar -C "$W/x" -xzf "$W/a.tar.gz" 2>/dev/null
+      if [ ! -f "$W/x/klippy/chelper/c_helper.so" ]; then
+        bad "the extracted seed archive has no c_helper.so - cannot check the mtime invariant"
+      elif [ -z "$(find "$W/x/klippy/chelper" -maxdepth 1 -type f \
+             \( -name '*.c' -o -name '*.h' -o -name '__init__.py' \) \
+             -newer "$W/x/klippy/chelper/c_helper.so" 2>/dev/null)" ]; then
+        ok "no chelper source is newer than c_helper.so in the archive (no gcc rebuild on device)"
+      else
+        bad "a chelper source is NEWER than c_helper.so in the archive - Klippy would invoke a gcc the device does not have"
+      fi
+    fi
+  fi
+  rm -rf "$W"
+fi
+
+echo
+echo "[ kernel payload gzip ]"
+if have scripts/build/apply-qualified-baseline.sh 'kernel-gzip-determinism-variant.sh" GZIPN1'; then
+  ok "GZIPN1 is applied by the qualified baseline"
+else
+  bad "GZIPN1 is not wired into apply-qualified-baseline.sh"
+fi
+GZV=scripts/build/kernel-gzip-determinism-variant.sh
+if grep -qE "^WANT='[[:space:]]*gzip -nv9f " "$ROOT/$GZV"; then
+  ok "the kernel zboot payload is compressed with gzip -n (no stored name or mtime)"
+else
+  bad "the kernel gzip variant no longer enforces -n"
+fi
+# The variant must refuse to pass silently when the vendor rule has moved.
+if have "$GZV" 'FATAL: kernel-gzip-determinism: neither the expected original'; then
+  ok "the gzip variant fails loudly if the vendor rule changed (no silent no-op)"
+else
+  bad "the gzip variant can now no-op silently on an unrecognised vendor rule"
+fi
+
+echo
+echo "[ root password determinism ]"
+if grep -qE '^BR2_ROOTFS_POST_BUILD_SCRIPT="board/nebulaos-post-build.sh"' "$ROOT/$BRC"; then
+  ok "the post-build script is wired into Buildroot"
+else
+  bad "BR2_ROOTFS_POST_BUILD_SCRIPT is not set to the NebulaOS post-build script"
+fi
+if have scripts/build/nebulaos-post-build.sh 'chmod "$mode_before"'; then
+  ok "the post-build script preserves the /etc/shadow mode (0600, not git-expressible)"
+else
+  bad "the post-build script no longer preserves the /etc/shadow mode"
+fi
+if have scripts/build/02-configure-buildroot.sh 'cp "$SCRIPT_DIR/nebulaos-post-build.sh"'; then
+  ok "stage 02 installs the post-build script into the buildroot tree"
+else
+  bad "stage 02 no longer installs the post-build script - Buildroot would fail to find it"
+fi
+
+# The post-build script overwrites the root password field unconditionally, so
+# editing BR2_TARGET_GENERIC_ROOT_PASSWD alone would be silently ineffective.
+# Assert the two agree: the pinned hash must be sha256-crypt of the configured
+# plaintext under the fixed salt. Changing the password means changing both.
+PW=$(sed -n 's/^BR2_TARGET_GENERIC_ROOT_PASSWD="\(.*\)"$/\1/p' "$ROOT/$BRC")
+PINNED=$(sed -n "s/^ROOT_HASH='\(.*\)'$/\1/p" "$ROOT/scripts/build/nebulaos-post-build.sh")
+SALT=$(printf '%s' "$PINNED" | cut -d'$' -f3)
+if ! command -v openssl >/dev/null 2>&1; then
+  bad "openssl is unavailable - cannot verify the pinned hash matches the configured password"
+elif [ -z "$PW" ] || [ -z "$PINNED" ] || [ -z "$SALT" ]; then
+  bad "could not read the root password, the pinned hash or its salt"
+elif [ "$(openssl passwd -5 -salt "$SALT" "$PW")" = "$PINNED" ]; then
+  ok "the pinned hash is the configured root password under a fixed salt (same password)"
+else
+  bad "the pinned hash does not match BR2_TARGET_GENERIC_ROOT_PASSWD - one was changed without the other"
 fi
 
 echo

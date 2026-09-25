@@ -99,5 +99,9 @@ sh "$SCRIPT_DIR/pwm-state-readback-variant.sh" GETSTATE1
 sh "$SCRIPT_DIR/touch-final-qualification-variant.sh" FINALQUAL1
 sh "$SCRIPT_DIR/wifi-roamoff-disable-variant.sh" ROAMOFF1
 sh "$SCRIPT_DIR/accelerometer-eeprom-bus-enable-variant.sh" FIX1
+# 10th call: makes the Ingenic zboot payload gzip deterministic (adds -n).
+# Header-only; it does not change the compressed kernel data. See that
+# script for the measured cause.
+sh "$SCRIPT_DIR/kernel-gzip-determinism-variant.sh" GZIPN1
 
-echo "== apply-qualified-baseline: all 9 accepted variants applied =="
+echo "== apply-qualified-baseline: 9 accepted hardware variants + 1 determinism variant applied =="

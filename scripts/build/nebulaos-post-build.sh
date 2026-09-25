@@ -1,0 +1,67 @@
+#!/bin/sh
+# Buildroot BR2_ROOTFS_POST_BUILD_SCRIPT for NebulaOS.
+#
+# Runs with $1 = TARGET_DIR, after TARGET_FINALIZE_HOOKS and after the rootfs
+# overlay copy (Buildroot's own Makefile order: hooks, then overlays, then this
+# script). That ordering is why the root password is fixed here rather than in
+# the overlay or in BR2_TARGET_GENERIC_ROOT_PASSWD.
+#
+# WHY NOT BR2_TARGET_GENERIC_ROOT_PASSWD. Buildroot only treats that value as
+# an already-hashed password when it matches $1$/$5$/$6$ - but .config is
+# INCLUDED BY MAKE, which expands `$5` and friends as variables before that
+# match ever runs. Measured: the hash
+#
+#     $5$NebulaOSrootsalt$loBE3...
+#
+# arrives at the match as `ebulaOSrootsaltoBE3...`, fails it, and falls through
+# to mkpasswd, which salts randomly - rewriting /etc/shadow on every build.
+# Doubling or backslash-escaping the dollars does not survive either, because
+# $(call qstrip,...) expands the value a second time.
+#
+# WHY NOT THE OVERLAY. /etc/shadow is mode 0600 in the image. Git records only
+# 0644 or 0755, so shipping it through the overlay would publish a
+# world-readable shadow file. That is a worse defect than the one being fixed.
+#
+# So: edit the line in place, here, preserving the file's existing mode and
+# every other account. Same password as before - only the salt stops being
+# random.
+set -eu
+
+TARGET_DIR=${1:?usage: nebulaos-post-build.sh <TARGET_DIR>}
+SHADOW="$TARGET_DIR/etc/shadow"
+
+# sha256-crypt of the project's existing root password, with a fixed salt.
+# Regenerate with:  openssl passwd -5 -salt NebulaOSrootsalt <password>
+ROOT_HASH='$5$NebulaOSrootsalt$loBE3SnC0VQEEc2oYlmeqfOM/8ttzKP9k6xuKkH25NB'
+
+[ -f "$SHADOW" ] || {
+	echo "FATAL: post-build: $SHADOW not found" >&2
+	exit 1
+}
+
+grep -q '^root:' "$SHADOW" || {
+	echo "FATAL: post-build: no root entry in $SHADOW" >&2
+	exit 1
+}
+
+mode_before=$(stat -c %a "$SHADOW")
+
+# Replace only the password field of the root line. Other accounts, and every
+# other field, are left exactly as Buildroot produced them.
+awk -v h="$ROOT_HASH" -F: 'BEGIN{OFS=":"} $1=="root"{$2=h} {print}' \
+	"$SHADOW" > "$SHADOW.nebulaos-tmp"
+mv -f "$SHADOW.nebulaos-tmp" "$SHADOW"
+chmod "$mode_before" "$SHADOW"
+
+grep -qF "$ROOT_HASH" "$SHADOW" || {
+	echo "FATAL: post-build: deterministic root hash did not land in $SHADOW" >&2
+	exit 1
+}
+
+mode_after=$(stat -c %a "$SHADOW")
+[ "$mode_before" = "$mode_after" ] || {
+	echo "FATAL: post-build: $SHADOW mode changed $mode_before -> $mode_after" >&2
+	exit 1
+}
+
+echo "== post-build: /etc/shadow root hash pinned (mode $mode_after preserved) =="

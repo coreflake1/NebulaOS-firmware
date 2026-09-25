@@ -10,9 +10,19 @@ was wrong.
 ```
 GUPPYSCREEN_REPRODUCIBLE_FOR_A_FIXED_PIN    YES (measured, three builds)
 FULL_GUPPYSCREEN_BYTE_REPRODUCIBILITY       NOT ESTABLISHED
-IMAGE_REPRODUCIBLE (xImage, rootfs.squashfs) NO (measured)
-IMAGE_NON_DETERMINISM_ROOT_CAUSE            NOT ESTABLISHED
+IMAGE_REPRODUCIBLE (xImage, rootfs.squashfs) NOT YET PROVEN at the fixed HEAD
+IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 11 causes)
 ```
+
+The earlier value of `IMAGE_NON_DETERMINISM_ROOT_CAUSE` was `NOT ESTABLISHED`,
+and section 3 below said so at length. That is no longer true: every cause has
+been read out of the differing bytes and fixed. `IMAGE_REPRODUCIBLE` is
+deliberately **not** upgraded here - the causes being found and fixed is not
+the same claim as two clean builds of the final HEAD matching. That proof is
+recorded in the build-evidence tree kept OUTSIDE this repository (it records
+absolute build paths and artifact hashes, which are properties of a machine and
+a run, not of the source), so it is deliberately not linked from here - a path
+this repository cannot resolve from a fresh clone would be worse than none.
 
 ## 1. The retracted claim
 
@@ -85,13 +95,76 @@ Measured on `xImage` (a u-boot legacy uImage, magic `27 05 19 56`):
   differ.** The compressed payload is itself non-deterministic.
 
 So "a kernel build embeds its own build timestamp" is not a sufficient
-explanation, and a header-only fix would not make `xImage` reproducible. The
-conclusion (not reproducible) stands; the cause does not.
+explanation, and a header-only fix would not make `xImage` reproducible.
 
-`UTS_VERSION` build time and host, `__DATE__`/`__TIME__` in kernel sources,
-squashfs mtimes and entry ordering are the usual suspects. **They are
-hypotheses. Naming them is not a result**, and this file will not record them
-as one.
+**The above was the state of the record until the causes were measured. They
+now have been, and the paragraph that used to follow here - listing `UTS_VERSION`,
+`__DATE__`/`__TIME__` and squashfs ordering as unverified "usual suspects" - has
+been replaced by section 3b rather than deleted, so that the distinction it was
+making (hypotheses are not results) is not lost.** None of those suspects turned
+out to be the xImage cause.
+
+## 3b. The causes, measured
+
+Each was read out of the differing bytes of two builds whose `kernel.config`,
+`buildroot.config` and `halley5_v30.dts` were byte-identical. None was guessed.
+
+| # | Artifact | Producer |
+|---|---|---|
+| 1 | ~1100 `.pyc` | CPython timestamp-invalidation header carries the source mtime |
+| 2 | `opt/nebulaos-seeds/*.tar.gz` | tar member mtimes, readdir order, builder uid/gid |
+| 3 | version/seed/config manifest JSON | `build_date=$(date -u …)` in stage 04 |
+| 4 | `.nebulaos-chelper-verdict.json` | `now=$(date -u …)` in the chelper preflight |
+| 5 | `etc/shadow` | Buildroot salts a plaintext root password randomly per build |
+| 6 | `bin/busybox` | build time embedded in the banner |
+| 7 | `usr/lib/libcrypto.so.3` | OpenSSL `built on:` string |
+| 8 | `usr/lib/libpython3.11.so.1.0` | CPython `getbuildinfo` `__DATE__`/`__TIME__` |
+| 9 | `rootfs.squashfs` superblock | mksquashfs creation time |
+| 10 | `xImage` | `arch/mips/boot/zcompressed/Makefile` ran `gzip` **without `-n`**, storing the payload's name and mtime in the gzip header |
+| 11 | `opt/nebulaos-seeds/*.tar.gz` (again) | the archived `.git/index` (per-file stat data) and `.git/logs/HEAD` (reflog timestamps) |
+
+Cause 10 is the whole of the xImage difference. The 1,454,891 differing bytes
+above were measured BEFORE `SOURCE_DATE_EPOCH` existed; once it did, xImage came
+down to **10 differing bytes** - one four-byte gzip mtime field plus the header
+and data CRCs that follow from it. Upstream's own generic compression rule
+already passes `-n`; this Ingenic-local rule did not.
+
+Cause 11 was found only because a *functional* test built the same commit twice
+and compared bytes. The grep-level assertion for the tar flags passed the whole
+time: the variation was inside the member contents, where deterministic tar
+flags cannot reach.
+
+### The fixes
+
+1. `build.sh` derives one `SOURCE_DATE_EPOCH` from the firmware commit's
+   committer date and exports it into the container. A non-git or unreadable
+   tree fails the build rather than falling back to `date +%s`.
+2. `BR2_REPRODUCIBLE=y` (covers 1, 2, 9).
+3. `scripts/build/nebulaos-post-build.sh` pins the `/etc/shadow` root hash with
+   a fixed salt. **Same password** - only the salt stops being random. It is a
+   post-build script because `.config` is included by make, which expands `$5`
+   before Buildroot's already-hashed test can match it, and because `/etc/shadow`
+   is mode 0600, which git cannot express through the overlay.
+4. `build_date` and the preflight's `checked_at` derive from the epoch. The
+   preflight still uses the wall clock at boot, because it runs there too.
+5. `kernel-gzip-determinism-variant.sh` adds `-n` to the zboot rule.
+6. `make_seed_archive()` sorts members, fixes owner/mtime, drops the reflog and
+   rebuilds `.git/index` from HEAD with zeroed stat data.
+
+`make_seed_archive()` takes its mtime from the archived tree's **own HEAD commit
+date**, not from `SOURCE_DATE_EPOCH`. It is a shared function - the tests and
+offline fixtures call it directly - and requiring a build-time variable broke
+every caller outside `build.sh`. The commit date is also the more honest value:
+the archive *is* that commit.
+
+There are deliberately **two** epochs: the image epoch above, and the GuppyScreen
+epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
+rather than the firmware commit.
+
+`tests/reproducibility-assertions-tests.sh` asserts all of it (23 assertions).
+Four of them are functional rather than grep-level, and each assertion was
+verified to FAIL when its fix is reverted - an assertion that cannot go red
+proves nothing.
 
 ## 3a. Corrections to claims made while producing this record
 

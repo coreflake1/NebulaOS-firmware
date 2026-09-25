@@ -87,6 +87,12 @@ fi
 
 cp "$ARTIFACTS/buildroot.config" "$BUILDROOT_DIR/.config"
 mkdir -p "$BUILDROOT_DIR/board"
+# BR2_ROOTFS_POST_BUILD_SCRIPT names this by a buildroot-relative path, so it
+# has to live inside the buildroot tree. It pins the /etc/shadow root hash
+# after the finalize hooks and the overlay have run - see the script itself
+# for why neither BR2_TARGET_GENERIC_ROOT_PASSWD nor the overlay can do it.
+cp "$SCRIPT_DIR/nebulaos-post-build.sh" "$BUILDROOT_DIR/board/nebulaos-post-build.sh"
+chmod 755 "$BUILDROOT_DIR/board/nebulaos-post-build.sh"
 cp "$ARTIFACTS/halley5-nebulaos-fragment.config" "$BUILDROOT_DIR/board/halley5-nebulaos-fragment.config"
 cp "$ARTIFACTS/halley5-nebulaos-busybox-fragment.config" "$BUILDROOT_DIR/board/halley5-nebulaos-busybox-fragment.config"
 # Phase 11 (2026-08-15): CONFIG_EXTRA_FIRMWARE_DIR in the tracked fragment
