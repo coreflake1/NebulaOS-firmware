@@ -206,28 +206,47 @@ make_seed_archive() {
 		if [ "$stale_count" -gt 0 ]; then
 			echo "$head_sha" > "$tmp/.git/shallow"
 			rm -rf "$tmp/.git/logs"
-			_reachable=$(mktemp) || {
-				echo "ERROR: refusing to package $src - could not create a temporary object list" >&2
-				rm -rf "$tmp"
-				return 1
-			}
-			git -C "$tmp" rev-list --objects --all > "$_reachable"
-			# --threads=1: delta compression is multithreaded by default and
-			# the search order depends on how work lands on threads, so the
-			# resulting pack is timing-dependent. Measured: two builds of this
-			# commit produced moonraker packs with DIFFERENT names
-			# (pack-3fc0a98c... vs pack-d117e011...) - a pack is named by its
-			# own content hash, so different names are different bytes. Single
-			# -threaded packing costs a little time on a ~290-file repo and
-			# makes the output a function of the objects alone.
-			_pack_hash=$(git -C "$tmp" pack-objects --threads=1 "$tmp/.git/objects/pack/pack" < "$_reachable")
-			rm -f "$_reachable"
-			for _p in "$tmp"/.git/objects/pack/pack-*.pack; do
-				_bn=$(basename "$_p" .pack)
-				[ "$_bn" != "pack-$_pack_hash" ] && rm -f "$_p" "${_p%.pack}.idx" "${_p%.pack}.rev"
-			done
 		fi
 	fi
+
+	# Repack ALWAYS, not only on the shallow-fix path.
+	#
+	# A clone's pack is whatever the REMOTE SERVER chose to send. It is not a
+	# function of the repository's content, and GitHub does not send identical
+	# bytes every time. Measured, and the control is exact: klipper HAS
+	# .git/shallow, so the old code repacked it here and klipper came out
+	# byte-identical; moonraker has NO .git/shallow, so it shipped the
+	# server's pack verbatim and alternated between pack-3fc0a98c... and
+	# pack-d117e011... across builds. Same 12310 objects, same 9144/3166
+	# delta/base split - only the delta CHOICES differed, so it was never a
+	# content difference.
+	#
+	# Packing locally from the reachable object list makes the pack a function
+	# of the objects alone, for every seed rather than for the shallow ones by
+	# accident. --threads=1 because delta search is multithreaded by default
+	# and the result then depends on how work lands on threads.
+	_reachable=$(mktemp) || {
+		echo "ERROR: refusing to package $src - could not create a temporary object list" >&2
+		rm -rf "$tmp"
+		return 1
+	}
+	git -C "$tmp" rev-list --objects --all > "$_reachable"
+	_pack_hash=$(git -C "$tmp" pack-objects --threads=1 "$tmp/.git/objects/pack/pack" < "$_reachable")
+	rm -f "$_reachable"
+	if [ -z "$_pack_hash" ]; then
+		echo "ERROR: refusing to package $src - deterministic repack produced no pack" >&2
+		rm -rf "$tmp"
+		return 1
+	fi
+	for _p in "$tmp"/.git/objects/pack/pack-*.pack; do
+		_bn=$(basename "$_p" .pack)
+		[ "$_bn" != "pack-$_pack_hash" ] && rm -f "$_p" "${_p%.pack}.idx" "${_p%.pack}.rev"
+	done
+	# Loose objects are now redundant with the pack and are written by
+	# whatever ran before this point; drop them so the object store is exactly
+	# one pack. `prune-packed` only removes objects that the pack already
+	# contains, so nothing reachable can be lost.
+	git -C "$tmp" prune-packed 2>/dev/null || true
 
 	# Discard a wrong-architecture klippy/chelper/c_helper.so before
 	# packaging (e.g. a host-recompiled x86 .so left over from a

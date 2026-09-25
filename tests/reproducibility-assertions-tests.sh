@@ -184,6 +184,19 @@ else
 
     if [ -f "$W/a.tar.gz" ]; then
       mkdir -p "$W/pyc" && tar -C "$W/pyc" -xzf "$W/a.tar.gz" 2>/dev/null
+      # The archived object store must be exactly ONE locally-built pack with
+      # no loose objects. A clone's pack is whatever the remote server chose
+      # to send and is not a function of the content, so if the repack is ever
+      # made conditional again (it used to run only for shallow clones), a
+      # seed would ship the server's bytes and vary between builds.
+      npack=$(find "$W/pyc/.git/objects/pack" -name '*.pack' 2>/dev/null | wc -l)
+      nloose=$(find "$W/pyc/.git/objects" -mindepth 2 -maxdepth 2 -type f \
+                 -path '*/??/*' 2>/dev/null | wc -l)
+      if [ "$npack" = "1" ] && [ "$nloose" = "0" ]; then
+        ok "the archived git object store is exactly one locally-built pack, no loose objects"
+      else
+        bad "the archived object store is $npack pack(s) and $nloose loose object(s) - the deterministic repack did not run"
+      fi
       if find "$W/pyc" -name '__pycache__' -type d 2>/dev/null | grep -q .; then
         bad "a stale __pycache__ survived into the seed archive - its .pyc header carries a per-build source mtime"
       else

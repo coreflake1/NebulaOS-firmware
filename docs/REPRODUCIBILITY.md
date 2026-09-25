@@ -11,7 +11,7 @@ was wrong.
 GUPPYSCREEN_REPRODUCIBLE_FOR_A_FIXED_PIN    YES (measured, three builds)
 FULL_GUPPYSCREEN_BYTE_REPRODUCIBILITY       NOT ESTABLISHED
 IMAGE_REPRODUCIBLE (xImage, rootfs.squashfs) NOT YET PROVEN at the fixed HEAD
-IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 13 causes)
+IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 14 causes)
 ```
 
 The earlier value of `IMAGE_NON_DETERMINISM_ROOT_CAUSE` was `NOT ESTABLISHED`,
@@ -124,6 +124,15 @@ Each was read out of the differing bytes of two builds whose `kernel.config`,
 | 11 | `opt/nebulaos-seeds/*.tar.gz` (again) | the archived `.git/index` (per-file stat data) and `.git/logs/HEAD` (reflog timestamps) |
 | 12 | `opt/nebulaos-seeds/klipper.tar.gz` | one stale `__pycache__/*.pyc` copied in from the vendor tree: PEP 552 flag word 0 (timestamp-based), header carrying the source mtime. `__pycache__` is gitignored so the clean-tree guard never saw it, and untracked files survive a sparse checkout even when their `.py` source does not |
 | 13 | `opt/nebulaos-seeds/moonraker.tar.gz` | `git pack-objects` delta compression is multithreaded, so the pack is timing-dependent; two builds produced packs with different names, and a pack is named by its own content hash |
+| 14 | `opt/nebulaos-seeds/moonraker.tar.gz` (again) | the repack ran only for SHALLOW clones, so a non-shallow seed shipped the pack **the remote server sent**, which is not a function of the repository's content |
+
+Cause 14 has an exact control. klipper HAS `.git/shallow`, so the repack ran
+for it and klipper came out byte-identical; moonraker has none, so it shipped
+the server's pack and alternated between two pack names across builds - same
+12310 objects, same 9144/3166 delta/base split, only the delta CHOICES
+differing. The repack is now unconditional, so every seed's pack is built
+locally from its own objects rather than by whichever bytes a server happened
+to send.
 
 Causes 12 and 13 were found by the two-build proof itself, after causes 1-11
 were fixed: xImage matched byte for byte and `rootfs.squashfs` was down to
@@ -168,7 +177,7 @@ There are deliberately **two** epochs: the image epoch above, and the GuppyScree
 epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
 rather than the firmware commit.
 
-`tests/reproducibility-assertions-tests.sh` asserts all of it (29 assertions).
+`tests/reproducibility-assertions-tests.sh` asserts all of it (30 assertions).
 Four of them are functional rather than grep-level, and each assertion was
 verified to FAIL when its fix is reverted - an assertion that cannot go red
 proves nothing.
