@@ -212,7 +212,15 @@ make_seed_archive() {
 				return 1
 			}
 			git -C "$tmp" rev-list --objects --all > "$_reachable"
-			_pack_hash=$(git -C "$tmp" pack-objects "$tmp/.git/objects/pack/pack" < "$_reachable")
+			# --threads=1: delta compression is multithreaded by default and
+			# the search order depends on how work lands on threads, so the
+			# resulting pack is timing-dependent. Measured: two builds of this
+			# commit produced moonraker packs with DIFFERENT names
+			# (pack-3fc0a98c... vs pack-d117e011...) - a pack is named by its
+			# own content hash, so different names are different bytes. Single
+			# -threaded packing costs a little time on a ~290-file repo and
+			# makes the output a function of the objects alone.
+			_pack_hash=$(git -C "$tmp" pack-objects --threads=1 "$tmp/.git/objects/pack/pack" < "$_reachable")
 			rm -f "$_reachable"
 			for _p in "$tmp"/.git/objects/pack/pack-*.pack; do
 				_bn=$(basename "$_p" .pack)
@@ -295,6 +303,35 @@ make_seed_archive() {
 	# has a handful of similarly never-imported scripts/*.py of its own -
 	# losing bytecode for these purely host-side dev/release tools, never
 	# run on the target, is a non-issue).
+	# Drop any __pycache__ copied in from the vendor checkout BEFORE compiling.
+	#
+	# Measured: two builds of this commit differed by exactly one file,
+	# lib/kconfiglib/__pycache__/kconfiglib.cpython-311.pyc, 2 bytes apart -
+	# a PEP 552 TIMESTAMP-based header (flag word 0) carrying the source
+	# mtime, 1790315597 vs 1790320525. Every other .pyc in the archive was
+	# hash-based (flag word 3) and identical, because compileall below runs
+	# with SOURCE_DATE_EPOCH set and CPython then emits CHECKED_HASH.
+	#
+	# That one file was never compiled by us. It arrived via `cp -r` from the
+	# vendor tree, where something had imported kconfiglib during the build,
+	# and it survived because __pycache__ is UNTRACKED: the sparse checkout
+	# removes tracked files under the excluded path, but not untracked ones.
+	# So klipper shipped a .pyc whose .py source is deliberately absent - a
+	# stale build artifact leaking into a release seed, and a per-build
+	# timestamp with it.
+	#
+	# Removing them is safe: bytecode is a cache. compileall regenerates what
+	# is still there, deterministically, and a sparse-excluded path correctly
+	# gets no bytecode because it ships no source either. Done unconditionally
+	# so a caller with no python3_bin does not ship them either.
+	#
+	# `git clean`, NOT `rm -rf`: this must remove only UNTRACKED bytecode. A
+	# blanket rm also deletes a __pycache__ that a repository legitimately
+	# tracks, and the clean-tree guard below then refuses to package the tree
+	# (measured - a test fixture did exactly that). Untracked leakage is the
+	# defect; tracked content is content.
+	git -C "$tmp" clean -fdx -- '*__pycache__*' >/dev/null 2>&1 || true
+
 	if [ -n "$python3_bin" ]; then
 		if [ -n "$mount_path" ]; then
 			PYTHONPATH="" "$python3_bin" -m compileall -q \

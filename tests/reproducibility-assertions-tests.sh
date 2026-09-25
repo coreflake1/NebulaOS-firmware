@@ -119,6 +119,11 @@ else
     # the shape the real klipper seed uses (sparse_exclude "/lib/").
     mkdir -p "$W/src/lib/vendored"
     printf 'blob\n' > "$W/src/lib/vendored/big.bin"
+    # Real repos gitignore __pycache__, so `git status --porcelain` never
+    # reports it and the clean-tree guard does not see it - which is exactly
+    # why a stale .pyc could ride along into a release seed unnoticed. The
+    # fixture must reproduce that, or it tests a situation that cannot occur.
+    printf '__pycache__/\n' > "$W/src/.gitignore"
     # A minimal but genuine MIPS ELF header (e_type=DYN, e_machine=EM_MIPS),
     # so make_seed_archive's `file`-based wrong-architecture check accepts it,
     # exactly as tests/factory-seed-git-tests.sh builds its own fixture.
@@ -128,6 +133,14 @@ else
     git -C "$W/src" add -A
     git -C "$W/src" -c user.email=t@e -c user.name=t \
       -c commit.gpgsign=false commit -q -m seed
+    # Created AFTER the commit, so it is UNTRACKED - exactly how a vendor
+    # build leaves it behind. A sparse checkout removes tracked files under
+    # the excluded path but not untracked ones, which is how a stale,
+    # TIMESTAMP-based .pyc (PEP 552 flag word 0, carrying a per-build source
+    # mtime) reached a release seed. It must not survive into the archive.
+    mkdir -p "$W/src/lib/vendored/__pycache__"
+    printf '%b' '\0247\015\015\012\0\0\0\0\336\255\276\357\1\0\0\0' \
+      > "$W/src/lib/vendored/__pycache__/stale.cpython-311.pyc"
   ) >/dev/null 2>&1
   if [ ! -d "$W/src/.git" ]; then
     bad "could not build the seed-archive fixture - determinism test did not run"
@@ -170,6 +183,14 @@ else
     fi
 
     if [ -f "$W/a.tar.gz" ]; then
+      mkdir -p "$W/pyc" && tar -C "$W/pyc" -xzf "$W/a.tar.gz" 2>/dev/null
+      if find "$W/pyc" -name '__pycache__' -type d 2>/dev/null | grep -q .; then
+        bad "a stale __pycache__ survived into the seed archive - its .pyc header carries a per-build source mtime"
+      else
+        ok "stale __pycache__ does not survive into the seed archive"
+      fi
+    fi
+    if [ -f "$W/a.tar.gz" ]; then
       mkdir -p "$W/x" && tar -C "$W/x" -xzf "$W/a.tar.gz" 2>/dev/null
       if [ ! -f "$W/x/klippy/chelper/c_helper.so" ]; then
         bad "the extracted seed archive has no c_helper.so - cannot check the mtime invariant"
@@ -185,6 +206,19 @@ else
   rm -rf "$W"
 fi
 
+MSA=scripts/build/lib/make-seed-archive.sh
+if have "$MSA" "clean -fdx -- '*__pycache__*'"; then
+  ok "stale __pycache__ is cleared before compileall"
+else
+  bad "stale __pycache__ is no longer cleared - a vendor-built .pyc with a per-build mtime can ship"
+fi
+if have "$MSA" 'pack-objects --threads=1'; then
+  ok "git pack-objects is single-threaded (packing is not timing-dependent)"
+else
+  bad "git pack-objects is multithreaded again - pack bytes become timing-dependent"
+fi
+
+echo
 echo "[ POSIX sh compatibility of the build scripts ]"
 # This section exists because of a real build failure, not as a style rule.
 # A `read -r -d ''` added to lib/make-seed-archive.sh passed every test here
