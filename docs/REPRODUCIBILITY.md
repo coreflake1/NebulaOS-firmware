@@ -11,7 +11,7 @@ was wrong.
 GUPPYSCREEN_REPRODUCIBLE_FOR_A_FIXED_PIN    YES (measured, three builds)
 FULL_GUPPYSCREEN_BYTE_REPRODUCIBILITY       NOT ESTABLISHED
 IMAGE_REPRODUCIBLE (xImage, rootfs.squashfs) NOT YET PROVEN at the fixed HEAD
-IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 11 causes)
+IMAGE_NON_DETERMINISM_ROOT_CAUSE            ESTABLISHED (measured, 13 causes)
 ```
 
 The earlier value of `IMAGE_NON_DETERMINISM_ROOT_CAUSE` was `NOT ESTABLISHED`,
@@ -122,6 +122,13 @@ Each was read out of the differing bytes of two builds whose `kernel.config`,
 | 9 | `rootfs.squashfs` superblock | mksquashfs creation time |
 | 10 | `xImage` | `arch/mips/boot/zcompressed/Makefile` ran `gzip` **without `-n`**, storing the payload's name and mtime in the gzip header |
 | 11 | `opt/nebulaos-seeds/*.tar.gz` (again) | the archived `.git/index` (per-file stat data) and `.git/logs/HEAD` (reflog timestamps) |
+| 12 | `opt/nebulaos-seeds/klipper.tar.gz` | one stale `__pycache__/*.pyc` copied in from the vendor tree: PEP 552 flag word 0 (timestamp-based), header carrying the source mtime. `__pycache__` is gitignored so the clean-tree guard never saw it, and untracked files survive a sparse checkout even when their `.py` source does not |
+| 13 | `opt/nebulaos-seeds/moonraker.tar.gz` | `git pack-objects` delta compression is multithreaded, so the pack is timing-dependent; two builds produced packs with different names, and a pack is named by its own content hash |
+
+Causes 12 and 13 were found by the two-build proof itself, after causes 1-11
+were fixed: xImage matched byte for byte and `rootfs.squashfs` was down to
+three differing files, of which one was `seed-manifest.json`, derived from the
+other two. Cause 12 was a single `.pyc`, two bytes apart, out of 1233 files.
 
 Cause 10 is the whole of the xImage difference. The 1,454,891 differing bytes
 above were measured BEFORE `SOURCE_DATE_EPOCH` existed; once it did, xImage came
@@ -161,7 +168,7 @@ There are deliberately **two** epochs: the image epoch above, and the GuppyScree
 epoch derived from `GUPPYSCREEN_PIN`, because GuppyScreen should track its pin
 rather than the firmware commit.
 
-`tests/reproducibility-assertions-tests.sh` asserts all of it (26 assertions).
+`tests/reproducibility-assertions-tests.sh` asserts all of it (29 assertions).
 Four of them are functional rather than grep-level, and each assertion was
 verified to FAIL when its fix is reverted - an assertion that cannot go red
 proves nothing.
