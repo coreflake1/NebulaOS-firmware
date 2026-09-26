@@ -300,6 +300,11 @@ if [ ! -f "$MANIFEST" ]; then
   WORKSPACE_CONTROL_VALID=NO
   fail "control: canonical MANIFEST missing at $MANIFEST"
 else
+  # Collect first, hash once. This loop used to fork sha256sum+awk per side per
+  # manifest line - 60 processes for 15 files, ~60ms, on a gate the PreToolUse
+  # hook runs before EVERY Bash/Edit/Write. The comparison below is byte for
+  # byte the same SHA-256 over the same files; only the process count changed.
+  CAN_PATHS=(); INS_PATHS=(); INS_NAMES=()
   while read -r src dst mode; do
     case "$src" in ''|\#*) continue;; esac
     [ -n "${dst:-}" ] || continue
@@ -307,12 +312,27 @@ else
     if [ ! -f "$WORKSPACE_ROOT/$dst" ]; then
       CONTROL_MISSING+=("$dst"); WORKSPACE_CONTROL_VALID=NO; continue
     fi
-    a=$(sha256sum "$CANON/$src" 2>/dev/null | awk '{print $1}')
-    b=$(sha256sum "$WORKSPACE_ROOT/$dst" 2>/dev/null | awk '{print $1}')
-    if [ -z "$a" ] || [ "$a" != "$b" ]; then
-      CONTROL_DRIFTED+=("$dst"); WORKSPACE_CONTROL_VALID=NO
-    fi
+    CAN_PATHS+=("$CANON/$src"); INS_PATHS+=("$WORKSPACE_ROOT/$dst"); INS_NAMES+=("$dst")
   done < "$MANIFEST"
+
+  if [ "${#CAN_PATHS[@]}" -gt 0 ]; then
+    # sha256sum emits one line per argument, in argument order.
+    mapfile -t CAN_H < <(sha256sum "${CAN_PATHS[@]}" 2>/dev/null | cut -d' ' -f1)
+    mapfile -t INS_H < <(sha256sum "${INS_PATHS[@]}" 2>/dev/null | cut -d' ' -f1)
+    # FAIL CLOSED: a short read means some file could not be hashed. Do not
+    # guess which one - refuse the whole layer rather than silently checking
+    # fewer files than the manifest lists.
+    if [ "${#CAN_H[@]}" -ne "${#CAN_PATHS[@]}" ] || [ "${#INS_H[@]}" -ne "${#INS_PATHS[@]}" ]; then
+      WORKSPACE_CONTROL_VALID=NO
+      CONTROL_DRIFTED+=("(unhashable: canonical=${#CAN_H[@]}/${#CAN_PATHS[@]} installed=${#INS_H[@]}/${#INS_PATHS[@]})")
+    else
+      for i in "${!CAN_PATHS[@]}"; do
+        if [ -z "${CAN_H[$i]}" ] || [ "${CAN_H[$i]}" != "${INS_H[$i]}" ]; then
+          CONTROL_DRIFTED+=("${INS_NAMES[$i]}"); WORKSPACE_CONTROL_VALID=NO
+        fi
+      done
+    fi
+  fi
 fi
 
 echo "CONTROL_FILES_CHECKED=$CONTROL_CHECKED"
