@@ -96,7 +96,40 @@ when this work starts.
 
 ---
 
-## 3. `rootfs.ext2` metadata reproducibility
+## 3. `build-manifest.txt` does not record `source_date_epoch`
+
+**Status:** deferred. Worked around correctly; the manifest gap itself remains.
+
+`scripts/build/05-final-build.sh` writes `build-manifest.txt` with `built_at`,
+every component commit and every artifact hash — but never the reproducibility
+epoch, even though `build.sh` computes it, exports it, refuses to build without
+it, and prints it.
+
+This was found when the build launcher's attestation read the epoch with
+`grep '^source_date_epoch='` and silently wrote a blank: through `grep`, a
+missing key and an empty value are indistinguishable, so the attestation
+recorded nothing while still claiming to be complete.
+
+**Already fixed, in the launcher:** the attestation now derives the epoch from
+the committer date of the firmware commit being built — the same derivation
+`build.sh` uses, from the same commit, so it is authoritative by construction
+rather than dependent on a key that does not exist. The attestation is now also
+withheld outright if the epoch (or any other promised field) is blank, because
+an attestation that is present but hollow reads as evidence.
+
+**Still worth doing:** have stage 05 record `source_date_epoch` in the manifest
+directly, so the manifest is self-describing and any future consumer can read
+the epoch from the artifact set without re-deriving it from git.
+
+**Why deferred:** `build-manifest.txt` is shipped in the image and is an input
+to `06-verify.sh`'s assertions. Changing its content in the same cycle that
+freezes a release candidate would mean qualifying a manifest shape no previous
+build produced. The launcher-side derivation is contained and changes no build
+output at all.
+
+---
+
+## 4. `rootfs.ext2` metadata reproducibility
 
 **Status:** pre-existing, documented follow-up. Unchanged by the current cycle.
 

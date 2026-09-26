@@ -250,9 +250,29 @@ if [ "$RC" -eq 0 ] && [ "$CANON_DIRTY" -eq 0 ] \
   A_X=$(sha256sum "$ART/xImage" 2>/dev/null | cut -d' ' -f1)
   A_R=$(sha256sum "$ART/rootfs.squashfs" 2>/dev/null | cut -d' ' -f1)
   M_X=$(mget xImage_sha256); M_R=$(mget rootfs_squashfs_sha256); M_C=$(mget git_commit_main)
+
+  # SOURCE_DATE_EPOCH is derived from the COMMIT, not read from the manifest.
+  # The first version of this read it with `mget source_date_epoch` and wrote a
+  # blank, because build-manifest.txt has no such key - it records built_at,
+  # every component commit and every artifact hash, but never the epoch. A
+  # missing key and an empty value are indistinguishable through grep, so the
+  # attestation silently recorded nothing and still claimed to be complete.
+  #
+  # build.sh derives the epoch as the committer date of the firmware commit
+  # being built, and refuses to build without it. Deriving it the same way here,
+  # from the same commit, is authoritative by construction rather than dependent
+  # on a manifest key that does not exist. Read from $WORK, which is the clone
+  # that was actually built, not from the canonical checkout.
+  A_EPOCH=$(git -C "$WORK" show -s --format=%ct "$EXPECT" 2>/dev/null)
+  case "${A_EPOCH:-}" in ''|*[!0-9]*) A_EPOCH="" ;; esac
+
   # The bytes, the build's own manifest and the requested identity must all
-  # agree. Any disagreement means no attestation - never a downgraded one.
-  if [ -n "$A_X" ] && [ -n "$A_R" ] && [ "$A_X" = "$M_X" ] && [ "$A_R" = "$M_R" ] && [ "$M_C" = "$EXPECT" ]; then
+  # agree, and every field the attestation promises must actually have a value.
+  # Any disagreement, or any blank, means no attestation - never a downgraded
+  # one. An attestation that is present but hollow is worse than none: it reads
+  # as evidence.
+  if [ -n "$A_X" ] && [ -n "$A_R" ] && [ -n "$A_EPOCH" ] \
+     && [ "$A_X" = "$M_X" ] && [ "$A_R" = "$M_R" ] && [ "$M_C" = "$EXPECT" ]; then
     {
       printf 'BUILD_VERIFIED=YES\n'
       printf 'SOURCE_HEAD=%s\n' "$EXPECT"
@@ -263,12 +283,14 @@ if [ "$RC" -eq 0 ] && [ "$CANON_DIRTY" -eq 0 ] \
       printf 'ROOTFS_SQUASHFS_SHA256=%s\n' "$A_R"
       printf 'ROOTFS_SQUASHFS_SIZE=%s\n' "$(stat -c %s "$ART/rootfs.squashfs")"
       printf 'BUILDER_DIGEST=%s\n' "$(mget build_image_digest)"
-      printf 'SOURCE_DATE_EPOCH=%s\n' "$(mget source_date_epoch)"
+      printf 'SOURCE_DATE_EPOCH=%s\n' "$A_EPOCH"
       printf 'ATTESTED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "$ATT"
     printf 'BUILD_ATTESTATION=WRITTEN\nBUILD_ATTESTATION_PATH=%s\n' "$ATT"
   else
-    printf 'BUILD_ATTESTATION=WITHHELD\nREASON: artifact bytes, build manifest and requested identity do not all agree\n' >&2
+    printf 'BUILD_ATTESTATION=WITHHELD\nREASON: artifact bytes, build manifest, requested identity and derived epoch do not all agree or are not all present\n' >&2
+    printf '  bytes:   xImage=%s rootfs=%s\n  manifest:xImage=%s rootfs=%s commit=%s\n  derived: epoch=%s expected commit=%s\n' \
+      "$A_X" "$A_R" "$M_X" "$M_R" "$M_C" "${A_EPOCH:-<empty>}" "$EXPECT" >&2
   fi
 else
   printf 'BUILD_ATTESTATION=WITHHELD\nREASON: build did not succeed cleanly (rc=%s canonical_dirty=%s)\n' "$RC" "$CANON_DIRTY" >&2
