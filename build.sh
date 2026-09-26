@@ -49,6 +49,79 @@ MANIFEST="$SCRIPT_DIR/manifests/dependencies.conf"
 : "${BUILD_IMAGE_DIGEST:?FATAL: BUILD_IMAGE_DIGEST not set in $MANIFEST}"
 IMAGE_REF="${BUILD_IMAGE_REPO}@${BUILD_IMAGE_DIGEST}"
 
+# --- BUILD MODE: dev by default, release when it matters -------------------
+# Two modes, and the DEFAULT IS THE SAFE-TO-BE-SLOW ONE only in the sense that
+# release never silently inherits a dev shortcut:
+#
+#   dev      (default)  ./build.sh            - reuse what is provably safe to
+#                       reuse so that edit -> rebuild -> test is not a
+#                       from-scratch build every time
+#   release  ./build.sh --release             - fresh output, ccache OFF,
+#                       exact pins. What a candidate/qualification build runs.
+#
+# RELEASE IS STICKY AND CANNOT BE DOWNGRADED. It is entered by --release, by
+# NEBULAOS_RELEASE_BUILD=1, or by NEBULAOS_CANDIDATE_BUILD=1 - the last of
+# these is what the privileged build launcher already sets, so every existing
+# candidate build becomes release-grade without the launcher asking for it.
+# That direction is the important one: a forgotten flag must never turn a
+# qualification build into an accelerated one.
+NEBULAOS_BUILD_MODE=dev
+for arg in "$@"; do
+	case "$arg" in
+		--release) NEBULAOS_BUILD_MODE=release ;;
+		--dev)     NEBULAOS_BUILD_MODE=dev ;;
+		*) echo "FATAL: unknown option '$arg'. build.sh accepts --release or --dev." >&2; exit 1 ;;
+	esac
+done
+if [ "${NEBULAOS_CANDIDATE_BUILD:-}" = "1" ] || [ "${NEBULAOS_RELEASE_BUILD:-}" = "1" ]; then
+	NEBULAOS_BUILD_MODE=release
+fi
+export NEBULAOS_BUILD_MODE
+echo "== build.sh: NEBULAOS_BUILD_MODE=$NEBULAOS_BUILD_MODE =="
+
+# --- persistent download cache (BOTH modes) --------------------------------
+# Shared by dev and release on purpose. A downloaded tarball is not build
+# output: 00-fetch-vendor-sources.sh resolves every source by an exact pin and
+# Buildroot verifies each archive against its own hash file before using it, so
+# a cache hit is indistinguishable from a fresh fetch except in wall time.
+# Reusing downloads therefore costs nothing in reproducibility while removing
+# the single largest fixed cost of a from-scratch build.
+#
+# It is NEVER treated as generated output: nothing here writes build products
+# into it, and the release path's "fresh output" rule does not extend to it.
+NEBULAOS_DL_CACHE=${NEBULAOS_DL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/nebulaos/buildroot-dl}
+if mkdir -p "$NEBULAOS_DL_CACHE" 2>/dev/null; then
+	if [ -z "$(ls -A "$NEBULAOS_DL_CACHE" 2>/dev/null)" ]; then
+		NEBULAOS_DL_CACHE_WAS_EMPTY=1
+	else
+		NEBULAOS_DL_CACHE_WAS_EMPTY=0
+	fi
+	echo "== build.sh: download cache $NEBULAOS_DL_CACHE (was_empty=$NEBULAOS_DL_CACHE_WAS_EMPTY) =="
+else
+	echo "== build.sh: WARNING: cannot create download cache $NEBULAOS_DL_CACHE - continuing without it ==" >&2
+	NEBULAOS_DL_CACHE=""
+	NEBULAOS_DL_CACHE_WAS_EMPTY=1
+fi
+
+# --- compiler ccache (DEV ONLY) --------------------------------------------
+# Hard rule: OFF for release. Qualification must not depend on the correctness
+# of a compiler cache. This is not a tunable - there is no flag that turns it
+# on in release mode, because "prove these bytes are reproducible" and "trust a
+# cache to have returned the right object file" are not compatible claims.
+NEBULAOS_CCACHE_DIR=${NEBULAOS_CCACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/nebulaos/ccache}
+NEBULAOS_CCACHE_MAXSIZE=${NEBULAOS_CCACHE_MAXSIZE:-8G}
+NEBULAOS_CCACHE=0
+if [ "$NEBULAOS_BUILD_MODE" = dev ]; then
+	if mkdir -p "$NEBULAOS_CCACHE_DIR" 2>/dev/null; then
+		NEBULAOS_CCACHE=1
+		echo "== build.sh: ccache ENABLED (dev) $NEBULAOS_CCACHE_DIR max=$NEBULAOS_CCACHE_MAXSIZE =="
+	else
+		echo "== build.sh: WARNING: cannot create ccache dir $NEBULAOS_CCACHE_DIR - building without ccache ==" >&2
+	fi
+else
+	echo "== build.sh: ccache DISABLED (release/candidate build) =="
+fi
+
 ENGINE=""
 for candidate in docker podman; do
 	command -v "$candidate" >/dev/null 2>&1 && { ENGINE="$candidate"; break; }
@@ -187,6 +260,23 @@ if [ -n "${NEBULAOS_REQUIRE_CLEAN_TREE:-}" ]; then
 fi
 if [ "${NEBULAOS_CANDIDATE_BUILD:-}" = "1" ]; then
 	set -- "$@" -e "NEBULAOS_CANDIDATE_BUILD=1"
+fi
+# Mode is forwarded so the stages can report it; the caches are forwarded as a
+# mount plus the env var that names its CONTAINER-INTERNAL path. The internal
+# path is fixed and independent of where the cache lives on the host, for the
+# same reason the checkout is mounted at a fixed internal path: a host path
+# that varies per machine must not reach anything that might embed it.
+set -- "$@" -e "NEBULAOS_BUILD_MODE=$NEBULAOS_BUILD_MODE"
+if [ -n "$NEBULAOS_DL_CACHE" ]; then
+	set -- "$@" -v "$NEBULAOS_DL_CACHE:/nebulaos-cache/dl" \
+		-e "BR2_DL_DIR=/nebulaos-cache/dl" \
+		-e "NEBULAOS_DL_CACHE_WAS_EMPTY=$NEBULAOS_DL_CACHE_WAS_EMPTY"
+fi
+if [ "$NEBULAOS_CCACHE" = "1" ]; then
+	set -- "$@" -v "$NEBULAOS_CCACHE_DIR:/nebulaos-cache/ccache" \
+		-e "CCACHE_DIR=/nebulaos-cache/ccache" \
+		-e "CCACHE_MAXSIZE=$NEBULAOS_CCACHE_MAXSIZE" \
+		-e "NEBULAOS_CCACHE=1"
 fi
 if [ -n "$HOST_GIT_COMMON_DIR" ]; then
 	set -- "$@" -v "$HOST_GIT_COMMON_DIR:$HOST_GIT_COMMON_DIR:ro"
