@@ -37,6 +37,44 @@ SENT=$(printf '%s\n' "$GATE" | grep -E '^LAUNCH_SENTINELS_OK=' | tail -1)
 
 ARCH=$("$ROOT/tools/verify-architecture.sh" --quick 2>&1 | grep -E '^(ARCHITECTURE_INVARIANTS_VALID|INVARIANTS_(PASS|FAIL|DOCUMENTED_ONLY))=' | tr '\n' ' ')
 
+# --- build / qualification status, DERIVED ---------------------------------
+# These two lines used to be hard-coded NO. A constant is not a status: it kept
+# reporting NO after a build had in fact been verified, and would have kept
+# reporting NO forever, which trains a reader to ignore the line entirely.
+#
+# CURRENT_HEAD_BUILD_VERIFIED is now answered by the build launcher's own
+# attestation (.nebulaos-build-verified, written only on a clean successful
+# build) for the CURRENT firmware HEAD. A build of some earlier generation is
+# deliberately not evidence about this one - the whole point of the field is to
+# say whether THIS source has been built.
+#
+# Bounded on purpose: a plain glob over one directory, no find, no du, no
+# network. This runs at session start and must stay cheap.
+FW_HEAD=$(head_of NebulaOS-firmware)
+BUILD_VERIFIED=NO
+BUILD_VERIFIED_DETAIL=""
+if [ "$FW_HEAD" != UNRESOLVED ]; then
+  for att in /var/tmp/nebulaos-build/"$FW_HEAD"/*/.nebulaos-build-verified; do
+    [ -f "$att" ] || continue
+    v=$(grep -m1 '^BUILD_VERIFIED=' "$att" 2>/dev/null | cut -d= -f2-)
+    h=$(grep -m1 '^SOURCE_HEAD='    "$att" 2>/dev/null | cut -d= -f2-)
+    m=$(grep -m1 '^BUILD_MODE='     "$att" 2>/dev/null | cut -d= -f2-)
+    if [ "$v" = YES ] && [ "$h" = "$FW_HEAD" ]; then
+      BUILD_VERIFIED=YES
+      BUILD_VERIFIED_DETAIL=" (mode=$m)"
+      break
+    fi
+  done
+fi
+
+# HARDWARE_QUALIFIED is likewise derived, from a qualification record for this
+# exact source generation. No record for THIS head means NO - never a remembered
+# YES from an earlier one.
+HW_QUALIFIED=NO
+[ "$FW_HEAD" != UNRESOLVED ] \
+  && [ -f "$ROOT/evidence/hardware-qualification/$FW_HEAD/QUALIFIED" ] \
+  && HW_QUALIFIED=YES
+
 CAND=$ROOT/NebulaOS-firmware/scripts/build/overlay/opt/nebulaos/mcu-candidates/candidate-001.bin
 MCUPROV=UNRESOLVED
 if [ -f "$CAND" ]; then
@@ -61,8 +99,8 @@ kernel          HEAD=$(head_of NebulaOS-kernel) pin=$(man KERNEL_PIN)
 guppyscreen     HEAD=$(head_of NebulaOS-guppyscreen) pin=$(man GUPPYSCREEN_PIN)
 mcu             HEAD=$(head_of NebulaOS-klipper-mcu) provenance=$MCUPROV
 
-CURRENT_HEAD_BUILD_VERIFIED=NO
-HARDWARE_QUALIFIED=NO
+CURRENT_HEAD_BUILD_VERIFIED=$BUILD_VERIFIED$BUILD_VERIFIED_DETAIL
+HARDWARE_QUALIFIED=$HW_QUALIFIED
 
 Rules: architecture is not memory - derive it from the identity gate,
 CURRENT_STATE.md, the firmware manifest/source, and tools/verify-architecture.sh.

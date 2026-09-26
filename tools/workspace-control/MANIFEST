@@ -30,3 +30,4 @@ scripts/verify-workspace-identity.sh    tools/verify-workspace-identity.sh      
 scripts/verify-architecture.sh          tools/verify-architecture.sh            755
 scripts/sync-workspace-control.sh       tools/sync-workspace-control.sh         755
 scripts/run-nebulaos-build.sh           tools/run-nebulaos-build.sh             755
+scripts/run-nebulaos-hardware.sh        tools/run-nebulaos-hardware.sh          755

@@ -191,8 +191,27 @@ except Exception: toks=[]
 
 ENGINES=("dock"+"er","pod"+"man")
 PREFIX=("sudo","env","nohup","time","stdbuf","nice","exec","command","builtin")
-DEVICE=("ssh","scp","sftp","ping","ping6","telnet","nc","ncat","socat",
-        "picocom","minicom","cu","stty","avrdude","dfu-util","esptool.py","esptool")
+# Device contact, refused to the hardware agent outright. Three families, and
+# the second and third were missing until an adversarial test caught them:
+#   1. remote shell / copy        ssh scp sftp rsync lftp ftp tftp sshpass
+#   2. HTTP and raw sockets       curl wget nc socat websocat ...  - the printer
+#      speaks Moonraker over HTTP on 7125, so an HTTP client IS device contact
+#      here, not a generic fetch tool
+#   3. LAN discovery and serial   nmap arp-scan arping fping, and the serial
+#      terminals plus dd, which is the partition-writing primitive this agent
+#      must never use directly (flash-spare-slot.sh owns every write)
+#
+# This list is defence in depth, not the only barrier. The agent runs sandboxed
+# for everything except the launcher, and the sandbox denies network egress by
+# policy, so a hand-rolled socket in an interpreter does not reach the printer
+# either. What this list adds is a clear, early refusal with a reason, and
+# coverage of the unsandboxed-attempt case.
+DEVICE=("ssh","scp","sftp","ping","ping6","telnet","nc","ncat","netcat","socat",
+        "picocom","minicom","cu","stty","screen","tio","dd",
+        "avrdude","dfu-util","esptool.py","esptool",
+        "curl","wget","httpie","xh","aria2c","websocat","wscat",
+        "rsync","lftp","ftp","tftp","sshpass","ssh-keyscan",
+        "nmap","arp-scan","arping","fping","traceroute","tracepath","iperf","iperf3")
 
 SEGSPLIT="[;|&\n\r()"+chr(96)+"]"
 def command_words(text):
@@ -289,37 +308,86 @@ def content_is_canonical(path):
 
 # --- 2. the sandbox escape -------------------------------------------------
 if sandbox_off:
-    if agent!=BUILD_AGENT or not is_build:
+    if not ((agent==BUILD_AGENT and is_build) or (agent==HW_AGENT and is_hw)):
         out("Unsandboxed execution is refused for "+(agent or "the main agent")+" running this\n"
             "command.\n\n"
             "Leaving the sandbox restores this user full host privilege, so it is granted to\n"
-            "exactly one caller running exactly one file:\n\n"
-            "  nebulaos-build   tools/run-nebulaos-build.sh <40-hex sha>\n\n"
+            "exactly two caller/file pairs, each running exactly one file:\n\n"
+            "  nebulaos-build      tools/run-nebulaos-build.sh <40-hex sha>\n"
+            "  nebulaos-hardware   tools/run-nebulaos-hardware.sh [--host <private-ipv4>]\n"
+            "                      <subcommand> <40-hex sha> <64-hex sha256> <64-hex sha256>\n\n"
             "The control-layer sync is NOT in that set. Installing the authority layer\n"
             "requires a human running it out of band - that is the control, not a defect.\n\n"
             "Resolved to: "+str(target))
     if chained or wrapped:
         out("Unsandboxed execution must be a lone invocation of the approved launcher - no\n"
             "chaining, redirection, substitution, expansion, or shell wrapper. Refused.")
-    # Exactly three accepted argument shapes. The two flags are SEMANTIC MODES
-    # that the launcher maps internally, not pass-through options: --candidate
-    # sets NEBULAOS_CANDIDATE_BUILD=1 and nothing else. There is no general
-    # VAR=value facility and no route to the build.sh options, so the build
-    # agent gains one mode, not an environment.
-    #
-    #   <40-hex sha>
-    #   --candidate <40-hex sha>
-    #   --qualified <40-hex sha>
+
     def is_sha(x): return len(x)==40 and all(c in "0123456789abcdef" for c in x)
-    ok_args = (len(args)==1 and is_sha(args[0])) or \
-              (len(args)==2 and args[0] in ("--candidate","--qualified") and is_sha(args[1]))
-    if not ok_args:
-        out("The approved build launcher accepts exactly one of:\n\n"
-            "  <40-hex sha>\n"
-            "  --candidate <40-hex sha>\n"
-            "  --qualified <40-hex sha>\n\n"
-            "and forwards no build options. Refused - a qualification build states its\n"
-            "source identity and its mode up front.")
+    def is_sha256(x): return len(x)==64 and all(c in "0123456789abcdef" for c in x)
+
+    if is_build:
+        # Exactly three accepted argument shapes. The two flags are SEMANTIC MODES
+        # that the launcher maps internally, not pass-through options: --candidate
+        # sets NEBULAOS_CANDIDATE_BUILD=1 and nothing else. There is no general
+        # VAR=value facility and no route to the build.sh options, so the build
+        # agent gains one mode, not an environment.
+        #
+        #   <40-hex sha>
+        #   --candidate <40-hex sha>
+        #   --qualified <40-hex sha>
+        ok_args = (len(args)==1 and is_sha(args[0])) or \
+                  (len(args)==2 and args[0] in ("--candidate","--qualified") and is_sha(args[1]))
+        if not ok_args:
+            out("The approved build launcher accepts exactly one of:\n\n"
+                "  <40-hex sha>\n"
+                "  --candidate <40-hex sha>\n"
+                "  --qualified <40-hex sha>\n\n"
+                "and forwards no build options. Refused - a qualification build states its\n"
+                "source identity and its mode up front.")
+    else:
+        # The hardware launcher. Its grammar is validated HERE as well as inside
+        # the launcher, and deliberately NOT merged with the build grammar above:
+        # the two are genuinely different, and a shared validator is exactly where
+        # a future mistake would hide.
+        #
+        # There is no target argument other than --host, and --host is constrained
+        # to a literal RFC1918 dotted quad. So ARBITRARY_TARGET_ALLOWED=NO holds at
+        # the hook, not merely because the launcher is well behaved: a hostname
+        # (which would mean DNS, and a name that resolves anywhere), a public
+        # address, a CIDR or a list never reaches the launcher at all.
+        #
+        # Note what is NOT relaxed: rule 4 above still refuses ssh/scp/ping/nc/...
+        # to this agent. The launcher is reachable because its command word is
+        # run-nebulaos-hardware.sh, not because the device set was weakened.
+        #
+        #   [--host <private-ipv4>] <subcommand> <40-hex sha> <64-hex sha256> <64-hex sha256>
+        a=list(args)
+        if len(a)>=2 and a[0]=="--host":
+            host=a[1]; a=a[2:]
+            q=host.split(".")
+            okh = len(q)==4 and all(x.isdigit() and len(x)<=3 and 0<=int(x)<=255 for x in q)
+            if okh:
+                o1,o2=int(q[0]),int(q[1])
+                okh = (o1==10) or (o1==192 and o2==168) or (o1==172 and 16<=o2<=31)
+            if not okh:
+                out("The --host option of the hardware launcher must be a literal RFC1918\n"
+                    "private IPv4 address (10/8, 172.16-31/12, 192.168/16) - never a hostname,\n"
+                    "a public address, a range or a list.\n\n"
+                    "Refused: "+host)
+        elif a and a[0].startswith("--"):
+            out("The hardware launcher accepts no option but --host. Refused: "+a[0])
+        HW_SUBCMDS=("inventory","preflight","flash","marker","reboot","verify")
+        ok_args = (len(a)==4 and a[0] in HW_SUBCMDS
+                   and is_sha(a[1]) and is_sha256(a[2]) and is_sha256(a[3]))
+        if not ok_args:
+            out("The hardware qualification launcher accepts exactly:\n\n"
+                "  [--host <private-ipv4>] <subcommand> <40-hex firmware sha>\n"
+                "      <64-hex xImage sha256> <64-hex rootfs sha256>\n\n"
+                "  subcommand: "+" ".join(HW_SUBCMDS)+"\n\n"
+                "Refused - a hardware session states its target release and BOTH artifact\n"
+                "hashes up front, or it is not a qualification session. Motion, heating,\n"
+                "calibration and MCU flashing belong to Part 2 and have no subcommand here.")
     ok,why=content_is_canonical(target)
     if not ok:
         out("Unsandboxed execution is bound to the launcher CONTENT, not to its path.\n\n"
