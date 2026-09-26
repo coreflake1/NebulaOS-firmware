@@ -110,8 +110,17 @@ esac
 [ "${#EXPECT}" -eq 40 ] || die "expected-firmware-sha must be a full 40-character SHA (got ${#EXPECT})"
 
 # --- the canonical workspace must be sound before it is used as an input ----
-"$ROOT/tools/verify-workspace-identity.sh" --hook >/dev/null 2>&1 \
-  || die "workspace identity gate failed - run tools/verify-workspace-identity.sh and resolve before building"
+# FULL ONLINE gate here, deliberately NOT the fast --hook gate the PreToolUse
+# path uses. The fast gate is offline by construction: it cannot tell a current
+# checkout from a stale source generation that merely looks self-consistent,
+# because it never resolves the canonical remote. Routine per-tool-call gating
+# is local and cheap; a release boundary is the opposite trade and is meant to
+# be. A build whose source identity was never compared against the canonical
+# remote is not a qualification build.
+"$ROOT/tools/verify-workspace-identity.sh" --full >/dev/null 2>&1 \
+  || die "full online workspace identity gate failed - run tools/verify-workspace-identity.sh and resolve before building.
+       This boundary requires the canonical remotes to be reachable. An unresolved remote is an
+       UNVERIFIED source generation, not a pass; it is refused rather than downgraded to offline."
 
 DIRTY=0
 for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
@@ -169,10 +178,15 @@ printf 'RUN_NEBULAOS_BUILD=STARTING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_
 # --- delegate to the official pipeline, in the disposable clone -------------
 # No stage is reimplemented here. build.sh owns the container, the digest pin
 # and every stage. --candidate maps to exactly one variable and nothing else.
+# --release is passed EXPLICITLY in both branches. build.sh defaults to dev
+# mode, and a qualification build must never acquire dev acceleration by
+# inheriting a default. --candidate additionally sets NEBULAOS_CANDIDATE_BUILD=1,
+# which build.sh also treats as release-grade on its own, so the two guards are
+# independent: forgetting either one still yields a release-grade build.
 if [ "$MODE" = candidate ]; then
-  ( cd "$WORK" && NEBULAOS_CANDIDATE_BUILD=1 ./build.sh )
+  ( cd "$WORK" && NEBULAOS_CANDIDATE_BUILD=1 ./build.sh --release )
 else
-  ( cd "$WORK" && ./build.sh )
+  ( cd "$WORK" && ./build.sh --release )
 fi
 RC=$?
 
@@ -211,6 +225,54 @@ RETAINED=$(find "$BUILD_BASE" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -
 DISK=$(du -sh "$BUILD_BASE" 2>/dev/null | cut -f1)
 printf 'BUILD_WORKSPACES_PRUNED=%s\nBUILD_WORKSPACES_RETAINED=%s\nBUILD_WORKSPACE_DISK=%s\n' \
   "$PRUNED" "$RETAINED" "${DISK:-unknown}"
+
+# --- build attestation -----------------------------------------------------
+# Emitted ONLY when the build actually succeeded AND kept its isolation promise.
+# Before this existed there was no machine-readable answer to "has THIS source
+# generation been built and verified?", so the session banner hard-coded
+# CURRENT_HEAD_BUILD_VERIFIED=NO and the hardware launcher had nothing to gate
+# on but the artifact hashes - which prove the bytes are consistent, not that a
+# build ever passed.
+#
+# It is written INSIDE the run workspace, not into the canonical repository: an
+# attestation is a property of one build run, and writing it into the canonical
+# tree would dirty the very workspace this launcher requires to be clean.
+#
+# Deliberately not written on failure, and deliberately not written when the
+# canonical workspace was dirtied - a build that broke isolation has not earned
+# an attestation even if the compiler was happy.
+ART="$WORK/artifacts/buildroot-halley5-v30-image"
+ATT="$WORK/.nebulaos-build-verified"
+rm -f "$ATT" 2>/dev/null
+if [ "$RC" -eq 0 ] && [ "$CANON_DIRTY" -eq 0 ] \
+   && [ -f "$ART/xImage" ] && [ -f "$ART/rootfs.squashfs" ] && [ -f "$ART/build-manifest.txt" ]; then
+  mget(){ grep -m1 "^$1=" "$ART/build-manifest.txt" 2>/dev/null | cut -d= -f2-; }
+  A_X=$(sha256sum "$ART/xImage" 2>/dev/null | cut -d' ' -f1)
+  A_R=$(sha256sum "$ART/rootfs.squashfs" 2>/dev/null | cut -d' ' -f1)
+  M_X=$(mget xImage_sha256); M_R=$(mget rootfs_squashfs_sha256); M_C=$(mget git_commit_main)
+  # The bytes, the build's own manifest and the requested identity must all
+  # agree. Any disagreement means no attestation - never a downgraded one.
+  if [ -n "$A_X" ] && [ -n "$A_R" ] && [ "$A_X" = "$M_X" ] && [ "$A_R" = "$M_R" ] && [ "$M_C" = "$EXPECT" ]; then
+    {
+      printf 'BUILD_VERIFIED=YES\n'
+      printf 'SOURCE_HEAD=%s\n' "$EXPECT"
+      printf 'BUILD_MODE=%s\n' "$MODE"
+      printf 'BUILD_RUN=%s\n' "$WORK"
+      printf 'XIMAGE_SHA256=%s\n' "$A_X"
+      printf 'XIMAGE_SIZE=%s\n' "$(stat -c %s "$ART/xImage")"
+      printf 'ROOTFS_SQUASHFS_SHA256=%s\n' "$A_R"
+      printf 'ROOTFS_SQUASHFS_SIZE=%s\n' "$(stat -c %s "$ART/rootfs.squashfs")"
+      printf 'BUILDER_DIGEST=%s\n' "$(mget build_image_digest)"
+      printf 'SOURCE_DATE_EPOCH=%s\n' "$(mget source_date_epoch)"
+      printf 'ATTESTED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$ATT"
+    printf 'BUILD_ATTESTATION=WRITTEN\nBUILD_ATTESTATION_PATH=%s\n' "$ATT"
+  else
+    printf 'BUILD_ATTESTATION=WITHHELD\nREASON: artifact bytes, build manifest and requested identity do not all agree\n' >&2
+  fi
+else
+  printf 'BUILD_ATTESTATION=WITHHELD\nREASON: build did not succeed cleanly (rc=%s canonical_dirty=%s)\n' "$RC" "$CANON_DIRTY" >&2
+fi
 
 printf 'RUN_NEBULAOS_BUILD=FINISHED\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_WORKSPACE=%s\nBUILD_EXIT_CODE=%s\nCANONICAL_ACTIVE_REPOS_CLEAN=%s\nFINISHED_AT=%s\n' \
   "$EXPECT" "$MODE" "$WORK" "$RC" "$([ "$CANON_DIRTY" -eq 0 ] && echo YES || echo NO)" \
