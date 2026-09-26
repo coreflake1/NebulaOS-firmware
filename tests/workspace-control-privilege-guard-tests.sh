@@ -388,6 +388,108 @@ run_case ctl DENY nebula-architect 0 "architect may not write"     "rm -rf $ROOT
 run_case ctl DENY ""               0 "archive stays out of bounds" "ls $ARCHIVE" "archived workspace is out of bounds"
 echo
 
+# --- the hardware launcher's real grammar ----------------------------------
+# These cases date from when the launcher was a stub whose only argument was
+# --status. It now has a real grammar, and the grammar is enforced in TWO
+# places: here at the hook, and again inside the launcher. That duplication is
+# deliberate. The hook decides whether the process starts at all with host
+# privilege; the launcher cannot, because by the time it runs the decision has
+# been made. A grammar checked only inside the launcher would mean the sandbox
+# escape happens first and is validated second.
+X64=ceb91ed298c206e04a74e8a95c16dd4f1c8ee05b664031ed45756efe80e89167
+R64=9a06217c1d3f56036f7cf9008e85faa2dcbb2ce2f0a48a5895d1fb8b5b85c397
+OK_ARGS="inventory $SHA $X64 $R64"
+
+REASON="hardware qualification launcher accepts exactly"
+echo "[ hardware launcher argument grammar - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "no subcommand"            "$HWRUN $SHA $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "unknown subcommand"       "$HWRUN teleport $SHA $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "missing rootfs hash"      "$HWRUN inventory $SHA $X64"
+run_case hw DENY nebulaos-hardware 1 "extra trailing argument"  "$HWRUN inventory $SHA $X64 $R64 extra"
+run_case hw DENY nebulaos-hardware 1 "short firmware sha"       "$HWRUN inventory $BADSHA $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "non-hex firmware sha"     "$HWRUN inventory ${SHA%??}zz $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "truncated ximage sha256"  "$HWRUN inventory $SHA ${X64%??} $R64"
+run_case hw DENY nebulaos-hardware 1 "firmware sha where sha256 belongs" "$HWRUN inventory $SHA $SHA $R64"
+echo
+
+# Part 2 is absent by construction, not by discouragement. If any of these ever
+# starts being ALLOWed, a motion/heat/MCU capability has been added to a Part 1
+# launcher and this suite is the thing that should notice.
+echo "[ Part 2 capabilities must not exist as subcommands - must DENY ]"
+for sub in home move heat extrude calibrate print mcu-flash erase-mcu bed-mesh; do
+  run_case hw DENY nebulaos-hardware 1 "part-2 subcommand '$sub'" "$HWRUN $sub $SHA $X64 $R64"
+done
+echo
+
+REASON="must be a literal RFC1918"
+echo "[ target constraint - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "public IPv4 target"   "$HWRUN --host 8.8.8.8 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "hostname target"      "$HWRUN --host printer.local $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "CIDR range target"    "$HWRUN --host 192.168.0.0/24 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "octet out of range"   "$HWRUN --host 192.168.0.999 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "loopback is not RFC1918" "$HWRUN --host 127.0.0.1 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "link-local is not RFC1918" "$HWRUN --host 169.254.1.1 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "carrier-grade NAT is not RFC1918" "$HWRUN --host 100.64.0.1 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "172.15 is below the private block" "$HWRUN --host 172.15.0.1 $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "172.32 is above the private block" "$HWRUN --host 172.32.0.1 $OK_ARGS"
+echo
+
+REASON="accepts no option but --host"
+echo "[ no option but --host - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "invented --force"     "$HWRUN --force $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "invented --no-verify" "$HWRUN --no-verify $OK_ARGS"
+run_case hw DENY nebulaos-hardware 1 "invented --stock-fallback" "$HWRUN --stock-fallback $OK_ARGS"
+echo
+
+REASON=""
+echo "[ more device-contact commands - must DENY ]"
+for c in "sftp root@192.168.0.98" "nc 192.168.0.98 22" "socat - TCP:192.168.0.98:22" \
+         "telnet 192.168.0.98" "minicom -D /dev/ttyUSB0" "screen /dev/ttyACM0 250000" \
+         "rsync -a fw.bin root@192.168.0.98:/tmp/" "nmap -p22 192.168.0.0/24" \
+         "arp-scan --localnet" "curl http://192.168.0.98:7125/printer/info" \
+         "wget http://192.168.0.98/x" "dd if=x.img of=/dev/ttyUSB0"; do
+  run_case hw DENY nebulaos-hardware 0 "device command: ${c%% *}" "$c"
+done
+echo
+
+echo "[ launcher may not be smuggled through a wrapper - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "chained after a separator" "$HWRUN $OK_ARGS; id"
+run_case hw DENY nebulaos-hardware 1 "command substitution"      "$HWRUN inventory \$(cat /etc/hostname) $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "output redirected"         "$HWRUN $OK_ARGS > /tmp/out"
+run_case hw DENY nebulaos-hardware 1 "wrapped in sh -c"          "sh -c \"$HWRUN $OK_ARGS\""
+echo
+
+echo "[ hardware launcher content integrity - must DENY ]"
+# Beside the launcher, not in $TMPDIR, which is read-only under this sandbox -
+# the same reason the build content test above keeps its backup here.
+HWBACKUP=$ROOT/tools/.hw-launcher-content-test-backup.$$
+restore_hw() {
+  if [ -s "$HWBACKUP" ]; then cp "$HWBACKUP" "$HWRUN" 2>/dev/null; chmod 755 "$HWRUN" 2>/dev/null; fi
+  rm -f "$HWBACKUP" 2>/dev/null
+}
+trap restore_hw EXIT INT TERM
+cp "$HWRUN" "$HWBACKUP" || fatal "cannot back up the hardware launcher"
+printf '#!/usr/bin/env bash\nid\n' > "$HWRUN"
+chmod 755 "$HWRUN"
+run_case hw DENY nebulaos-hardware 1 "hardware launcher content replaced" "$HWRUN $OK_ARGS" "bound to the launcher CONTENT"
+restore_hw
+trap - EXIT INT TERM
+if cmp -s "$HWRUN" "$CANONDIR/run-nebulaos-hardware.sh"; then
+  echo "  PASS  OK     hardware launcher restored after the content test"; PASS=$((PASS+1))
+else
+  echo "  FAIL  hardware launcher NOT restored"; FAIL=$((FAIL+1))
+fi
+echo
+
+REASON=""
+echo "[ the sanctioned hardware pair - must ALLOW ]"
+# Requires the launcher to be TRACKED at firmware HEAD: content binding compares
+# the installed bytes against the canonical blob in git. While the launcher is
+# uncommitted this case correctly DENIES, which is the binding working.
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, unsandboxed launcher, valid grammar" "$HWRUN $OK_ARGS"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, explicit private host" "$HWRUN --host 192.168.0.98 $OK_ARGS"
+echo
+
 echo "TESTS_PASS=$PASS"
 echo "TESTS_FAIL=$FAIL"
 echo "BUILD_AGENT_PRIVILEGE_BYPASSES=$BUILD_BYPASS"
