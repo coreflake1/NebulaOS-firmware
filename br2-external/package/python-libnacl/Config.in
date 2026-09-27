@@ -1,0 +1,7 @@
+config BR2_PACKAGE_PYTHON_LIBNACL
+	bool "python-libnacl"
+	select BR2_PACKAGE_LIBSODIUM
+	help
+	  Moonraker API-key/JWT crypto (moonraker-requirements.txt: libnacl==2.1.0). A ctypes binding to libsodium, NOT the same as Buildroot's python-pynacl (a CFFI binding with a different module name); Moonraker imports libnacl specifically.
+
+	  https://pypi.org/project/libnacl/

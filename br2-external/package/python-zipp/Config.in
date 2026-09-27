@@ -1,0 +1,6 @@
+config BR2_PACKAGE_PYTHON_ZIPP
+	bool "python-zipp"
+	help
+	  Runtime dependency of python-importlib-metadata. Present in the current qualified image (zipp-3.20.2.dist-info); 06-verify.sh asserts its presence.
+
+	  https://pypi.org/project/zipp/

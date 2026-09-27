@@ -1,0 +1,7 @@
+config BR2_PACKAGE_PYTHON_LDAP3
+	bool "python-ldap3"
+	select BR2_PACKAGE_PYTHON_PYASN1
+	help
+	  Moonraker LDAP authentication source (moonraker-requirements.txt: ldap3==2.9.1).
+
+	  https://pypi.org/project/ldap3/
