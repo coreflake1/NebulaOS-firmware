@@ -1,0 +1,2 @@
+lib/modules/6.6.18-rt23/kernel/drivers/net/usb/ax88179_178a.ko
+lib/modules/6.6.18-rt23/kernel/drivers/net/usb/usbnet.ko

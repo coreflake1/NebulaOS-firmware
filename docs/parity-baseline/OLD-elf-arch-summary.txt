@@ -1,0 +1,9 @@
+    214 ELF 32-bit LSB pie executable, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, interpreter /lib/ld.so.1, for GNU/Linux 6.6.0, stripped
+    147 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, stripped
+      9 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, for GNU/Linux 6.6.0, stripped
+      8 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, not stripped
+      7 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (GNU/Linux), dynamically linked, stripped
+      5 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, with debug_info, not stripped
+      2 ELF 32-bit LSB executable, MIPS, MIPS32 version 1 (SYSV), statically linked, stripped
+      1 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, interpreter /lib/ld.so.1, for GNU/Linux 6.6.0, stripped
+      1 ELF 32-bit LSB shared object, MIPS, MIPS32 rel2 version 1 (SYSV), dynamically linked, for GNU/Linux 6.6.0, not stripped
