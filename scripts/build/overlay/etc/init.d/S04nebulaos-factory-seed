@@ -299,7 +299,7 @@ seed_mainsail() {
 # smoke test - so a bad or missing seed can never leave the printer
 # unusable. $1: seed archive filename under $SEEDS. $2: envdir. $3: python
 # import smoke-test expression (same ones already used below).
-# Persistent-venv compatibility helpers (venv_matches_platform,
+# Persistent-venv compatibility helpers (venv_is_usable,
 # recover_torn_venv, swap_venv_into_place) live in one shared file so that
 # S05nebulaos-activate applies the SAME predicate this script does.
 NEBULAOS_VENV_LIB=/usr/libexec/nebulaos-venv-lib.sh
@@ -334,7 +334,7 @@ setup_moonraker_env() {
 	envdir=/usr/data/nebulaos/envs/moonraker
 	moonraker_smoke="import tornado, numpy, streaming_form_data"
 	recover_torn_venv "$envdir" "$moonraker_smoke"
-	if venv_matches_platform "$envdir" "$moonraker_smoke"; then
+	if venv_is_usable "$envdir" "$moonraker_smoke"; then
 		log "moonraker venv already present and matches this image's python ($envdir) - skipping"
 		return 0
 	fi
@@ -379,7 +379,7 @@ setup_klipper_env() {
 	envdir=/usr/data/nebulaos/envs/klipper
 	klipper_smoke="import greenlet, cffi, jinja2, serial, can"
 	recover_torn_venv "$envdir" "$klipper_smoke"
-	if venv_matches_platform "$envdir" "$klipper_smoke"; then
+	if venv_is_usable "$envdir" "$klipper_smoke"; then
 		log "klipper venv already present and matches this image's python ($envdir) - skipping"
 		return 0
 	fi
@@ -458,8 +458,8 @@ start() {
 	# namespace is a state this device can genuinely be in.
 	if [ -e "$APPS/klipper/.git" ] && [ -e "$APPS/nebulaos-klipper-extensions/.git" ] \
 		&& [ -e "$APPS/moonraker/.git" ] && [ -e "$APPS/mainsail/index.html" ] \
-		&& venv_matches_platform /usr/data/nebulaos/envs/moonraker "import tornado, numpy, streaming_form_data" \
-		&& venv_matches_platform /usr/data/nebulaos/envs/klipper "import greenlet, cffi, jinja2, serial, can"; then
+		&& venv_is_usable /usr/data/nebulaos/envs/moonraker "import tornado, numpy, streaming_form_data" \
+		&& venv_is_usable /usr/data/nebulaos/envs/klipper "import greenlet, cffi, jinja2, serial, can"; then
 		log "all components already seeded - nothing to do"
 		return 0
 	fi

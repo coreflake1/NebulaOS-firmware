@@ -8,7 +8,7 @@
 # 02-configure-buildroot.sh documents at length for overlay files, where an
 # older generation sorted first and silently won.
 #
-# Defines: venv_matches_platform, recover_torn_venv, swap_venv_into_place.
+# Defines: venv_is_usable, recover_torn_venv, swap_venv_into_place.
 #
 # Callers may define log(); if they do not, a no-op stand-in is used so this
 # file is safe to source from anywhere.
@@ -17,7 +17,7 @@ command -v log >/dev/null 2>&1 || log() { echo "nebulaos-venv: $1"; }
 # NOTE ON VARIABLE NAMES: POSIX sh has no function-local scope, so every
 # helper below uses its OWN distinct prefix (_vmp_, _rtv_, _svp_). This is not
 # style. An earlier revision had all three using `_envdir`, so when
-# recover_torn_venv() called venv_matches_platform("$_envdir.old") the callee
+# recover_torn_venv() called venv_is_usable("$_envdir.old") the callee
 # overwrote the caller's `_envdir`, and the subsequent `mv "$_envdir.old"`
 # addressed "<env>.old.old" - silently failing to recover the one surviving
 # copy of a user's environment. Caught by
@@ -26,64 +26,61 @@ command -v log >/dev/null 2>&1 || log() { echo "nebulaos-venv: $1"; }
 
 # Buildroot 2025.02.18 / Python 3.12 migration (2026-09-27).
 #
-# Is this persistent venv usable by the interpreter THIS IMAGE ships?
+# Is this persistent venv actually USABLE?
 #
-# The old test was `[ -x "$envdir/bin/python3" ]`. That asks whether a file
-# exists, which is not the question. /usr/data/nebulaos/envs is PERSISTENT and
-# slot-independent; /usr/lib/python3.x and /usr/bin/python3.x are image-owned
-# and per-slot. So the interpreter a venv was built against can disappear
-# underneath it without the venv changing at all:
+# The old test was `[ -x "$envdir/bin/python3" ]`, which asks whether a file
+# exists. That is not the same question, and it is the reason a half-created
+# or torn environment was treated as finished: an interrupted provisioning run
+# can leave bin/python3 in place while the environment behind it is
+# incomplete, and the next boot would then skip provisioning entirely and hand
+# the broken env to Klipper or Moonraker.
 #
-#   forward   OTA from a 3.11 slot to a 3.12 slot
-#   backward  A/B ROLLBACK from a migrated 3.12 slot back to the 3.11 slot
+# This predicate requires the interpreter to exist, to be executable, to
+# actually RUN, and the component's own imports to resolve. That is what makes
+# provisioning idempotent (a finished env is detected as finished and left
+# alone) and interruption-safe (an unfinished one is detected and redone).
 #
-# Both directions matter and neither is special-cased here - the venv is
-# compared against the RUNNING image's interpreter, so a mismatch either way
-# is caught identically. Rollback is the safety mechanism; a migration that
-# only handled the upgrade direction would disarm it.
+# SCOPE NOTE - deliberately NOT a Python-version check.
 #
-# (If /usr/data/nebulaos/envs were ever made slot-scoped, this predicate
-# becomes a no-op and the failure would be silent. It is the persistence
-# asymmetry above that makes the whole design work.)
+# NebulaOS is unreleased and /usr/data/nebulaos is NebulaOS-owned; no deployed
+# device carries a Python 3.11 venv that this image has to migrate, and stock
+# firmware does not consume that path. So this release does not attempt
+# 3.11 -> 3.12 migration and does not try to keep a venv working across an A/B
+# pair with different interpreter minors.
 #
-# Returns 0 only if ALL of these hold:
-#   1. bin/python3 exists and is executable
-#   2. it actually RUNS (a dangling symlink is not executable, but a venv can
-#      also be torn in ways that only show up on exec)
-#   3. its major.minor equals the running image's /usr/bin/python3
-#   4. pyvenv.cfg is present and its recorded version agrees
-#   5. the component's own import smoke test passes
-venv_matches_platform() {
-	_vmp_dir="$1"; _vmp_smoke="${2:-}"
+# That WILL be needed at the first post-release Python ABI transition, because
+# the storage lifetimes genuinely differ:
+#
+#   /usr/lib/python3.x    image-owned   per-slot     changes on firmware update
+#   /usr/data/.../envs    persistent    slot-shared  survives update AND rollback
+#
+# A venv therefore outlives the interpreter it was built against, in both
+# directions. The future requirement is recorded in
+# docs/NEBULAOS_PLATFORM_APP_BOUNDARY.md; the hook for it is this function -
+# comparing the venv's major.minor against the running /usr/bin/python3 here
+# is sufficient, and the staging/swap/recovery machinery below already
+# provides the safe replacement path it would need.
+venv_is_usable() {
+	_viu_dir="$1"; _viu_smoke="${2:-}"
 
-	[ -d "$_vmp_dir" ] || return 1
-	[ -x "$_vmp_dir/bin/python3" ] || return 1
+	[ -d "$_viu_dir" ] || return 1
+	[ -x "$_viu_dir/bin/python3" ] || return 1
 
-	_vmp_venv_mm=$("$_vmp_dir/bin/python3" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
-	[ -n "$_vmp_venv_mm" ] || return 1
-
-	_vmp_sys_mm=$(/usr/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
-	[ -n "$_vmp_sys_mm" ] || return 1
-
-	[ "$_vmp_venv_mm" = "$_vmp_sys_mm" ] || {
-		log "venv $_vmp_dir targets python $_vmp_venv_mm but this image ships python $_vmp_sys_mm - rebuilding"
+	# A dangling symlink is not -x, but an env can also be torn in ways that
+	# only surface on exec - so actually run it.
+	"$_viu_dir/bin/python3" -c 'import sys' >/dev/null 2>&1 || {
+		log "venv $_viu_dir has a bin/python3 that does not execute - reprovisioning"
 		return 1
 	}
 
-	[ -f "$_vmp_dir/pyvenv.cfg" ] || {
-		log "venv $_vmp_dir has no pyvenv.cfg - rebuilding"
+	[ -f "$_viu_dir/pyvenv.cfg" ] || {
+		log "venv $_viu_dir has no pyvenv.cfg - reprovisioning"
 		return 1
 	}
-	_vmp_cfg_ver=$(sed -n 's/^version[[:space:]]*=[[:space:]]*//p' "$_vmp_dir/pyvenv.cfg" 2>/dev/null | head -1)
-	case "$_vmp_cfg_ver" in
-		"$_vmp_sys_mm"|"$_vmp_sys_mm".*) : ;;
-		"") log "venv $_vmp_dir pyvenv.cfg records no version - rebuilding"; return 1 ;;
-		*)  log "venv $_vmp_dir pyvenv.cfg records version $_vmp_cfg_ver, image ships $_vmp_sys_mm - rebuilding"; return 1 ;;
-	esac
 
-	if [ -n "$_vmp_smoke" ]; then
-		"$_vmp_dir/bin/python3" -c "$_vmp_smoke" >/dev/null 2>&1 || {
-			log "venv $_vmp_dir failed its import smoke test - rebuilding"
+	if [ -n "$_viu_smoke" ]; then
+		"$_viu_dir/bin/python3" -c "$_viu_smoke" >/dev/null 2>&1 || {
+			log "venv $_viu_dir failed its import smoke test - reprovisioning"
 			return 1
 		}
 	fi
@@ -105,12 +102,12 @@ venv_matches_platform() {
 recover_torn_venv() {
 	_rtv_dir="$1"; _rtv_smoke="${2:-}"
 	[ -d "$_rtv_dir.old" ] || return 0
-	if venv_matches_platform "$_rtv_dir" "$_rtv_smoke"; then
+	if venv_is_usable "$_rtv_dir" "$_rtv_smoke"; then
 		# The swap completed; .old is just leftover garbage.
 		rm -rf "$_rtv_dir.old" 2>/dev/null || true
 		return 0
 	fi
-	if venv_matches_platform "$_rtv_dir.old" "$_rtv_smoke"; then
+	if venv_is_usable "$_rtv_dir.old" "$_rtv_smoke"; then
 		log "recovering $_rtv_dir from $_rtv_dir.old (previous replacement was interrupted)"
 		rm -rf "$_rtv_dir" 2>/dev/null || true
 		if mv "$_rtv_dir.old" "$_rtv_dir"; then

@@ -6,20 +6,18 @@
 # - not a reimplementation of them - against fake venvs on disk.
 #
 # What is being protected (mission section 15):
-#   - a venv that matches the running image is KEPT, untouched
-#   - a venv built against a different python minor is REPLACED, in BOTH
-#     directions (OTA forward 3.11->3.12, and A/B ROLLBACK 3.12->3.11)
-#   - a corrupt/torn venv is replaced
+#   - a usable venv is KEPT, untouched (provisioning is idempotent)
+#   - a torn or non-functional venv is REPROVISIONED, including the shape the
+#     old `[ -x bin/python3 ]` guard got wrong: interpreter present, env not
+#     actually usable
+#   - a corrupt venv is replaced
 #   - a failed replacement does NOT destroy the existing environment
 #   - an interrupted rename-swap is recoverable on the next boot
 #   - repeated runs are idempotent
 #
-# The fake interpreter is a shell script: the predicate only ever asks it for
-# sys.version_info and runs an import smoke test, both of which a script can
-# answer deterministically. That keeps the test independent of whatever python
-# the host happens to have, except for the ONE genuine dependency - the
-# predicate compares against the real /usr/bin/python3, so the "matching" case
-# is built to match that.
+# The fake interpreter is a shell script: the predicate only ever execs it and
+# runs an import smoke test, both of which a script can answer
+# deterministically, so the suite does not depend on the host's python.
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -65,50 +63,68 @@ SMOKE="import greenlet, cffi"
 
 # ---- 1. a venv matching the running image is accepted ----------------------
 E=$W/case1; make_venv "$E" "$SYS_MM" yes
-if venv_matches_platform "$E" "$SMOKE"; then ok "current-version venv is accepted"; else bad "current-version venv was rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then ok "current-version venv is accepted"; else bad "current-version venv was rejected"; fi
 
-# ---- 2. forward migration: 3.11 venv on a newer image is rejected ----------
-E=$W/case2; make_venv "$E" "3.11" yes
-if venv_matches_platform "$E" "$SMOKE"; then bad "stale python3.11 venv was accepted"; else ok "stale python3.11 venv is rejected (forward OTA)"; fi
+# ---- 2. an interpreter that exists but does not RUN is rejected ------------
+# The torn-provisioning shape: bin/python3 present (so the old `-x` guard said
+# "done") but the environment behind it is not actually functional.
+E=$W/case2; make_venv "$E" "$SYS_MM" yes
+cat > "$E/bin/python3" <<'BROKEN'
+#!/bin/sh
+exit 1
+BROKEN
+chmod 755 "$E/bin/python3"
+if venv_is_usable "$E" "$SMOKE"; then bad "non-executing interpreter was accepted"; else ok "interpreter that exists but does not run is rejected"; fi
 
-# ---- 3. ROLLBACK: a NEWER venv on an older image is also rejected ----------
-# The direction that a one-way "upgrade" design would miss.
-E=$W/case3; make_venv "$E" "99.9" yes
-if venv_matches_platform "$E" "$SMOKE"; then bad "newer-than-image venv was accepted"; else ok "newer-than-image venv is rejected (A/B rollback)"; fi
+# ---- 3. NOT IN SCOPE: interpreter-version migration ------------------------
+# NebulaOS is unreleased and /usr/data/nebulaos is NebulaOS-owned, so no
+# deployed device carries a Python 3.11 venv for this image to migrate. This
+# release therefore does NOT compare the venv's python version against the
+# running image, and a venv reporting a different minor is NOT rejected on
+# that basis alone. Asserted explicitly so that the day someone adds version
+# awareness (the first post-release Python ABI transition - see
+# docs/NEBULAOS_PLATFORM_APP_BOUNDARY.md) this test fails and forces the
+# scope decision to be revisited deliberately rather than silently.
+E=$W/case3; make_venv "$E" "3.11" yes
+if venv_is_usable "$E" "$SMOKE"; then
+	ok "version mismatch alone does NOT reject (documented out of scope for this release)"
+else
+	bad "a version check has been added - revisit scope and update docs/NEBULAOS_PLATFORM_APP_BOUNDARY.md"
+fi
 
 # ---- 4. bin/python3 present but not executable -> rejected -----------------
 E=$W/case4; make_venv "$E" "$SYS_MM" yes; chmod 644 "$E/bin/python3"
-if venv_matches_platform "$E" "$SMOKE"; then bad "non-executable interpreter was accepted"; else ok "non-executable interpreter is rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then bad "non-executable interpreter was accepted"; else ok "non-executable interpreter is rejected"; fi
 
 # ---- 5. dangling symlink (the real post-OTA shape) -> rejected -------------
 E=$W/case5; mkdir -p "$E/bin"; ln -s /usr/bin/python3.11 "$E/bin/python3"
 printf 'home = /usr/bin\nversion = 3.11.6\n' > "$E/pyvenv.cfg"
-if venv_matches_platform "$E" "$SMOKE"; then bad "dangling interpreter symlink was accepted"; else ok "dangling interpreter symlink is rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then bad "dangling interpreter symlink was accepted"; else ok "dangling interpreter symlink is rejected"; fi
 
 # ---- 6. missing pyvenv.cfg -> rejected -------------------------------------
 E=$W/case6; make_venv "$E" "$SYS_MM" yes; rm -f "$E/pyvenv.cfg"
-if venv_matches_platform "$E" "$SMOKE"; then bad "venv without pyvenv.cfg was accepted"; else ok "venv without pyvenv.cfg is rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then bad "venv without pyvenv.cfg was accepted"; else ok "venv without pyvenv.cfg is rejected"; fi
 
 # ---- 7. right version, failing imports -> rejected -------------------------
 E=$W/case7; make_venv "$E" "$SYS_MM" no
-if venv_matches_platform "$E" "$SMOKE"; then bad "venv failing its import smoke test was accepted"; else ok "venv failing its import smoke test is rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then bad "venv failing its import smoke test was accepted"; else ok "venv failing its import smoke test is rejected"; fi
 
 # ---- 8. empty directory (what S02nebulaos-namespace leaves) -> rejected ----
 E=$W/case8; mkdir -p "$E"
-if venv_matches_platform "$E" "$SMOKE"; then bad "empty env directory was accepted"; else ok "empty env directory is rejected"; fi
+if venv_is_usable "$E" "$SMOKE"; then bad "empty env directory was accepted"; else ok "empty env directory is rejected"; fi
 
 # ---- 9. swap does not destroy the old env on failure -----------------------
 # .partial absent => mv fails => the existing environment must survive.
 E=$W/case9; make_venv "$E" "$SYS_MM" yes
 if swap_venv_into_place "$E"; then bad "swap reported success with no .partial staged"
 else
-	if venv_matches_platform "$E" "$SMOKE"; then ok "failed swap left the existing environment intact and usable"
+	if venv_is_usable "$E" "$SMOKE"; then ok "failed swap left the existing environment intact and usable"
 	else bad "failed swap destroyed or corrupted the existing environment"; fi
 fi
 
 # ---- 10. successful swap replaces and cleans up ----------------------------
 E=$W/case10; make_venv "$E" "3.11" yes; make_venv "$E.partial" "$SYS_MM" yes
-if swap_venv_into_place "$E" && venv_matches_platform "$E" "$SMOKE"; then
+if swap_venv_into_place "$E" && venv_is_usable "$E" "$SMOKE"; then
 	[ ! -e "$E.old" ] && [ ! -e "$E.partial" ] \
 		&& ok "successful swap replaced the env and removed .old/.partial" \
 		|| bad "successful swap left .old or .partial behind"
@@ -120,12 +136,12 @@ else bad "successful swap did not produce a usable environment"; fi
 # recovery trigger must not be "env is missing".
 E=$W/case11; make_venv "$E.old" "$SYS_MM" yes; mkdir -p "$E"
 recover_torn_venv "$E" "$SMOKE"
-if venv_matches_platform "$E" "$SMOKE" && [ ! -e "$E.old" ]; then
+if venv_is_usable "$E" "$SMOKE" && [ ! -e "$E.old" ]; then
 	ok "interrupted swap recovered from .old even though S02 recreated an empty env dir"
 else bad "interrupted swap was NOT recovered (this is the trigger that must not test for absence)"; fi
 
 # ---- 12. .old that is itself unusable is discarded, not restored -----------
-E=$W/case12; make_venv "$E.old" "3.11" yes; mkdir -p "$E"
+E=$W/case12; make_venv "$E.old" "$SYS_MM" no; mkdir -p "$E"
 recover_torn_venv "$E" "$SMOKE"
 if [ ! -e "$E.old" ]; then ok "an unusable .old is discarded rather than restored"
 else bad "an unusable .old was left in place"; fi
@@ -133,13 +149,13 @@ else bad "an unusable .old was left in place"; fi
 # ---- 13. idempotence: recovery over a good env is a no-op ------------------
 E=$W/case13; make_venv "$E" "$SYS_MM" yes
 recover_torn_venv "$E" "$SMOKE"; recover_torn_venv "$E" "$SMOKE"
-if venv_matches_platform "$E" "$SMOKE"; then ok "repeated recovery over a good env is idempotent"
+if venv_is_usable "$E" "$SMOKE"; then ok "repeated recovery over a good env is idempotent"
 else bad "repeated recovery damaged a good env"; fi
 
 # ---- 14. stale .old alongside a GOOD env is cleaned up ---------------------
 E=$W/case14; make_venv "$E" "$SYS_MM" yes; make_venv "$E.old" "$SYS_MM" yes
 recover_torn_venv "$E" "$SMOKE"
-if venv_matches_platform "$E" "$SMOKE" && [ ! -e "$E.old" ]; then
+if venv_is_usable "$E" "$SMOKE" && [ ! -e "$E.old" ]; then
 	ok "leftover .old beside a good env is cleaned up"
 else bad "leftover .old beside a good env was mishandled"; fi
 

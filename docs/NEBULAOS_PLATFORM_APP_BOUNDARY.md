@@ -38,10 +38,39 @@ asymmetry is load-bearing:
 ```
 
 A venv therefore outlives the interpreter it was built against, in **both**
-directions — forward on an OTA, and backward on an A/B rollback. That is the
-concrete failure this migration had to handle, and it is handled in
-`/usr/libexec/nebulaos-venv-lib.sh` (`venv_matches_platform`), which compares a
-venv against the *running* image rather than assuming a direction of travel.
+directions — forward on an OTA, and backward on an A/B rollback.
+
+### Scope for this release: not yet a problem, and deliberately not solved
+
+NebulaOS is **unreleased**, and `/usr/data/nebulaos/` is NebulaOS-owned — stock
+firmware does not consume it. There is therefore no deployed device carrying a
+Python 3.11 venv that this image must migrate, and no A/B pair in the field
+with mismatched interpreter minors. This release consequently does **not**
+implement 3.11→3.12 venv migration and does **not** attempt to keep a venv
+working across interpreter minors.
+
+What it *does* fix is the provisioning itself: `venv_is_usable` in
+`/usr/libexec/nebulaos-venv-lib.sh` replaces an `[ -x bin/python3 ]` guess that
+treated a torn, half-created environment as finished, so fresh Python 3.12
+provisioning is now **interruption-safe and idempotent**.
+
+### FUTURE REQUIREMENT — first post-release Python ABI transition
+
+At the first Python minor bump after release, version awareness becomes
+mandatory, because the lifetime asymmetry above is real and permanent. The
+required behaviour:
+
+- compare the venv's `major.minor` against the running `/usr/bin/python3`
+- treat a mismatch in **either** direction as "must reprovision" — a one-way
+  "upgrade only" design disarms A/B rollback, which is the safety mechanism
+- reprovision through the existing staged/verified/atomic path, never in place
+
+The hook is `venv_is_usable`: adding the comparison there is sufficient, and
+the staging, swap and recovery machinery it would need already exists and is
+already tested. `tests/venv-platform-migration-tests.sh` contains an explicit
+assertion that version mismatch does *not* currently reject, so that adding a
+version check fails that test and forces this scope decision to be revisited
+deliberately rather than drifting in.
 
 ## 3. What this release actually ships
 
@@ -114,9 +143,9 @@ half-mutated platform is not.
 
 ## 6. What this migration already contributes to that future
 
-- `venv_matches_platform` makes "is this venv valid for this platform?" an
-  explicit, testable predicate instead of an `[ -x bin/python3 ]` guess. A
-  future version check slots into the same place.
+- `venv_is_usable` makes "is this venv actually usable?" an explicit, testable
+  predicate instead of an `[ -x bin/python3 ]` guess. The future version check
+  slots into the same place.
 - `swap_venv_into_place` / `recover_torn_venv` give atomic, power-cut-safe venv
   replacement with a recoverable intermediate state.
 - Python paths and the CPython ABI tag are derived from `sysconfig` /
