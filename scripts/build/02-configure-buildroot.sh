@@ -244,13 +244,21 @@ done
 # project. A package Buildroot does not provide goes in br2-external/package/,
 # never as a cp over package/.
 
-# Stage the tracked defconfig where Buildroot's `make <name>_defconfig` rule
-# looks for it. Buildroot resolves a defconfig name against
-# $(TOPDIR)/configs/ and against every BR2_EXTERNAL's configs/ directory; it is
-# staged into the Buildroot tree here as well so the name resolves identically
-# whether or not BR2_EXTERNAL is exported into a given sub-make.
-mkdir -p "$BUILDROOT_DIR/configs"
-cp "$BR2_EXT/configs/nebulaos_x2000_defconfig" "$BUILDROOT_DIR/configs/nebulaos_x2000_defconfig"
+# NOTE: the defconfig is deliberately NOT copied into $BUILDROOT_DIR/configs/.
+#
+# Buildroot's %_defconfig rule already searches every BR2_EXTERNAL tree -
+# Makefile line 1056-1060 iterates $(call reverse,$(TOPDIR) $(BR2_EXTERNAL_DIRS))
+# - so `make BR2_EXTERNAL=... nebulaos_x2000_defconfig` resolves it straight out
+# of br2-external/configs/ with no staging at all. Verified against a pristine
+# 2025.02.18 checkout: the defconfig resolves, GCC comes out 13.4.0, and
+# `git status --porcelain -uall` on the Buildroot tree stays completely empty.
+#
+# An earlier revision did copy it "so the name resolves identically whether or
+# not BR2_EXTERNAL is exported". That was unnecessary, and it cost real ground:
+# it left configs/nebulaos_x2000_defconfig as an untracked file inside the
+# upstream checkout, which 06-verify.sh correctly reported as an unexplained
+# working-tree change. The whole point of the BR2_EXTERNAL move is that nothing
+# but local.mk is written there.
 
 echo "== generating .config from nebulaos_x2000_defconfig =="
 ( cd "$BUILDROOT_DIR" && make BR2_EXTERNAL="$BR2_EXT" nebulaos_x2000_defconfig )

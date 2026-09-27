@@ -51,8 +51,10 @@ skip() { printf 'SKIP: %s\n' "$1"; printf 'BUILDROOT_DEFCONFIG_PARITY=SKIP\n'; e
 WORK=$(mktemp -d 2>/dev/null) || skip "cannot create a temporary directory"
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
-mkdir -p "$BUILDROOT_DIR/configs"
-cp "$DEFCONFIG" "$BUILDROOT_DIR/configs/nebulaos_x2000_defconfig" || skip "cannot stage the defconfig"
+# Deliberately no staging into $BUILDROOT_DIR/configs/: Buildroot's %_defconfig
+# rule searches every BR2_EXTERNAL tree, and writing into the upstream checkout
+# is exactly what this migration is trying to stop. Running this suite must not
+# dirty the Buildroot tree.
 
 if ! ( cd "$BUILDROOT_DIR" && make O="$WORK" BR2_EXTERNAL="$BR2_EXT" nebulaos_x2000_defconfig ) >"$WORK/defconfig.log" 2>&1; then
 	printf 'FAIL: `make nebulaos_x2000_defconfig` did not succeed\n'

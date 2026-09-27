@@ -221,3 +221,74 @@ tags anywhere in its history. Official Buildroot **is** tagged, so
 which §8's allowlist now enforces. This changes the `# Buildroot <version>
 Configuration` header line in `buildroot.config` and the corresponding
 `build-manifest.txt` provenance field. Expected, not a defect.
+
+---
+
+## 12. First green build — measured result
+
+`BUILD=PASS` on `8bbe8eb85d560bdbf84dfc0bed9468cf066aa32e`, exit code 0, ~42 min
+(33 min of build stages; the Buildroot download cache was warm).
+
+```
+GCC 13.4.0 · binutils 2.43.1 · Python 3.12.14 · Buildroot 2025.02.18
+xImage           d139733af462d425eccacc22dcd645541058ea528ea4456b7b5cfd82c14813ff    5505088
+rootfs.squashfs  a2f819044d907e8fa9076ff15679b17d27cb3d4280e4e8150fb4eb6f1a412d1c  129503232
+06-verify        OK=264  MISS=1  FATAL=0
+candidate gate   17 PASS / 0 FAIL
+```
+
+The single MISS was `vendor/buildroot-x2000/configs/nebulaos_x2000_defconfig`,
+an untracked file left by staging the defconfig into the upstream checkout. It
+was unnecessary — Buildroot's `%_defconfig` rule already searches every
+`BR2_EXTERNAL` tree (Makefile 1056-1060) — and the staging is removed. Verified
+against a pristine 2025.02.18 checkout: the defconfig resolves from
+`br2-external/configs/` alone, and `git status --porcelain -uall` on the
+Buildroot tree stays empty. **Pristineness target met: `local.mk` only.**
+
+### Native extension ABI
+
+```
+OK   every CPython extension in the image uses cpython-312-mipsel-linux-gnu (128 modules)
+```
+
+### Rootfs size — `INTENTIONALLY_CHANGED`, fully accounted
+
+| | OLD | NEW | Δ |
+|---|---|---|---|
+| `rootfs.squashfs` | 99 758 080 | 129 503 232 | **+29 745 152 (+29.8 %)** |
+| files | 7 476 | 11 809 | +4 333 |
+| ELF objects | 394 | 419 | +25 |
+| native Python extensions | 106 | 128 | +22 |
+
+Every byte of the growth is in the Python tree (107 MB → 188 MB uncompressed);
+`opt/klipper`, `opt/moonraker`, `usr/share/mainsail` and `opt/guppyscreen` are
+unchanged at 13/4/10/7 MB.
+
+| Component | OLD | NEW | Note |
+|---|---|---|---|
+| matplotlib | 19 MB | **69 MB** | 3.4.3 → 3.10.0. **46 MB of it is `matplotlib/tests`** (bundled suite + baseline images) |
+| numpy | 26 MB | 38 MB | pip-installed cp311 wheel → Buildroot `python-numpy` 1.25.0 |
+| fontTools | — | 12 MB | new hard dependency of matplotlib ≥3.6 |
+| mpl_toolkits | — | 7 MB | split out of matplotlib |
+
+This is accepted, not optimised away. Mission §18 is explicit that NumPy and
+matplotlib must not be removed for size, and §20 puts rootfs size below
+stability, RAM, CPU and latency. It also fits comfortably:
+
+```
+rootfs partition 524 288 000 bytes
+OLD  19.0 %      NEW  24.7 %      headroom 376.5 MB
+```
+
+**Deferred cleanup candidate (do not action during this migration):**
+`matplotlib/tests` at 46 MB uncompressed is the single largest removable item
+in the image and is never executed on the printer. Removing it belongs to the
+cleanup mission, against evidence, not here.
+
+### Not claimed
+
+Nothing above is a runtime measurement. RAM, CPU, boot time and latency are
+**NOT TESTED** — they require the printer and
+`tools/qualification/nebulaos-qualify.sh`. A larger rootfs does not by itself
+imply higher RAM use: squashfs is demand-paged, and only pages actually touched
+are resident. `matplotlib/tests` in particular is never imported.
