@@ -15,4 +15,9 @@ PYTHON_WHEEL_TARGET_SETUP_TYPE = flit
 PYTHON_WHEEL_TARGET_LICENSE = MIT
 PYTHON_WHEEL_TARGET_LICENSE_FILES = LICENSE.txt
 
+# BUILD/RUNTIME DEPENDENCIES
+#
+# flit backend; SETUP_TYPE=flit supplies host-python-flit-core automatically.
+# No dependency beyond what SETUP_TYPE=flit adds automatically.
+
 $(eval $(python-package))

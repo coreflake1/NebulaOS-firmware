@@ -16,4 +16,14 @@ PYTHON_APPRISE_SETUP_TYPE = setuptools
 PYTHON_APPRISE_LICENSE = BSD-2-Clause
 PYTHON_APPRISE_LICENSE_FILES = LICENSE
 
+# BUILD/RUNTIME DEPENDENCIES
+#
+# apprise's setup.py declares setup_requires=['babel'] (line 113) and imports
+# babel.messages.frontend to register its compile_catalog/extract_messages
+# commands. Buildroot builds with `python -m build -n` (no build isolation), so
+# that requirement is resolved against the host environment and must be a real
+# dependency here - without it the build aborts at "Getting build dependencies
+# for wheel" with "Missing dependencies: babel". Confirmed by build failure.
+PYTHON_APPRISE_DEPENDENCIES = host-python-babel
+
 $(eval $(python-package))

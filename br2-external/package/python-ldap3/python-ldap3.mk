@@ -16,4 +16,9 @@ PYTHON_LDAP3_SETUP_TYPE = setuptools
 PYTHON_LDAP3_LICENSE = LGPL-3.0
 PYTHON_LDAP3_LICENSE_FILES = COPYING.LESSER.txt
 
+# BUILD/RUNTIME DEPENDENCIES
+#
+# Plain setup.py with no setup_requires.
+# No dependency beyond what SETUP_TYPE=setuptools adds automatically.
+
 $(eval $(python-package))

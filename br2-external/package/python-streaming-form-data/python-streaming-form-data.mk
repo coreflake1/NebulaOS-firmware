@@ -12,9 +12,15 @@
 PYTHON_STREAMING_FORM_DATA_VERSION = 1.19.1
 PYTHON_STREAMING_FORM_DATA_SOURCE = streaming_form_data-1.19.1.tar.gz
 PYTHON_STREAMING_FORM_DATA_SITE = https://files.pythonhosted.org/packages/f9/fa/a9975245eefac04421a219e8007f9a4ae156b701b94baffb4d15af43304d
-PYTHON_STREAMING_FORM_DATA_SETUP_TYPE = pep517
+PYTHON_STREAMING_FORM_DATA_SETUP_TYPE = setuptools
 PYTHON_STREAMING_FORM_DATA_LICENSE = MIT
 PYTHON_STREAMING_FORM_DATA_LICENSE_FILES = LICENSE.txt
-PYTHON_STREAMING_FORM_DATA_DEPENDENCIES = host-python-setuptools
+
+# BUILD/RUNTIME DEPENDENCIES
+#
+# pyproject.toml uses setuptools.build_meta and requires only setuptools. The
+# sdist ships a pre-generated _parser.c, so Cython is NOT needed at build time -
+# only a C compiler, which the cross toolchain provides.
+# No dependency beyond what SETUP_TYPE=setuptools adds automatically.
 
 $(eval $(python-package))

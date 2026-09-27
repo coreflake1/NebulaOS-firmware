@@ -12,9 +12,14 @@
 PYTHON_INOTIFY_SIMPLE_VERSION = 2.0.1
 PYTHON_INOTIFY_SIMPLE_SOURCE = inotify_simple-2.0.1.tar.gz
 PYTHON_INOTIFY_SIMPLE_SITE = https://files.pythonhosted.org/packages/e3/5c/bfe40e15d684bc30b0073aa97c39be410a5fbef3d33cad6f0bf2012571e0
-PYTHON_INOTIFY_SIMPLE_SETUP_TYPE = pep517
+PYTHON_INOTIFY_SIMPLE_SETUP_TYPE = setuptools
 PYTHON_INOTIFY_SIMPLE_LICENSE = BSD-2-Clause
 PYTHON_INOTIFY_SIMPLE_LICENSE_FILES = LICENSE
-PYTHON_INOTIFY_SIMPLE_DEPENDENCIES = host-python-setuptools
+
+# BUILD/RUNTIME DEPENDENCIES
+#
+# pyproject.toml uses setuptools.build_meta and requires only setuptools, which
+# SETUP_TYPE=setuptools supplies automatically.
+# No dependency beyond what SETUP_TYPE=setuptools adds automatically.
 
 $(eval $(python-package))
