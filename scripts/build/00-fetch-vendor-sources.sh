@@ -184,6 +184,37 @@ clone_pinned() {
 			git -C "$name" checkout "$ref"
 		fi
 	fi
+	# Origin enforcement (2026-09-27, Buildroot 2025.02.18 migration): the pin
+	# check below resolves a ref INSIDE whatever repository is already sitting
+	# in vendor/$name - it says nothing about which repository that is. The
+	# first branch of this function reuses any existing checkout verbatim
+	# ("already present, verifying pin"), so repointing a *_REPO in the
+	# manifest was previously a silent no-op on any machine that already had
+	# the old remote cloned. That mattered concretely here: this build moved
+	# BUILDROOT_REPO from lone0/buildroot-x2000 to buildroot/buildroot, and a
+	# stale checkout that had ever fetched from both remotes would resolve the
+	# new pin and pass, building the WRONG Buildroot with no diagnostic.
+	#
+	# The v4l-utils call path further down already did exactly this check by
+	# hand; doing it here covers all seven clone_pinned() callers instead of
+	# one, and catches the mismatch at stage 00 rather than at 06-verify.sh's
+	# check_vendor_pin(), i.e. before the kernel and rootfs are built rather
+	# than after.
+	actual_origin=$(git -C "$name" remote get-url origin 2>/dev/null) || {
+		echo "FATAL: vendor/$name has no origin remote - cannot prove which repository this checkout came from" >&2
+		exit 1
+	}
+	# Compare normalized: strip a trailing .git and any trailing slashes, so a
+	# cosmetic URL spelling difference is not reported as a wrong repository.
+	norm_url() { printf '%s' "$1" | sed -E 's#/+$##; s#\.git$##'; }
+	if [ "$(norm_url "$actual_origin")" != "$(norm_url "$url")" ]; then
+		echo "FATAL: vendor/$name origin is '$actual_origin', expected '$url'" >&2
+		echo "This checkout came from a DIFFERENT repository than the manifest pins. The pin" >&2
+		echo "check alone cannot detect that. Remove it and let this script re-clone:" >&2
+		echo "  rm -rf vendor/$name" >&2
+		exit 1
+	fi
+
 	# Pin enforcement (2026-07-31, NEBULAOS_CAMERA_USB_RT_SOURCE_ANALYSIS.md's
 	# vendor-pin audit): previously this function only checked out the pinned
 	# ref the FIRST time a vendor/ dir was absent - an already-present checkout
