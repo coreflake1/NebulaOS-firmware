@@ -107,24 +107,29 @@ check_vendor_pin pellcorp-creality "$PELLCORP_CREALITY_PIN" \
 # config layer) - expected every time, not accidental drift.
 # board/nebulaos-post-build.sh is the same thing: copied in by
 # 02-configure-buildroot.sh from the tracked scripts/build/nebulaos-post-build.sh
-# because BR2_ROOTFS_POST_BUILD_SCRIPT names it by a buildroot-relative path,
-# so it has to sit inside the vendor tree. Listed here for the same reason the
-# board/ configs are - it is a deterministic, tracked-source copy, not drift.
-# squashfs.mk/squashfs.hash: 02-configure-buildroot.sh idempotently
-# switches squashfs-tools from GitHub's mutable auto-generated archive to
-# the stable release asset (upstream Buildroot fix backported to our
-# pinned checkout).
+# Buildroot 2025.02.18 migration (2026-09-27): this allowlist IS the
+# acceptance test for "official Buildroot stays pristine", and it is now down
+# to a single entry.
+#
+# It previously permitted nine expected modifications. Seven of them were
+# NebulaOS content injected into the upstream tree
+# (board/halley5-nebulaos-{fragment,busybox-fragment}.config,
+# board/nebulaos-post-build.sh, board/halley5-nebulaos-overlay/,
+# board/halley5-nebulaos-wheels/) or outright edits to upstream package files
+# (package/python-matplotlib/python-matplotlib.mk overwritten wholesale,
+# package/squashfs/squashfs.{mk,hash} sed-patched). All seven are gone: the
+# NebulaOS content moved to br2-external/, matplotlib and numpy come from
+# upstream packages, and the squashfs fix is already upstream in 2025.02.18.
+#
+# local.mk is the only survivor, and it is structural rather than incidental:
+# it carries LINUX_OVERRIDE_SRCDIR, which Buildroot only reads from
+# $(TOPDIR)/local.mk, so it genuinely has nowhere else to live.
+#
+# Anything else appearing here is an UNMET migration goal, not something to
+# add to this list.
 check_vendor_pin buildroot-x2000 "$BUILDROOT_PIN" \
 	"$BUILDROOT_REPO" 0 \
-	package/python-matplotlib/python-matplotlib.mk \
-	board/halley5-nebulaos-busybox-fragment.config \
-	board/halley5-nebulaos-fragment.config \
-	board/nebulaos-post-build.sh \
-	board/halley5-nebulaos-overlay/ \
-	board/halley5-nebulaos-wheels/ \
-	local.mk \
-	package/squashfs/squashfs.mk \
-	package/squashfs/squashfs.hash
+	local.mk
 check_vendor_pin k1-ustreamer "$K1_USTREAMER_PIN" \
 	"$K1_USTREAMER_REPO" 0
 # k1-ustreamer's own real git submodules (jpeg-9d, ustreamer) - pinned via
@@ -501,6 +506,33 @@ check() {
 	fi
 }
 
+# Buildroot 2025.02.18 / Python 3.12 migration: the target Python version is
+# DISCOVERED from the image, never spelled here.
+#
+# These checks used to say /usr/lib/python3.11/... and /usr/bin/python3.11
+# literally. A hardcoded version in a PRESENCE check is the good case - it
+# fails loudly after a bump - but it still has to be hand-edited in several
+# places, and mission rule 10 is that a future minor bump must not require
+# repeating this cleanup. Discovering it also lets the gate assert something
+# the literals could not: that there is EXACTLY ONE target python, so a
+# half-migrated image carrying both 3.11 and 3.12 trees is a hard failure
+# rather than a passing check against whichever one was named.
+discover_target_python() {
+	_found=$(debugfs -R "ls -l /usr/lib" ${IMAGES}/rootfs.ext2 2>/dev/null \
+		| tr -s ' ' '\n' | grep -oE '^python3\.[0-9]+$' | sort -u)
+	_n=$(printf '%s\n' "$_found" | grep -c .)
+	if [ "$_n" -eq 0 ]; then
+		echo "FATAL: no /usr/lib/python3.* directory found in rootfs.ext2 - the target Python is missing entirely" >&2
+		exit 1
+	fi
+	if [ "$_n" -gt 1 ]; then
+		echo "FATAL: rootfs.ext2 contains MORE THAN ONE target Python tree: $(printf '%s ' $_found)" >&2
+		echo "       That is a half-migrated image. Exactly one is expected." >&2
+		exit 1
+	fi
+	printf '%s' "$_found"
+}
+
 check_required() {
 	path="$1"; why="${2:-}"
 	if debugfs -R "stat $path" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
@@ -558,15 +590,17 @@ check /usr/lib/libstdc++.so.6
 # runtime, but 04-cross-compile-app-stack.sh downloaded it with --no-deps,
 # so zipp itself was never fetched. Moonraker died with
 # ModuleNotFoundError: No module named zipp, before opening its own log.
-check /usr/lib/python3.11/site-packages/zipp
+TARGET_PY=$(discover_target_python)
+echo "OK   target python discovered from the image: $TARGET_PY"
+check /usr/lib/$TARGET_PY/site-packages/zipp
 # FIRMWARE.md sec 23 (2026-07-23): numpy is a soft/lazy Klipper dependency -
 # shaper_calibrate.py only raises a clean, user-facing error if it is
 # missing (not a crash), and only when a user actually runs resonance
 # testing. Not launch-blocking, but a real completeness gap for a near-
 # universal Klipper workflow, and available as a ready Buildroot package
 # (BR2_PACKAGE_PYTHON_NUMPY), so enabled rather than left missing.
-check /usr/lib/python3.11/site-packages/numpy
-check /usr/bin/python3.11
+check /usr/lib/$TARGET_PY/site-packages/numpy
+check /usr/bin/$TARGET_PY
 check /opt/klipper/klippy/klippy.py
 check /opt/klipper/klippy/chelper/c_helper.so
 # Clean-Update + Virgin Baseline mission, Phase 6: nebulaos_version.py
@@ -613,7 +647,7 @@ else
 		echo "MISS moonraker-sqlite-nolock.patch did NOT reach the shipped database.py (helper defs=$mdb_defs, call sites=$mdb_calls expected 4, raw sqlite3.connect(=$mdb_raw expected 1) - the image would ship stock Moonraker database code"
 	fi
 fi
-check /usr/lib/python3.11/site-packages/streaming_form_data
+check /usr/lib/$TARGET_PY/site-packages/streaming_form_data
 check /usr/sbin/nginx
 check /usr/share/mainsail/index.html
 check /etc/init.d/S55klipper

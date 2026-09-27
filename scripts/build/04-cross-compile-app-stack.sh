@@ -465,52 +465,45 @@ if [ -n "$HOST_PYTHON3" ]; then
 		|| echo "WARNING: bytecode precompilation failed for the moonraker squashfs copy - shipping source-only" >&2
 fi
 
-# OpenKE (2026-07-23): zipp added after a real, previously-silent bug found
-# on real hardware - importlib_metadata (below) imports zipp at runtime, but
-# --no-deps meant it was never actually downloaded, so Moonraker died
-# instantly with ModuleNotFoundError: No module named zipp, before opening
-# its own log file at all.
-echo "== downloading Moonraker's pure-Python deps with no Buildroot package =="
-mkdir -p "$WORK/pywheels"
-pip3 download -d "$WORK/pywheels" --no-deps \
-	inotify-simple==2.0.1 libnacl==2.1.0 apprise==1.9.3 ldap3==2.9.1 \
-	importlib_metadata==8.4.0 preprocess-cancellation==0.2.1 pyasn1 \
-	zipp==3.20.2 wheel==0.42.0
-SITEPKG="$OVERLAY/usr/lib/python3.11/site-packages"
-mkdir -p "$SITEPKG"
-for whl in "$WORK"/pywheels/*.whl; do
-	python3 -m zipfile -e "$whl" "$SITEPKG/" 2>&1 || unzip -o -q "$whl" -d "$SITEPKG"
-done
-
-echo "== cross-compiling Moonraker's one real C extension: streaming-form-data =="
-pip3 download -d "$WORK/pywheels" --no-deps --no-binary :all: streaming-form-data==1.11.0
-tar xzf "$WORK/pywheels/streaming-form-data-1.11.0.tar.gz" -C "$WORK"
-(
-	cd "$WORK/streaming-form-data-1.11.0"
-	export PATH="$TOOLCHAIN_HOST/bin:$PATH"
-	mipsel-buildroot-linux-gnu-gcc -shared -fPIC -O2 \
-		-I"$SYSROOT/usr/include/python3.11" \
-		-o streaming_form_data/_parser.cpython-311-mipsel-linux-gnu.so \
-		streaming_form_data/_parser.c
-)
-
-# Production optimization mission, Phase 6 (2026-07-30): same unstripped-
-# debug-symbols gap as c_helper.so above - this .so is never routed through
-# a real Buildroot package strip pass either. Preserve symbols in
-# build-work, strip the copy that actually ships.
-mkdir -p "$WORK/debug-symbols"
-cp "$WORK/streaming-form-data-1.11.0/streaming_form_data/_parser.cpython-311-mipsel-linux-gnu.so" \
-   "$WORK/debug-symbols/_parser.cpython-311-mipsel-linux-gnu.so.debug"
-(
-	cd "$WORK/streaming-form-data-1.11.0"
-	export PATH="$TOOLCHAIN_HOST/bin:$PATH"
-	mipsel-buildroot-linux-gnu-strip --strip-unneeded streaming_form_data/_parser.cpython-311-mipsel-linux-gnu.so
-)
-
-mkdir -p "$SITEPKG/streaming_form_data"
-cp "$WORK"/streaming-form-data-1.11.0/streaming_form_data/*.py \
-   "$WORK"/streaming-form-data-1.11.0/streaming_form_data/*.so \
-   "$SITEPKG/streaming_form_data/"
+# Buildroot 2025.02.18 migration (2026-09-27): Moonraker's Python dependency
+# chain is no longer assembled here.
+#
+# What used to happen: `pip3 download` fetched nine distributions from PyPI at
+# build time with --no-deps, unpacked the wheels straight into
+# $OVERLAY/usr/lib/python3.11/site-packages, then hand-cross-compiled
+# streaming-form-data's one C extension and hand-named the result
+# _parser.cpython-311-mipsel-linux-gnu.so.
+#
+# Three things were wrong with that, and all three are fixed by construction
+# now rather than by being more careful:
+#
+#   1. It was an UNCONTROLLED network fetch inside the firmware build. No
+#      hashes, no recorded provenance, resolution depending on what PyPI
+#      served that day, and --no-deps meaning a transitively-required package
+#      could simply be absent. That is not hypothetical here: the comment this
+#      block replaces existed because zipp went missing exactly that way and
+#      Moonraker died with ModuleNotFoundError on real hardware before it
+#      could even open its log.
+#   2. The ABI tag was hand-written. `cpython-311-mipsel-linux-gnu` is a
+#      string that has to be kept in sync with the interpreter by hand, and a
+#      Python minor bump silently produces a .so the interpreter will not load.
+#   3. Wheels unpacked directly into the overlay bypassed Buildroot's staging,
+#      stripping and license collection entirely.
+#
+# All ten distributions are now ordinary Buildroot packages, built against the
+# target sysroot with the correct ABI and recorded in legal-info:
+#
+#   from upstream Buildroot 2025.02.18 : python-pyasn1
+#   from br2-external/package/         : python-apprise, python-importlib-metadata,
+#                                        python-inotify-simple, python-ldap3,
+#                                        python-libnacl, python-preprocess-cancellation,
+#                                        python-streaming-form-data, python-wheel-target,
+#                                        python-zipp
+#
+# streaming-form-data's _parser extension is built by its Buildroot package
+# from the pre-generated _parser.c in its sdist, so Buildroot names the .so
+# using the target interpreter's real EXT_SUFFIX. Nothing in this pipeline
+# spells a CPython ABI tag by hand any more.
 
 ### 3. ustreamer (camera pipeline)
 #
@@ -1170,8 +1163,41 @@ echo "== wrote /opt/nebulaos-version.json: $(cat "$OVERLAY/opt/nebulaos-version.
 # to the same /usr/bin/python3.11 on this product), not literally
 # recreated per-architecture.
 if [ -n "$HOST_PYTHON3" ]; then
-	TARGET_PY_VERSION="3.11.6"
-	TARGET_PY_ABS="/usr/bin/python3.11"
+	# Buildroot 2025.02.18 migration: DERIVED, never hardcoded.
+	#
+	# These were literals ("3.11.6", "/usr/bin/python3.11"). A Python minor
+	# bump then silently produced a venv seed whose bin/python3 pointed at an
+	# interpreter that no longer exists, and whose pyvenv.cfg advertised the
+	# wrong version - a dangling symlink that S55klipper/S56moonraker quietly
+	# fall back from, re-triggering the Moonraker update_manager ConfigError
+	# documented in S04nebulaos-factory-seed. Deriving them means the next
+	# minor bump needs no edit here at all.
+	#
+	# $HOST_PYTHON3 is Buildroot's own host interpreter, built from the same
+	# python3 package and therefore at the same version as the target's.
+	TARGET_PY_VERSION=$("$HOST_PYTHON3" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
+	TARGET_PY_MAJMIN=$("$HOST_PYTHON3" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+	if [ -z "$TARGET_PY_VERSION" ] || [ -z "$TARGET_PY_MAJMIN" ]; then
+		echo "FATAL: could not determine the Python version from $HOST_PYTHON3" >&2
+		exit 1
+	fi
+	TARGET_PY_ABS="/usr/bin/python$TARGET_PY_MAJMIN"
+	# Fail closed on host/target skew. The assumption above (host and target
+	# python are the same version) is true by construction in Buildroot, but
+	# it is cheap to verify against what was ACTUALLY staged into the rootfs,
+	# and expensive to debug if it is ever false.
+	if [ -d "$OVERLAY/usr/lib" ]; then
+		staged=$(ls -d "$OVERLAY"/usr/lib/python3.* 2>/dev/null | head -1)
+		if [ -n "$staged" ]; then
+			staged_majmin=$(basename "$staged" | sed 's/^python//')
+			if [ "$staged_majmin" != "$TARGET_PY_MAJMIN" ]; then
+				echo "FATAL: host python is $TARGET_PY_MAJMIN but the staged target rootfs has python$staged_majmin." >&2
+				echo "       A venv seed built against the wrong interpreter version is a boot-time failure." >&2
+				exit 1
+			fi
+		fi
+	fi
+	echo "== venv seeds will target python $TARGET_PY_VERSION at $TARGET_PY_ABS =="
 	build_venv_seed() {
 		envname="$1"; envdir="$2"; seed_out="$3"
 		rm -rf "$WORK/venv-seed-$envname"
@@ -1189,9 +1215,9 @@ version = $TARGET_PY_VERSION
 executable = $TARGET_PY_ABS
 command = $TARGET_PY_ABS -m venv --system-site-packages --without-pip $envdir
 PYVENVCFG
-		rm -f "$vdir/bin/python" "$vdir/bin/python3" "$vdir/bin/python3.11"
-		ln -s "$TARGET_PY_ABS" "$vdir/bin/python3.11"
-		ln -s python3.11 "$vdir/bin/python3"
+		rm -f "$vdir/bin/python" "$vdir/bin/python3" "$vdir/bin/python$TARGET_PY_MAJMIN"
+		ln -s "$TARGET_PY_ABS" "$vdir/bin/python$TARGET_PY_MAJMIN"
+		ln -s "python$TARGET_PY_MAJMIN" "$vdir/bin/python3"
 		ln -s python3 "$vdir/bin/python"
 		# The activate* scripts embed the venv's own absolute path -
 		# rewrite from this build's throwaway $vdir to the real,
