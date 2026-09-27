@@ -138,8 +138,52 @@ cp "$ARTIFACTS/halley5-nebulaos-busybox-fragment.config" "$BR2_EXT_BOARD/halley5
 # works from any checkout location.
 sed -i "s#/src/board/halley5-nebulaos-overlay#$BR2_EXT_BOARD/overlay#" \
 	"$BR2_EXT_BOARD/halley5-nebulaos-fragment.config"
+# local.mk is Buildroot's own package-override file
+# (BR2_PACKAGE_OVERRIDE_FILE defaults to "$(CONFIG_DIR)/local.mk"). The
+# Makefile `-include`s it at line 547, immediately BEFORE
+# `include $(sort $(wildcard package/*/*.mk))` at line 550, so variables set
+# here are visible to every package .mk as it is evaluated. It is the one
+# supported way to influence a package without editing upstream files, and it
+# is the single entry on 06-verify.sh's pristineness allowlist.
 cat > "$BUILDROOT_DIR/local.mk" <<EOF
 LINUX_OVERRIDE_SRCDIR = $KERNEL_SRCDIR
+
+# --- upstream bug workaround: python-contourpy names its extension for the
+# --- HOST, not the target.
+#
+# Found by inspecting a real built rootfs, not by a build failure - the build
+# SUCCEEDS and produces a correctly cross-compiled MIPS32 rel2 object. It is
+# only the FILENAME that is wrong:
+#
+#   site-packages/contourpy/_contourpy.cpython-312-x86_64-linux-gnu.so
+#
+# CPython looks for exactly its own importlib extension suffixes
+# (.cpython-312-mipsel-linux-gnu.so, .abi3.so, .so). That name matches none of
+# them, so 'import contourpy' fails at runtime - and contourpy is a hard
+# dependency of matplotlib, so NebulaOS's calibration and graphing paths break
+# with a green build. Exactly the failure mode that makes "it compiled" an
+# unsafe proxy for "it works".
+#
+# Cause: package/python-contourpy/python-contourpy.mk uses \$(eval
+# \$(meson-package)) but, unlike its siblings python-matplotlib and
+# python-numpy, sets no CONF_ENV. Those two export
+# _PYTHON_SYSCONFIGDATA_NAME so the build-time interpreter reads the TARGET's
+# sysconfigdata and meson-python derives the correct EXT_SUFFIX. contourpy
+# reads the host's instead.
+#
+# The fix below is byte-for-byte what python-matplotlib and python-numpy
+# already do, applied through the override file so no upstream file is
+# touched. Recursive (=) assignment, not :=, because PKG_PYTHON_* and
+# PYTHON3_PATH are defined later in package/pkg-python.mk and
+# package/python3/python3.mk.
+#
+# Worth reporting upstream; remove this when a Buildroot release carries the
+# CONF_ENV in the package itself. 06-verify.sh now fails the build if ANY
+# target extension carries a foreign ABI tag, so a regression here cannot go
+# unnoticed again.
+PYTHON_CONTOURPY_CONF_ENV += \\
+	_PYTHON_SYSCONFIGDATA_NAME=\$(PKG_PYTHON_SYSCONFIGDATA_NAME) \\
+	PYTHONPATH=\$(PYTHON3_PATH)
 EOF
 rm -rf "$BR2_EXT_BOARD/overlay"
 mkdir -p "$BR2_EXT_BOARD/overlay"

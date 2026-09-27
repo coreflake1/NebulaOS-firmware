@@ -592,6 +592,55 @@ check /usr/lib/libstdc++.so.6
 # ModuleNotFoundError: No module named zipp, before opening its own log.
 TARGET_PY=$(discover_target_python)
 echo "OK   target python discovered from the image: $TARGET_PY"
+
+# --- native Python extension ABI gate --------------------------------------
+#
+# Every CPython extension in the image must be named with THIS target's ABI
+# tag. A wrong tag is not a cosmetic problem: CPython's importlib only
+# considers its own suffixes (.cpython-<ver>-mipsel-linux-gnu.so, .abi3.so,
+# .so), so a differently-tagged file is invisible to `import` even when the
+# object inside it is a perfectly good MIPS shared library.
+#
+# This gate exists because that exact thing happened, and NOTHING else caught
+# it. Buildroot 2025.02.18's package/python-contourpy/python-contourpy.mk uses
+# $(eval $(meson-package)) but, unlike python-matplotlib and python-numpy, sets
+# no CONF_ENV exporting _PYTHON_SYSCONFIGDATA_NAME - so meson-python read the
+# HOST interpreter's sysconfigdata and emitted
+# _contourpy.cpython-312-x86_64-linux-gnu.so. Correct MIPS32 rel2 object,
+# unusable filename. The build was green, `file` on the target reported zero
+# x86-64 binaries, and matplotlib - which hard-depends on contourpy - would
+# have failed on the printer at first import, taking NebulaOS's calibration and
+# graphing paths with it.
+#
+# So: assert every tag is identical AND is the expected one. Derived from the
+# discovered interpreter version, never written out, so a Python minor bump
+# needs no edit here.
+TARGET_PY_XY=$(printf '%s' "$TARGET_PY" | sed 's/^python//; s/\.//')
+EXPECTED_ABI="cpython-${TARGET_PY_XY}-mipsel-linux-gnu"
+if command -v unsquashfs >/dev/null 2>&1 && [ -f "$IMAGES/rootfs.squashfs" ]; then
+	ABI_TAGS=$(unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null \
+		| grep -oE 'cpython-[0-9]+[A-Za-z0-9_-]*\.so$' \
+		| sed 's/\.so$//' | sort -u)
+	if [ -z "$ABI_TAGS" ]; then
+		echo "MISS no CPython extension modules found in rootfs.squashfs at all - expected many"
+	else
+		_bad=0
+		for t in $ABI_TAGS; do
+			if [ "$t" != "$EXPECTED_ABI" ]; then
+				echo "FATAL native Python extension ABI tag '$t' != expected '$EXPECTED_ABI'"
+				unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null | grep -E "$t\.so$" | sed 's/^/        /'
+				_bad=1
+			fi
+		done
+		if [ "$_bad" = 0 ]; then
+			echo "OK   every CPython extension in the image uses $EXPECTED_ABI ($(unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null | grep -cE 'cpython-[0-9]+[A-Za-z0-9_-]*\.so$') modules)"
+		else
+			echo "FATAL a differently-tagged extension is INVISIBLE to import on the target, even though the object inside it may be valid MIPS - see 02-configure-buildroot.sh's local.mk note"
+		fi
+	fi
+else
+	echo "MISS unsquashfs unavailable or rootfs.squashfs absent - native extension ABI gate NOT RUN (this is a SKIP, not a pass)"
+fi
 check /usr/lib/$TARGET_PY/site-packages/zipp
 # FIRMWARE.md sec 23 (2026-07-23): numpy is a soft/lazy Klipper dependency -
 # shaper_calibrate.py only raises a clean, user-facing error if it is

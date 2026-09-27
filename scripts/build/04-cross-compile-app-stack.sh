@@ -35,7 +35,24 @@ flock -n 9 || { echo "another build stage already owns $REPO_ROOT/.nebulaos-buil
 # 02-configure-buildroot.sh's own Phase 11 note for the full rationale).
 VENDOR="$REPO_ROOT/vendor"
 BUILDROOT_DIR="$VENDOR/buildroot-x2000"
-OVERLAY="$BUILDROOT_DIR/board/halley5-nebulaos-overlay"
+# The rootfs overlay staging directory. Buildroot 2025.02.18 migration: this
+# moved out of the upstream Buildroot checkout
+# ($BUILDROOT_DIR/board/halley5-nebulaos-overlay) and into the NebulaOS
+# BR2_EXTERNAL tree, so that nothing under vendor/buildroot-x2000 is written
+# except local.mk.
+#
+# It MUST stay identical to the path 02-configure-buildroot.sh populates and
+# to BR2_ROOTFS_OVERLAY in br2-external/configs/nebulaos_x2000_defconfig. A
+# mismatch is silent and expensive: stage 04 writes the entire application
+# payload (Klipper, Moonraker, Mainsail, GuppyScreen) into a directory
+# Buildroot never reads, and stage 05 then produces a rootfs that builds
+# cleanly and simply has no application stack in it. That exact mismatch
+# happened when the overlay was first relocated - 04 kept the old literal and
+# only failed later, on a missing config directory, several hundred lines
+# after the real divergence.
+#
+# tests/overlay-path-consistency-tests.sh asserts the three agree.
+OVERLAY="$REPO_ROOT/br2-external/board/nebulaos-x2000/overlay"
 TOOLCHAIN_HOST="$BUILDROOT_DIR/output/host"
 SYSROOT="$TOOLCHAIN_HOST/mipsel-buildroot-linux-gnu/sysroot"
 WORK="$REPO_ROOT/build-work/app-stack-extras"
