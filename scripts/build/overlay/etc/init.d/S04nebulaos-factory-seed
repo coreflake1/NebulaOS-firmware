@@ -299,6 +299,17 @@ seed_mainsail() {
 # smoke test - so a bad or missing seed can never leave the printer
 # unusable. $1: seed archive filename under $SEEDS. $2: envdir. $3: python
 # import smoke-test expression (same ones already used below).
+# Persistent-venv compatibility helpers (venv_matches_platform,
+# recover_torn_venv, swap_venv_into_place) live in one shared file so that
+# S05nebulaos-activate applies the SAME predicate this script does.
+NEBULAOS_VENV_LIB=/usr/libexec/nebulaos-venv-lib.sh
+if [ -r "$NEBULAOS_VENV_LIB" ]; then
+	. "$NEBULAOS_VENV_LIB"
+else
+	log "FATAL: $NEBULAOS_VENV_LIB missing - cannot validate persistent venvs safely"
+	exit 1
+fi
+
 try_venv_seed() {
 	seed_file="$1"; envdir="$2"; smoke_test="$3"
 	seed_path="$SEEDS/$seed_file"
@@ -315,15 +326,16 @@ try_venv_seed() {
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	rm -rf "$envdir"
-	mv "$envdir.partial" "$envdir"
+	swap_venv_into_place "$envdir" || return 1
 	return 0
 }
 
 setup_moonraker_env() {
 	envdir=/usr/data/nebulaos/envs/moonraker
-	if [ -x "$envdir/bin/python3" ]; then
-		log "moonraker venv already present ($envdir) - skipping"
+	moonraker_smoke="import tornado, numpy, streaming_form_data"
+	recover_torn_venv "$envdir" "$moonraker_smoke"
+	if venv_matches_platform "$envdir" "$moonraker_smoke"; then
+		log "moonraker venv already present and matches this image's python ($envdir) - skipping"
 		return 0
 	fi
 	if try_venv_seed "moonraker-venv-seed.tar.gz" "$envdir" "import tornado, numpy, streaming_form_data"; then
@@ -342,8 +354,7 @@ setup_moonraker_env() {
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	rm -rf "$envdir"
-	mv "$envdir.partial" "$envdir"
+	swap_venv_into_place "$envdir" || return 1
 	log "moonraker venv created and verified successfully"
 }
 
@@ -366,8 +377,10 @@ setup_moonraker_env() {
 # (S55klipper prefers this venv's python the same way).
 setup_klipper_env() {
 	envdir=/usr/data/nebulaos/envs/klipper
-	if [ -x "$envdir/bin/python3" ]; then
-		log "klipper venv already present ($envdir) - skipping"
+	klipper_smoke="import greenlet, cffi, jinja2, serial, can"
+	recover_torn_venv "$envdir" "$klipper_smoke"
+	if venv_matches_platform "$envdir" "$klipper_smoke"; then
+		log "klipper venv already present and matches this image's python ($envdir) - skipping"
 		return 0
 	fi
 	if try_venv_seed "klipper-venv-seed.tar.gz" "$envdir" "import greenlet, cffi, jinja2, serial, can"; then
@@ -386,8 +399,7 @@ setup_klipper_env() {
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	rm -rf "$envdir"
-	mv "$envdir.partial" "$envdir"
+	swap_venv_into_place "$envdir" || return 1
 	log "klipper venv created and verified successfully"
 }
 
@@ -446,8 +458,8 @@ start() {
 	# namespace is a state this device can genuinely be in.
 	if [ -e "$APPS/klipper/.git" ] && [ -e "$APPS/nebulaos-klipper-extensions/.git" ] \
 		&& [ -e "$APPS/moonraker/.git" ] && [ -e "$APPS/mainsail/index.html" ] \
-		&& [ -x /usr/data/nebulaos/envs/moonraker/bin/python3 ] \
-		&& [ -x /usr/data/nebulaos/envs/klipper/bin/python3 ]; then
+		&& venv_matches_platform /usr/data/nebulaos/envs/moonraker "import tornado, numpy, streaming_form_data" \
+		&& venv_matches_platform /usr/data/nebulaos/envs/klipper "import greenlet, cffi, jinja2, serial, can"; then
 		log "all components already seeded - nothing to do"
 		return 0
 	fi

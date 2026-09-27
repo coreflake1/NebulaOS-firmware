@@ -92,6 +92,18 @@ log() {
 	echo "$_ts $1" >> "$DIAG_LOG" 2>/dev/null || true
 }
 
+# Shared persistent-venv predicate - see /usr/libexec/nebulaos-venv-lib.sh.
+# Sourced AFTER log() so the library's messages go to this script's own log.
+# Non-fatal if absent: S05's other work (bind mounts for apps, config) must
+# still happen, and the one call site below fails closed on its own.
+NEBULAOS_VENV_LIB=/usr/libexec/nebulaos-venv-lib.sh
+if [ -r "$NEBULAOS_VENV_LIB" ]; then
+	. "$NEBULAOS_VENV_LIB"
+else
+	log "WARNING: $NEBULAOS_VENV_LIB missing - treating the klipper venv as unusable"
+	venv_matches_platform() { return 1; }
+fi
+
 # Records one app's activation decision. Appended as simple key=value lines
 # to a working file, assembled into JSON at the end of start() - avoids
 # needing a JSON-aware tool in a BusyBox ash environment.
@@ -311,10 +323,16 @@ start() {
 	# hasn't already had a lucky prior boot persist Klipper's real
 	# executable path into Moonraker's own database - i.e. always, on a
 	# genuinely fresh device.
-	if [ -x "$NEBULAOS_ROOT/envs/klipper/bin/python3" ]; then
+	# Same predicate S04nebulaos-factory-seed uses, from the same file - a
+	# bare `-x bin/python3` is true for a venv built against an interpreter
+	# this image no longer ships (persistent envs survive an A/B slot change
+	# in BOTH directions), and bind-mounting such a venv onto /root/klippy-env
+	# is worse than leaving it unmounted: Moonraker's update_manager would
+	# then infer a klipper venv that cannot execute.
+	if venv_matches_platform "$NEBULAOS_ROOT/envs/klipper" "import greenlet, cffi, jinja2, serial, can"; then
 		bind_if_not_already "$NEBULAOS_ROOT/envs/klipper" /root/klippy-env
 	else
-		log "klipper venv not present at $NEBULAOS_ROOT/envs/klipper - leaving /root/klippy-env unmounted (update_manager's klipper slot will fail to load until S04 provisions it)"
+		log "klipper venv at $NEBULAOS_ROOT/envs/klipper is absent or not usable by this image's python - leaving /root/klippy-env unmounted (S04nebulaos-factory-seed provisions/replaces it on the next seeding pass)"
 	fi
 
 	if validate_app mainsail "$NEBULAOS_ROOT/apps/mainsail" "index.html"; then
