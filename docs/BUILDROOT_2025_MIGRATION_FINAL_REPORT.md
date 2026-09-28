@@ -146,7 +146,7 @@ of the final candidate SHA, not to any intermediate build.
 ```
 IMAGE_REPRODUCIBILITY=NO
 REASON=BLOCKED - neither build of the pair was run
-FINAL_CANDIDATE=9d5ca86bc39460a2258d914c60c5da083e633848  (pushed, UNBUILT)
+FINAL_CANDIDATE=tip of buildroot-2025.02-migration (pushed, UNBUILT)
 LAST_ATTESTED_BUILD=8bbe8eb85d560bdbf84dfc0bed9468cf066aa32e  (an ancestor, not the candidate)
 ```
 
@@ -186,9 +186,17 @@ tests that pass, but neither has been through a real build.
 
 ### To complete this, sequentially and on the same SHA
 
+Take the branch tip and use **the same SHA for both builds**. Do not hardcode a
+SHA from this document: docs-only commits move the tip, and because
+`SOURCE_DATE_EPOCH` is derived from the commit, they change the artifact hashes
+without changing behaviour. What matters is that A and B are the same commit.
+
 ```
-tools/run-nebulaos-build.sh --candidate 9d5ca86bc39460a2258d914c60c5da083e633848   # Build A
-tools/run-nebulaos-build.sh --candidate 9d5ca86bc39460a2258d914c60c5da083e633848   # Build B
+SHA=$(git ls-remote https://github.com/coreflake1/NebulaOS-firmware.git \
+        refs/heads/buildroot-2025.02-migration | cut -f1)
+
+tools/run-nebulaos-build.sh --candidate "$SHA"     # Build A
+tools/run-nebulaos-build.sh --candidate "$SHA"     # Build B   (after A finishes)
 ```
 
 Never concurrently: both bind-mount the Buildroot download cache at
