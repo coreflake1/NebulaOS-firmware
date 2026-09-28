@@ -108,8 +108,34 @@ assert_val BR2_OPTIMIZE_S y
 # LTO must stay off for this migration.
 assert_empty BR2_GCC_ENABLE_LTO
 
-# ---- reproducibility -------------------------------------------------------
+# ---- reproducibility and supply chain --------------------------------------
 assert_val BR2_REPRODUCIBLE y
+# BR2_DOWNLOAD_FORCE_CHECK_HASHES is deliberately OFF, and asserted off so the
+# decision is recorded rather than drifting.
+#
+# Mission section 26 asks for strict hash checking "when practical". It is not
+# practical here yet, for a specific reason. Its help text: Buildroot already
+# checks hashes for every download EXCEPT packages using a custom version;
+# turning this on extends checking to those too, and the documented way to
+# supply the missing hashes is to place hash files in BR2_GLOBAL_PATCH_DIR.
+#
+# This product's kernel IS such a package - BR2_LINUX_KERNEL_CUSTOM_GIT at a
+# pinned SHA - and BR2_GLOBAL_PATCH_DIR was removed by this migration after
+# being proven inert. Measured against the real configuration: of 236 download
+# artifacts, exactly 2 have no hash, and both are the kernel tarball (linux and
+# linux-headers). Everything else, including all nine br2-external packages, is
+# hashed.
+#
+# The kernel's provenance is enforced by a different mechanism rather than left
+# unchecked: KERNEL_REPO/KERNEL_PIN in manifests/dependencies.conf, re-verified
+# on every run by 00-fetch-vendor-sources.sh (including the origin-URL check
+# added by this migration), plus the workspace identity gate. The kernel is also
+# rsynced from that pinned checkout via LINUX_OVERRIDE_SRCDIR rather than
+# downloaded.
+#
+# Enabling it is a follow-up item, not a silent omission. See
+# docs/BUILDROOT_2025_MIGRATION_PARITY.md.
+assert_empty BR2_DOWNLOAD_FORCE_CHECK_HASHES
 
 # ---- init / device management ----------------------------------------------
 assert_val BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV y
