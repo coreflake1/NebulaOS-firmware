@@ -76,23 +76,77 @@ Non-negotiable, and the reason this cannot be a casual refactor:
 
 ## 2. Release artifact packaging formats
 
-**Status:** deferred. Explicitly out of scope for the current cycle.
+**Status:** PARTIALLY UN-DEFERRED (2026-09-28, universal-release mission). Read
+the scope limits below before treating either artifact as installable.
 
-- Creality `.img` packaging
-- Ingenic `.ingenic` packaging
-- DarKE port
-- OpenKlipperEdition Recovery port
+- Creality `.img` packaging — **built, blank-media scope only**
+- Ingenic `.ingenic` packaging — **built, Creality-cloner compatibility UNVERIFIED**
+- DarKE port — still deferred, not started
+- OpenKlipperEdition Recovery port — still deferred, not started
 
-### Why deferred
+### Why it was deferred, and what changed
 
-These are valuable, but introducing new release artifact formats immediately
-before hardware qualification would mean qualifying bytes that no prior cycle
-has produced. The artifacts being frozen for this qualification remain the
-existing canonical core set (`xImage`, `rootfs.squashfs`).
+The original reasoning stands and has not been overturned: introducing new
+release artifact formats immediately before hardware qualification would mean
+qualifying bytes that no prior cycle has produced. **The artifacts frozen for
+hardware qualification remain the canonical core set (`xImage`,
+`rootfs.squashfs`) and nothing here changes that.**
+
+What changed is that the packaging was explicitly requested as a deliverable, so
+it now exists as *packaging of the same canonical core* rather than as a new
+thing to qualify. Both formats consume the already-built `xImage` and
+`rootfs.squashfs` byte-for-byte and compile nothing, which is the property that
+makes them additive rather than a new qualification surface. Their validators
+assert exactly that.
+
+### Hard scope limits, and why they exist
+
+**`.img` is a blank-media provisioning image. It must never be written to a
+printer that already carries factory data.** Three reasons, recorded
+machine-readably in every generated manifest as
+`IMG_NOT_FOR_PROVISIONED_PRINTER_BECAUSE=`:
+
+1. **`sn_mac` is irreplaceable.** `/dev/mmcblk0p2` (1024 bytes) holds the
+   per-unit factory MAC and serial —
+   `26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1` on the reference unit,
+   confirmed in `docs/NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md` to
+   be the address stock's `wlan0` actually uses. A raw whole-disk write zeroes
+   it, permanently. NebulaOS is separately scheduled to *start* reading this
+   partition rather than deriving its own MAC, which makes destroying it worse,
+   not better.
+2. **The stock slot cannot be restored.** A whole-disk image empties p5/p7, the
+   fallback `docs/DEVELOPER_RECOVERY.md` designates as the way back. We do not
+   have Creality's stock kernel and rootfs and could not redistribute them.
+3. **The geometry is unverified.** No `sgdisk --print /dev/mmcblk0` has ever
+   been captured, so the absolute start offsets in the authored partition table
+   are a reconstruction. `tools/emmc/nebulaos_layout.py` lists every declared
+   fact by name.
+
+The update path for a working printer is unchanged and unaffected:
+`scripts/flash-spare-slot.sh`, which writes `kernel2` and `rootfs2` and touches
+nothing else.
+
+**`.ingenic` carries `CREALITY_CLONER_COMPATIBLE=UNVERIFIED`.** Creality's
+recovery tool for this printer is a closed Windows binary
+(`cloner-2.5.18-windows_alpha.zip` in `CrealityOfficial/Ender-3_V3_KE_Annex`);
+no sample package and no format specification are published. The container is
+therefore a NebulaOS format with a `NEBULAOS-RECOVERY` magic at offset 0, chosen
+so a foreign tool rejects the file outright rather than misreading its header
+and beginning a partial flash. It is end-user/factory recovery media and is
+explicitly not a Hardware Agent transport (`HARDWARE_AGENT_TRANSPORT=NO`).
+
+### What would close the remaining gaps
+
+- **`.img` whole-disk to a real printer:** a captured factory GPT, a per-unit
+  `sn_mac` preservation step, and a redistributable stock slot. All three, not
+  any one. `tools/emmc/nebulaos_layout.py:require_whole_disk_preconditions()`
+  enumerates them at runtime.
+- **`.ingenic` compatibility:** a reference `.ingenic` package to parse and
+  compare against. Until one exists, the claim stays UNVERIFIED — never `YES`,
+  and the validator fails if it ever drifts.
 
 `tools/maintenance/build-cache-gc.sh` already refuses to collect `.img` and
-`.ingenic` files should they appear, so the GC tool does not need revisiting
-when this work starts.
+`.ingenic` files, so the GC tool still needs no revisiting.
 
 ---
 
