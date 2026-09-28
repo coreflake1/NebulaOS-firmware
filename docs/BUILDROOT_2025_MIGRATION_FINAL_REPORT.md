@@ -1,14 +1,19 @@
 # NEBULAOS_BUILDROOT_2025_MIGRATION — final report
 
-> Reproducibility (§27) is filled in from the two clean builds. Until both have
-> run on the final candidate SHA, that section reads
-> `IMAGE_REPRODUCIBILITY=NOT_YET_PROVEN` and must not be read as anything else.
+> **`MISSION_STATUS=PARTIAL`.** The migration is functionally complete and the
+> candidate builds green, but §27 reproducibility is **not proven** and the
+> final candidate SHA has **not been built at all**. See REPRODUCIBILITY and
+> BUILD below for exactly what is and is not evidenced.
 
 ## MISSION RESULT
 
 ```
 MISSION=NEBULAOS_BUILDROOT_2025_MIGRATION
+MISSION_STATUS=PARTIAL
 BRANCH=buildroot-2025.02-migration
+HEAD=9d5ca86bc39460a2258d914c60c5da083e633848
+WORKTREE_CLEAN=YES
+CANONICAL_WORKSPACE=untouched, main @ fd4a365, clean, single worktree
 BASE=fd4a365e9cc2b7dd478547bde00a272decee220e
 COMMITS=11
 ```
@@ -110,8 +115,8 @@ update needing a newer platform must fail cleanly rather than mutate the OS.
 ## BUILD
 
 ```
-06-verify   264 OK
-candidate gate   17 PASS / 0 FAIL
+06-verify   264 OK, 1 MISS, 0 FATAL   (at 8bbe8eb; the MISS is fixed in c6bf193, unbuilt)
+candidate gate   17 PASS / 0 FAIL     (at 8bbe8eb)
 regression suites   67 PASS / 11 FAIL / 2 SKIP   (80 suites)
 ```
 
@@ -139,14 +144,68 @@ of the final candidate SHA, not to any intermediate build.
 ## REPRODUCIBILITY
 
 ```
-IMAGE_REPRODUCIBILITY=NOT_YET_PROVEN
+IMAGE_REPRODUCIBILITY=NO
+REASON=BLOCKED - neither build of the pair was run
+FINAL_CANDIDATE=9d5ca86bc39460a2258d914c60c5da083e633848  (pushed, UNBUILT)
+LAST_ATTESTED_BUILD=8bbe8eb85d560bdbf84dfc0bed9468cf066aa32e  (an ancestor, not the candidate)
 ```
 
-Build A and Build B must run **sequentially** on the same published SHA. They
-share the Buildroot download cache at `$HOME/.cache/nebulaos/buildroot-dl`,
-which is bind-mounted and deliberately **not** freshened per run — every tarball
-is sha256-verified on use, so this is not a correctness risk, but "fresh clone"
-does not mean "fresh downloads" and the proof should not claim otherwise.
+This is not a claim that reproducibility failed. It is a statement that **the
+two builds were never run**, so nothing about reproducibility is known either
+way. Build A was launched twice and terminated by an API session rate limit
+before the build began; the second attempt did not get past its identity gate.
+No workspace exists for `9d5ca86`, and no partial state was left behind.
+
+### What has actually been built
+
+The only SHA on this branch with a build attestation is **`8bbe8eb`**, four
+commits back. It passed cleanly: exit 0, 06-verify `OK=264 MISS=1 FATAL=0`,
+candidate gate 17/0, GCC 13.4.0 / binutils 2.43.1 / Python 3.12.14, and the
+application stack confirmed present in the shipped `rootfs.squashfs`.
+
+```
+SOURCE_HEAD=8bbe8eb85d560bdbf84dfc0bed9468cf066aa32e
+XIMAGE_SHA256=d139733af462d425eccacc22dcd645541058ea528ea4456b7b5cfd82c14813ff   5505088
+ROOTFS_SQUASHFS_SHA256=a2f819044d907e8fa9076ff15679b17d27cb3d4280e4e8150fb4eb6f1a412d1c  129503232
+BUILDER_DIGEST=sha256:a6ba57c69fa1ea630b037a1d1f55cf0c044a7f5a403bde9b155ea54bca1cceba
+SOURCE_DATE_EPOCH=1790534256
+```
+
+**Those hashes belong to `8bbe8eb`, not to the candidate, and must not be used
+to qualify `9d5ca86`.** Two later commits change the image or its verification:
+
+| Commit | Changes the image? |
+|---|---|
+| `c6bf193` stop staging the defconfig into the upstream tree | No — but it is what clears the single `MISS=1`, so `MISS=0` is **expected, not demonstrated** |
+| `b80bcd6` venv helper library resolution in S04/S05 | **Yes** — both scripts are in the rootfs overlay |
+| `702ae67`, `9d5ca86` | No — docs and a build-independent tool |
+
+So the candidate carries one unbuilt overlay change and one unverified
+pristineness fix. Neither is speculative in intent, and both are covered by
+tests that pass, but neither has been through a real build.
+
+### To complete this, sequentially and on the same SHA
+
+```
+tools/run-nebulaos-build.sh --candidate 9d5ca86bc39460a2258d914c60c5da083e633848   # Build A
+tools/run-nebulaos-build.sh --candidate 9d5ca86bc39460a2258d914c60c5da083e633848   # Build B
+```
+
+Never concurrently: both bind-mount the Buildroot download cache at
+`$HOME/.cache/nebulaos/buildroot-dl`. Then compare `XIMAGE_SHA256`,
+`XIMAGE_SIZE`, `ROOTFS_SQUASHFS_SHA256` and `ROOTFS_SQUASHFS_SIZE` between the
+two attestations. Identical on all four ⇒ `IMAGE_REPRODUCIBILITY=PROVEN`.
+
+Expect `06-verify` to report `MISS=0` and `check_vendor_pin buildroot-x2000` to
+show exactly `?? local.mk`. If either differs, that is a finding.
+
+Caveat to carry into the proof: the download cache is **not** freshened per run.
+Every tarball is sha256-verified on use, so this is not a correctness risk, but
+"fresh clone" does not mean "fresh downloads", and the proof covers
+build determinism given identical inputs — not input acquisition.
+
+**Reproducibility must never be inferred from an incremental build, from the
+two earlier `fd4a365` builds, or from `8bbe8eb` passing.**
 
 ## PERFORMANCE
 
