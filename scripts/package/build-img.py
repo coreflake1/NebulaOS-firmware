@@ -277,9 +277,28 @@ def build(args):
         if os.path.exists(out):
             os.unlink(out)
 
+        # DETERMINISM. 7z stores each member's mtime, so an archive built from
+        # files that were just created carries the wall clock and two runs over
+        # an identical core produce different bytes - measured, not theorised:
+        # the same canonical core gave 104700706 and 104700690 byte archives.
+        #
+        # Every staged file and directory is stamped with SOURCE_DATE_EPOCH,
+        # which is derived from the source commit. Timestamps are still STORED
+        # (rather than suppressed with -mtm=off) so the archive keeps the shape
+        # a vendor package has; they are simply a property of the release
+        # instead of a property of when it was packed.
+        epoch = int(args.source_date_epoch)
+        for dirpath, dirnames, filenames in os.walk(root, topdown=False):
+            for name in filenames + dirnames:
+                os.utime(os.path.join(dirpath, name), (epoch, epoch))
+        os.utime(root, (epoch, epoch))
+
         # -mhe=on matches the vendor envelope's header encryption.
+        # -mmt=off: multithreaded LZMA splits the stream differently depending on
+        # how many cores the packing host has, which would make the output depend
+        # on the machine rather than on the input.
         proc = subprocess.run(
-            ["7z", "a", "-t7z", "-mhe=on", "-mx=9", "-p%s" % secret, out, top],
+            ["7z", "a", "-t7z", "-mhe=on", "-mx=9", "-mmt=off", "-p%s" % secret, out, top],
             capture_output=True, text=True, cwd=work,
         )
         if proc.returncode != 0:
