@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
-"""Validate a NebulaOS .img by taking it apart again.
+"""Validate a NebulaOS Creality F005 OTA .img by taking it apart again.
 
-A packaging command that exits 0 proves only that it did not crash. This reads
-the finished artifact back the way a flasher would, and asserts that what came
-out is what went in.
+A packaging command that exits 0 proves only that it did not crash. This opens
+the archive the way the stock updater would, walks the chunk chain exactly as
+the updater walks it, and then does the one thing that actually settles the
+question: it reassembles both payloads from the packaged chunks and compares
+SHA-256 against the canonical core.
 
-It checks, in order:
+Checks, in the order a failure is most informative:
 
-  1. the partition table parses as a GPT and passes the Ender-3 V3 KE layout
-     validation (ten expected labels, matched A/B slot sizes, no overlap)
-  2. the bytes occupying kernel2 are EXACTLY the canonical xImage
-  3. the bytes occupying rootfs2 are EXACTLY the canonical rootfs.squashfs
-  4. the OTA marker partition holds exactly one canonical ota:kernel2 block
-  5. the stock slot really is empty, as the manifest claims - because "we left
-     slot 1 alone" is a safety claim and safety claims get tested
-  6. the embedded squashfs is a real, readable filesystem, proven by listing it
-     with unsquashfs rather than by recognising four magic bytes
-  7. the .img manifest agrees with all of the above
+  1. the archive opens with the derived envelope secret
+  2. the expected top-level directory, ota_config.in, ota_update.in and the
+     .ok version marker are present
+  3. ota_update.in declares the right sizes and full-image MD5s
+  4. every chunk exists, in an unbroken 0000..N sequence with no gaps
+  5. every chunk's CONTENT hashes to the MD5 the NEXT chunk's filename carries,
+     and chunk 0000's filename carries the full-image MD5 - the chain itself
+  6. the ota_md5_<name>.<full> manifest lists exactly those per-chunk digests,
+     in order, with no extra or missing lines
+  7. reassembled payload SHA-256 == canonical payload SHA-256
+  8. each payload fits the partition it is destined for
 
-Comparison is by SHA-256 over the exact payload length at the partition's
-offset, never over the whole partition: the partition is larger than the
-payload and the remainder is padding. Hashing the padding too would be
-comparing the wrong thing, and loosening the comparison to make it pass would
-be worse.
+(5) is the check that would catch a plausible-looking but wrong chunk scheme -
+for instance one where each chunk names its own digest rather than its
+predecessor's. Such a package would build cleanly and be rejected by the printer.
 """
 
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "emmc"))
+import nebulaos_layout as layout  # noqa: E402
 
-import nebulaos_gpt as gpt  # noqa: E402
-
-MARKER_KERNEL2 = b"ota:kernel2"
-CHUNK = 1024 * 1024
-
+CHUNK_BYTES = 1048576
 PASS, FAIL = [], []
 
 
@@ -58,289 +57,38 @@ def bad(msg, detail=""):
 def sha256_file(path):
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(CHUNK), b""):
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def sha256_region(path, offset, length):
-    """Hash exactly `length` bytes at `offset` - the payload, not the padding."""
-    digest = hashlib.sha256()
-    remaining = length
+def md5_file(path):
+    digest = hashlib.md5()
     with open(path, "rb") as fh:
-        fh.seek(offset)
-        while remaining:
-            data = fh.read(min(CHUNK, remaining))
-            if not data:
-                raise IOError("short read at offset %d" % offset)
-            digest.update(data)
-            remaining -= len(data)
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
     return digest.hexdigest()
 
 
-def region_is_zero(path, offset, length, sample=None):
-    """True if the region is entirely zero.
+def parse_update_in(text):
+    """Parse ota_update.in into [{img_type, img_name, img_size, img_md5}, ...].
 
-    `sample` caps how much is read, for the multi-hundred-megabyte stock rootfs
-    region where reading all of it proves little more than reading a large
-    prefix. When capped, the caller says so in its message rather than claiming
-    the whole region was checked.
+    The file is a flat sequence of key=value lines with blank-line separated
+    records, so a new record starts whenever img_type reappears.
     """
-    remaining = length if sample is None else min(sample, length)
-    with open(path, "rb") as fh:
-        fh.seek(offset)
-        while remaining:
-            data = fh.read(min(CHUNK, remaining))
-            if not data:
-                return False
-            if data.strip(b"\x00"):
-                return False
-            remaining -= len(data)
-    return True
-
-
-def manifest_get(path, key):
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if line.startswith(key + "="):
-                return line.split("=", 1)[1].strip()
-    return None
-
-
-def main(argv):
-    parser = argparse.ArgumentParser(description="Validate a NebulaOS .img against its canonical core")
-    parser.add_argument("--img", required=True)
-    parser.add_argument("--ximage", required=True, help="canonical xImage to compare against")
-    parser.add_argument("--rootfs", required=True, help="canonical rootfs.squashfs to compare against")
-    parser.add_argument("--manifest", help="the .img's own manifest (defaults to <img>.manifest.txt)")
-    parser.add_argument("--skip-extract", action="store_true",
-                        help="skip the unsquashfs listing (for environments without squashfs-tools)")
-    args = parser.parse_args(argv)
-
-    img_manifest = args.manifest or (args.img + ".manifest.txt")
-
-    canonical_x = sha256_file(args.ximage)
-    canonical_r = sha256_file(args.rootfs)
-    x_size = os.path.getsize(args.ximage)
-    r_size = os.path.getsize(args.rootfs)
-
-    print("=== .img validation: %s ===" % args.img)
-    print("CANONICAL_XIMAGE_SHA256=%s" % canonical_x)
-    print("CANONICAL_ROOTFS_SHA256=%s" % canonical_r)
-    print()
-
-    # --- 1. partition table ------------------------------------------------
-    try:
-        with open(args.img, "rb") as fh:
-            table = gpt.parse(fh)
-        ok("the image's partition table parses as a GPT")
-    except (gpt.GPTError, OSError) as exc:
-        bad("the image's partition table parses as a GPT", str(exc))
-        return report()
-
-    try:
-        notes = table.validate_ke_layout()
-        ok("the layout validates as an Ender-3 V3 KE layout (10 expected labels, matched slots)")
-        for note in notes:
-            print("       %s" % note)
-    except gpt.GPTError as exc:
-        bad("the layout validates as an Ender-3 V3 KE layout", str(exc))
-        return report()
-
-    parts = {p.label: p for p in table.partitions}
-
-    # --- 2/3. payloads are byte-exact --------------------------------------
-    k2 = parts["kernel2"]
-    got = sha256_region(args.img, k2.offset, x_size)
-    if got == canonical_x:
-        ok("kernel2 holds the canonical xImage byte-for-byte (%d bytes at 0x%x)" % (x_size, k2.offset))
-    else:
-        bad("kernel2 holds the canonical xImage byte-for-byte", "embedded=%s canonical=%s" % (got, canonical_x))
-
-    r2 = parts["rootfs2"]
-    got = sha256_region(args.img, r2.offset, r_size)
-    if got == canonical_r:
-        ok("rootfs2 holds the canonical rootfs.squashfs byte-for-byte (%d bytes at 0x%x)" % (r_size, r2.offset))
-    else:
-        bad("rootfs2 holds the canonical rootfs.squashfs byte-for-byte", "embedded=%s canonical=%s" % (got, canonical_r))
-
-    # The payload must FIT, and the remainder of the partition must be padding
-    # rather than leftovers from something else.
-    if x_size <= k2.size and r_size <= r2.size:
-        ok("both payloads fit inside their partitions")
-    else:
-        bad("both payloads fit inside their partitions",
-            "xImage %d/%d  rootfs %d/%d" % (x_size, k2.size, r_size, r2.size))
-
-    if region_is_zero(args.img, k2.offset + x_size, k2.size - x_size):
-        ok("kernel2 padding after the payload is zero")
-    else:
-        bad("kernel2 padding after the payload is zero")
-
-    if region_is_zero(args.img, r2.offset + r_size, r2.size - r_size, sample=32 * CHUNK):
-        ok("rootfs2 padding after the payload is zero (first 32 MiB sampled)")
-    else:
-        bad("rootfs2 padding after the payload is zero (first 32 MiB sampled)")
-
-    # --- 4. the marker -----------------------------------------------------
-    ota = parts["ota"]
-    with open(args.img, "rb") as fh:
-        fh.seek(ota.offset)
-        block = fh.read(512)
-    expected = bytearray(512)
-    expected[: len(MARKER_KERNEL2)] = MARKER_KERNEL2
-    if block == bytes(expected):
-        ok("the OTA marker partition holds exactly one canonical ota:kernel2 block")
-    else:
-        bad("the OTA marker partition holds exactly one canonical ota:kernel2 block",
-            "got %r" % block[:32])
-
-    if region_is_zero(args.img, ota.offset + 512, ota.size - 512):
-        ok("the rest of the OTA partition is zero (no stale second marker)")
-    else:
-        bad("the rest of the OTA partition is zero (no stale second marker)")
-
-    # --- 5. the stock slot really is untouched -----------------------------
-    # The manifest claims IMG_STOCK_SLOT_POPULATED=NO. That is a statement about
-    # what a user loses by flashing this image, so it gets verified rather than
-    # trusted.
-    if region_is_zero(args.img, parts["kernel"].offset, parts["kernel"].size):
-        ok("the stock kernel partition is empty, as the manifest states")
-    else:
-        bad("the stock kernel partition is empty, as the manifest states")
-
-    if region_is_zero(args.img, parts["rootfs"].offset, parts["rootfs"].size, sample=32 * CHUNK):
-        ok("the stock rootfs partition is empty, as the manifest states (first 32 MiB sampled)")
-    else:
-        bad("the stock rootfs partition is empty, as the manifest states (first 32 MiB sampled)")
-
-    # --- 6. the embedded filesystem is real --------------------------------
-    if args.skip_extract:
-        print("SKIP  unsquashfs listing (--skip-extract)")
-    elif not shutil.which("unsquashfs"):
-        bad("the embedded rootfs is a readable squashfs (unsquashfs listing)",
-            "unsquashfs is not installed; pass --skip-extract to acknowledge this gap explicitly")
-    else:
-        tmpdir = tempfile.mkdtemp(prefix="nebulaos-img-validate.", dir=os.environ.get("TMPDIR") or None)
-        try:
-            extracted = os.path.join(tmpdir, "rootfs.squashfs")
-            with open(args.img, "rb") as src, open(extracted, "wb") as dst:
-                src.seek(r2.offset)
-                remaining = r_size
-                while remaining:
-                    data = src.read(min(CHUNK, remaining))
-                    dst.write(data)
-                    remaining -= len(data)
-
-            proc = subprocess.run(
-                ["unsquashfs", "-l", extracted],
-                capture_output=True, text=True, timeout=300,
-            )
-            if proc.returncode != 0:
-                bad("the embedded rootfs is a readable squashfs (unsquashfs listing)",
-                    proc.stderr.strip()[:400])
-            else:
-                listing = proc.stdout
-                entries = [l for l in listing.splitlines() if l.startswith("squashfs-root")]
-                if len(entries) < 100:
-                    bad("the embedded rootfs is a readable squashfs (unsquashfs listing)",
-                        "only %d entries listed" % len(entries))
-                else:
-                    ok("the embedded rootfs is a readable squashfs (%d entries listed by unsquashfs)"
-                       % len(entries))
-
-                # Spot-check that it is a NebulaOS rootfs and not merely a valid
-                # squashfs. These paths are structural to this product.
-                wanted = ["squashfs-root/etc", "squashfs-root/usr", "squashfs-root/sbin"]
-                missing = [w for w in wanted if w not in listing]
-                if not missing:
-                    ok("the embedded filesystem has the expected top-level structure")
-                else:
-                    bad("the embedded filesystem has the expected top-level structure",
-                        "missing: %s" % ", ".join(missing))
-
-                if "squashfs-root/etc/ota_marker.sh" in listing:
-                    ok("the embedded filesystem carries NebulaOS's own OTA marker helper")
-                else:
-                    bad("the embedded filesystem carries NebulaOS's own OTA marker helper",
-                        "/etc/ota_marker.sh absent - this may not be a NebulaOS rootfs")
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    # --- 7. the manifest agrees -------------------------------------------
-    if not os.path.exists(img_manifest):
-        bad("the .img manifest exists", img_manifest)
-    else:
-        checks = [
-            ("XIMAGE_SHA256", canonical_x),
-            ("ROOTFS_SQUASHFS_SHA256", canonical_r),
-            ("IMG_SHA256", sha256_file(args.img)),
-            ("IMG_SIZE", str(os.path.getsize(args.img))),
-        ]
-        disagreements = [(k, v, manifest_get(img_manifest, k)) for k, v in checks
-                         if manifest_get(img_manifest, k) != v]
-        if not disagreements:
-            ok("the .img manifest agrees with the artifact and the canonical core")
-        else:
-            bad("the .img manifest agrees with the artifact and the canonical core",
-                "; ".join("%s: manifest=%s actual=%s" % (k, got, want) for k, want, got in disagreements))
-
-        flashable = manifest_get(img_manifest, "IMG_FACTORY_FLASHABLE")
-        verified = manifest_get(img_manifest, "EMMC_LAYOUT_GEOMETRY_VERIFIED")
-        if flashable == verified:
-            ok("IMG_FACTORY_FLASHABLE tracks EMMC_LAYOUT_GEOMETRY_VERIFIED (=%s)" % flashable)
-        else:
-            bad("IMG_FACTORY_FLASHABLE tracks EMMC_LAYOUT_GEOMETRY_VERIFIED",
-                "flashable=%s verified=%s" % (flashable, verified))
-
-        if flashable == "NO":
-            print("       NOTE: this image is deliberately NOT declared factory-flashable.")
-            print("       The partition table's absolute offsets have never been captured from")
-            print("       real hardware. See tools/emmc/nebulaos_layout.py for the exact gap.")
-
-        # The scope declaration is a safety property, so it is asserted rather
-        # than assumed. If a future change ever drops these lines, or widens the
-        # target beyond blank media without the preconditions being met, this
-        # fails rather than quietly shipping an image that invites a write to a
-        # provisioned printer.
-        target = manifest_get(img_manifest, "IMG_TARGET")
-        if target == "BLANK_MEDIA_ONLY":
-            ok("the manifest declares IMG_TARGET=BLANK_MEDIA_ONLY")
-        else:
-            bad("the manifest declares IMG_TARGET=BLANK_MEDIA_ONLY", "got %r" % target)
-
-        forbidden = manifest_get(img_manifest, "IMG_WRITE_TO_PROVISIONED_PRINTER")
-        if forbidden == "FORBIDDEN":
-            ok("the manifest forbids writing this image to a provisioned printer")
-        else:
-            bad("the manifest forbids writing this image to a provisioned printer",
-                "got %r" % forbidden)
-
-        destroyed = (manifest_get(img_manifest, "IMG_DESTROYS_PARTITIONS") or "").split(",")
-        # sn_mac is the one that cannot be undone. It must be named explicitly.
-        if "sn_mac" in destroyed:
-            ok("the manifest names sn_mac among the partitions this image destroys")
-        else:
-            bad("the manifest names sn_mac among the partitions this image destroys",
-                "IMG_DESTROYS_PARTITIONS=%r - the per-unit factory MAC/serial loss must be stated"
-                % ",".join(destroyed))
-
-        reasons = []
-        with open(img_manifest, "r", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("IMG_NOT_FOR_PROVISIONED_PRINTER_BECAUSE="):
-                    reasons.append(line.split("=", 1)[1].strip())
-        if len(reasons) >= 3:
-            ok("the manifest records all %d reasons this image is not a printer update path" % len(reasons))
-            for reason in reasons:
-                print("       - %s" % reason[:150])
-        else:
-            bad("the manifest records the reasons this image is not a printer update path",
-                "found %d, expected at least 3 (geometry, sn_mac, stock fallback)" % len(reasons))
-
-    return report()
+    records, current = [], {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        key, _, value = line.partition("=")
+        if key == "img_type" and current:
+            records.append(current)
+            current = {}
+        current[key] = value
+    if current:
+        records.append(current)
+    return [r for r in records if "img_name" in r]
 
 
 def report():
@@ -349,6 +97,189 @@ def report():
     print("IMG_VALIDATION_FAIL=%d" % len(FAIL))
     print("IMG_VALIDATED=%s" % ("YES" if not FAIL else "NO"))
     return 0 if not FAIL else 1
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="Validate a NebulaOS Creality F005 OTA .img")
+    parser.add_argument("--img", required=True)
+    parser.add_argument("--ximage", required=True, help="canonical xImage to compare against")
+    parser.add_argument("--rootfs", required=True, help="canonical rootfs.squashfs to compare against")
+    args = parser.parse_args(argv)
+
+    # Import the packager so the envelope secret and chunk size are derived by
+    # exactly one implementation. A validator with its own copy of either could
+    # agree with a broken packager.
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "nebulaos_build_img", os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-img.py"))
+    packer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(packer)
+
+    canonical = {
+        "xImage": (sha256_file(args.ximage), os.path.getsize(args.ximage), args.ximage),
+        "rootfs.squashfs": (sha256_file(args.rootfs), os.path.getsize(args.rootfs), args.rootfs),
+    }
+
+    print("=== .img (Creality F005 OTA) validation: %s ===" % args.img)
+    for name, (sha, size, _) in canonical.items():
+        print("CANONICAL_%s_SHA256=%s size=%d" % (name.upper().replace(".", "_"), sha, size))
+    print()
+
+    secret = packer.derive_archive_secret()
+    ok("the OTA envelope secret derives to the expected MD5-crypt value")
+
+    work = tempfile.mkdtemp(prefix="nebulaos-img-validate.", dir=os.environ.get("TMPDIR") or None)
+    try:
+        proc = subprocess.run(["7z", "x", "-y", "-p%s" % secret, "-o%s" % work, args.img],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            bad("the archive extracts with the derived secret", proc.stderr.strip()[:400])
+            return report()
+        ok("the archive extracts with the derived secret")
+
+        tops = [d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d))]
+        if len(tops) == 1 and tops[0].startswith("Ender-3_V3_KE_F005_ota_img_V"):
+            ok("the archive holds exactly one expected top-level directory (%s)" % tops[0])
+        else:
+            bad("the archive holds exactly one expected top-level directory", repr(tops))
+            return report()
+        root = os.path.join(work, tops[0])
+
+        if os.path.isfile(os.path.join(root, "ota_config.in")):
+            ok("ota_config.in is present")
+        else:
+            bad("ota_config.in is present")
+
+        inners = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+        if len(inners) == 1 and inners[0].startswith("ota_v"):
+            ok("the package holds exactly one versioned payload directory (%s)" % inners[0])
+        else:
+            bad("the package holds exactly one versioned payload directory", repr(inners))
+            return report()
+        payload_dir = os.path.join(root, inners[0])
+
+        if os.path.isfile(os.path.join(payload_dir, "%s.ok" % inners[0])):
+            ok("the %s.ok version marker is present" % inners[0])
+        else:
+            bad("the %s.ok version marker is present" % inners[0])
+
+        update_path = os.path.join(payload_dir, "ota_update.in")
+        if not os.path.isfile(update_path):
+            bad("ota_update.in is present")
+            return report()
+        ok("ota_update.in is present")
+
+        records = {r["img_name"]: r for r in parse_update_in(open(update_path, encoding="utf-8").read())}
+        if set(records) == set(canonical):
+            ok("ota_update.in declares exactly the two expected images")
+        else:
+            bad("ota_update.in declares exactly the two expected images", repr(sorted(records)))
+
+        entries = os.listdir(payload_dir)
+
+        for name, (canon_sha, canon_size, canon_path) in canonical.items():
+            record = records.get(name)
+            if not record:
+                bad("ota_update.in has a record for %s" % name)
+                continue
+
+            canon_md5 = md5_file(canon_path)
+
+            if record.get("img_size") == str(canon_size):
+                ok("%s: ota_update.in size (%s) matches the canonical payload" % (name, canon_size))
+            else:
+                bad("%s: ota_update.in size matches the canonical payload" % name,
+                    "declared=%s actual=%d" % (record.get("img_size"), canon_size))
+
+            if record.get("img_md5") == canon_md5:
+                ok("%s: ota_update.in full-image MD5 matches the canonical payload" % name)
+            else:
+                bad("%s: ota_update.in full-image MD5 matches the canonical payload" % name,
+                    "declared=%s actual=%s" % (record.get("img_md5"), canon_md5))
+
+            # --- walk the chunk chain ---------------------------------------
+            pattern = re.compile(r"^%s\.(\d{4})\.([0-9a-f]{32})$" % re.escape(name))
+            found = {}
+            for entry in entries:
+                match = pattern.match(entry)
+                if match:
+                    found[int(match.group(1))] = (entry, match.group(2))
+
+            expected_count = (canon_size + CHUNK_BYTES - 1) // CHUNK_BYTES
+            if sorted(found) == list(range(expected_count)):
+                ok("%s: all %d chunks present in an unbroken 0000..%04d sequence"
+                   % (name, expected_count, expected_count - 1))
+            else:
+                bad("%s: all chunks present in an unbroken sequence" % name,
+                    "expected %d, found indices %s" % (expected_count, sorted(found)[:10]))
+                continue
+
+            # The chain: chunk 0000's filename carries the FULL image MD5, and
+            # every later chunk's filename carries the PREVIOUS chunk's digest.
+            chain_ok, per_chunk = True, []
+            previous = canon_md5
+            for index in range(expected_count):
+                entry, named_md5 = found[index]
+                if named_md5 != previous:
+                    bad("%s: chunk %04d's filename carries its predecessor's MD5" % (name, index),
+                        "filename says %s, expected %s" % (named_md5, previous))
+                    chain_ok = False
+                    break
+                digest = md5_file(os.path.join(payload_dir, entry))
+                per_chunk.append(digest)
+                previous = digest
+            if chain_ok:
+                ok("%s: the chained-MD5 filename scheme is correct across all %d chunks"
+                   % (name, expected_count))
+
+            # --- the ota_md5 manifest ---------------------------------------
+            md5_manifest = os.path.join(payload_dir, "ota_md5_%s.%s" % (name, canon_md5))
+            if not os.path.isfile(md5_manifest):
+                bad("%s: ota_md5_%s.<full-md5> manifest is present" % (name, name))
+            else:
+                listed = [l.strip() for l in open(md5_manifest, encoding="utf-8").read().splitlines() if l.strip()]
+                if listed == per_chunk:
+                    ok("%s: the ota_md5 manifest lists exactly the %d per-chunk digests, in order"
+                       % (name, len(listed)))
+                else:
+                    bad("%s: the ota_md5 manifest lists exactly the per-chunk digests, in order" % name,
+                        "manifest has %d lines, computed %d" % (len(listed), len(per_chunk)))
+
+            # --- THE gate: reassemble and compare ---------------------------
+            rebuilt = os.path.join(work, "rebuilt-%s" % name)
+            with open(rebuilt, "wb") as out:
+                for index in range(expected_count):
+                    entry, _ = found[index]
+                    with open(os.path.join(payload_dir, entry), "rb") as src:
+                        shutil.copyfileobj(src, out, 1024 * 1024)
+            rebuilt_sha = sha256_file(rebuilt)
+            if rebuilt_sha == canon_sha:
+                ok("%s: REASSEMBLED FROM CHUNKS, SHA-256 equals the canonical payload" % name)
+            else:
+                bad("%s: REASSEMBLED FROM CHUNKS, SHA-256 equals the canonical payload" % name,
+                    "reassembled=%s canonical=%s" % (rebuilt_sha, canon_sha))
+            if os.path.getsize(rebuilt) == canon_size:
+                ok("%s: reassembled size equals the canonical payload (%d bytes)" % (name, canon_size))
+            else:
+                bad("%s: reassembled size equals the canonical payload" % name)
+            os.unlink(rebuilt)
+
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    # --- capacity ----------------------------------------------------------
+    sizes = {f.name: f.value for f in layout.PARTITION_SIZES}
+    for name, partition in (("xImage", "kernel"), ("rootfs.squashfs", "rootfs")):
+        size = canonical[name][1]
+        if size <= sizes[partition]:
+            ok("%s fits the %s partition (%d / %d bytes, %d%% full)"
+               % (name, partition, size, sizes[partition], size * 100 // sizes[partition]))
+        else:
+            bad("%s fits the %s partition" % (name, partition),
+                "%d > %d" % (size, sizes[partition]))
+
+    return report()
 
 
 if __name__ == "__main__":

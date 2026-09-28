@@ -76,74 +76,91 @@ Non-negotiable, and the reason this cannot be a casual refactor:
 
 ## 2. Release artifact packaging formats
 
-**Status:** PARTIALLY UN-DEFERRED (2026-09-28, universal-release mission). Read
-the scope limits below before treating either artifact as installable.
+**Status:** IMPLEMENTED (2026-09-28, universal-release mission), for the two
+formats below. The rest of this section's original list is still deferred.
 
-- Creality `.img` packaging — **built, blank-media scope only**
-- Ingenic `.ingenic` packaging — **built, Creality-cloner compatibility UNVERIFIED**
+- Creality F005 OTA `.img` packaging — **implemented and validated**
+- Ingenic Cloner `.ingenic` packaging — **implemented and validated**
 - DarKE port — still deferred, not started
-- OpenKlipperEdition Recovery port — still deferred, not started
+- OpenKlipperEdition Recovery port — not needed as a port; its
+  `rebuild_ingenic.py` is the reference this implementation follows
 
 ### Why it was deferred, and what changed
 
-The original reasoning stands and has not been overturned: introducing new
-release artifact formats immediately before hardware qualification would mean
-qualifying bytes that no prior cycle has produced. **The artifacts frozen for
-hardware qualification remain the canonical core set (`xImage`,
-`rootfs.squashfs`) and nothing here changes that.**
+The original reasoning stands and is unaffected: introducing new release
+artifact formats immediately before hardware qualification would mean qualifying
+bytes that no prior cycle has produced. **The artifacts frozen for hardware
+qualification remain the canonical core set (`xImage`, `rootfs.squashfs`).**
 
-What changed is that the packaging was explicitly requested as a deliverable, so
-it now exists as *packaging of the same canonical core* rather than as a new
-thing to qualify. Both formats consume the already-built `xImage` and
-`rootfs.squashfs` byte-for-byte and compile nothing, which is the property that
-makes them additive rather than a new qualification surface. Their validators
-assert exactly that.
+What changed is that both formats are now *packaging of that same core* rather
+than new things to qualify. Neither packager compiles anything; both embed the
+already-built `xImage` and `rootfs.squashfs` byte-for-byte, and both validators
+prove it by extracting the payload back out and comparing SHA-256 against the
+canonical files. `QUALIFIED_INPUT_ARTIFACTS_MODIFIED=NO` is recorded in every
+generated manifest and asserted by the test suite.
 
-### Hard scope limits, and why they exist
+### `.img` — the Creality F005 OTA package
 
-**`.img` is a blank-media provisioning image. It must never be written to a
-printer that already carries factory data.** Three reasons, recorded
-machine-readably in every generated manifest as
-`IMG_NOT_FOR_PROVISIONED_PRINTER_BECAUSE=`:
+Not a raw disk image. It is the package the **stock** Creality updater consumes,
+from USB, the touchscreen, or
+`/etc/ota_bin/local_ota_update.sh <file>`. The `.img` extension is checked by
+the updater; it says nothing about the contents.
 
-1. **`sn_mac` is irreplaceable.** `/dev/mmcblk0p2` (1024 bytes) holds the
-   per-unit factory MAC and serial —
-   `26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1` on the reference unit,
-   confirmed in `docs/NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md` to
-   be the address stock's `wlan0` actually uses. A raw whole-disk write zeroes
-   it, permanently. NebulaOS is separately scheduled to *start* reading this
-   partition rather than deriving its own MAC, which makes destroying it worse,
-   not better.
-2. **The stock slot cannot be restored.** A whole-disk image empties p5/p7, the
-   fallback `docs/DEVELOPER_RECOVERY.md` designates as the way back. We do not
-   have Creality's stock kernel and rootfs and could not redistribute them.
-3. **The geometry is unverified.** No `sgdisk --print /dev/mmcblk0` has ever
-   been captured, so the absolute start offsets in the authored partition table
-   are a reconstruction. `tools/emmc/nebulaos_layout.py` lists every declared
-   fact by name.
+Inside is an encrypted 7z envelope holding `ota_config.in`, a versioned
+`ota_v<version>/` directory, `ota_update.in`, a `.ok` marker, and both payloads
+split into 1 MiB chunks under a chained-MD5 filename scheme — chunk `0000`
+carries the digest of the *whole* payload, and every later chunk carries the
+digest of its *predecessor*. The envelope secret is derived
+(`mkpasswd -m md5 "F005C3_7e_bz" -S cxswfile`) and asserted against its
+known-good value rather than pasted in as a constant.
 
-The update path for a working printer is unchanged and unaffected:
-`scripts/flash-spare-slot.sh`, which writes `kernel2` and `rootfs2` and touches
-nothing else.
+**Where it installs is a property of the printer, not of the package.** The
+stock updater writes whichever A/B set is *inactive* and then flips the marker
+to it. Applied while NebulaOS is booted, a NebulaOS `.img` overwrites the
+**stock** slot. There is no vendor-signature check and no comparison of the
+target's existing contents against a Creality release. That is not the same as
+"there are no checks": the updater validates extraction, version, metadata,
+capacity, per-chunk MD5 and declared sizes, and this packager satisfies all of
+them. What is absent is an *authenticity* check, which is precisely why custom
+F005 firmware installs through the stock path at all.
 
-**`.ingenic` carries `CREALITY_CLONER_COMPATIBLE=UNVERIFIED`.** Creality's
-recovery tool for this printer is a closed Windows binary
-(`cloner-2.5.18-windows_alpha.zip` in `CrealityOfficial/Ender-3_V3_KE_Annex`);
-no sample package and no format specification are published. The container is
-therefore a NebulaOS format with a `NEBULAOS-RECOVERY` magic at offset 0, chosen
-so a foreign tool rejects the file outright rather than misreading its header
-and beginning a partial flash. It is end-user/factory recovery media and is
-explicitly not a Hardware Agent transport (`HARDWARE_AGENT_TRANSPORT=NO`).
+One provenance gap remains, recorded in every manifest as
+`IMG_OTA_CONFIG_PROVENANCE`: no stock F005 `.img` was available to copy
+`ota_config.in` from, so it is synthesised from the package's own facts. Pass
+`--ota-config-template` once a vendor package is obtained.
 
-### What would close the remaining gaps
+### `.ingenic` — the Ingenic Cloner recovery package
 
-- **`.img` whole-disk to a real printer:** a captured factory GPT, a per-unit
-  `sn_mac` preservation step, and a redistributable stock slot. All three, not
-  any one. `tools/emmc/nebulaos_layout.py:require_whole_disk_preconditions()`
-  enumerates them at runtime.
-- **`.ingenic` compatibility:** a reference `.ingenic` package to parse and
-  compare against. Until one exists, the claim stays UNVERIFIED — never `YES`,
-  and the validator fails if it ever drifts.
+A ZIP consumed by the Ingenic USB Cloner in X2000E USB-boot (mask-ROM) mode.
+**Not** flashed from a U-Boot command line, and not a Hardware Agent transport.
+
+NebulaOS does not build one from scratch. It substitutes the canonical payloads
+into the official `Ender-3_V3_KE_1.1.0.12.ingenic`, pinned by content in
+`manifests/dependencies.conf`, and carries the other 274 entries through
+untouched — SPL/U-Boot, the MBR/GPT, the per-SoC firmware and DDR descriptors,
+the Cloner files, the security keys. The validator compares every one of them
+against the template entry by entry, because a package that embeds the right
+kernel but silently re-encoded U-Boot is not one to put a printer into mask-ROM
+for.
+
+Default layout is stock in slot A, NebulaOS in slot B, marker `ota:kernel2`.
+That is the safer first install, not a constraint: `--slot a` overwrites the
+stock slot, and the Cloner programs whatever its policy names.
+
+**`sn_mac` is preserved, and that is asserted rather than assumed.** The vendor
+erase policy is `"0x0,0x1fffff;0x300000,0xffffffff;"`, which leaves
+`0x200000..0x2fffff` — the per-unit factory MAC and serial — untouched. Both the
+packager and the validator refuse if that hole is ever closed.
+
+### Unexpected benefit: the real partition geometry
+
+The Cloner profile inside the vendor package names every partition and its
+absolute offset (`ota` 0x100000, `sn_mac` 0x200000, `rtos` 0x300000, `rtos2`
+0x700000, `kernel` 0xb00000, `kernel2` 0x1300000, `rootfs` 0x1b00000, `rootfs2`
+0x20f00000). The derived sizes reproduce, exactly, the two constants
+`scripts/flash-spare-slot.sh` arrived at independently: 8388608 and 524288000.
+That closed a long-standing evidence gap — `tools/emmc/nebulaos_layout.py` now
+records 29 verified facts where it previously had none for offsets at all.
 
 `tools/maintenance/build-cache-gc.sh` already refuses to collect `.img` and
 `.ingenic` files, so the GC tool still needs no revisiting.

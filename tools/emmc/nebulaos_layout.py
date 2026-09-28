@@ -29,14 +29,33 @@ VERIFIED FROM REAL HARDWARE (captured evidence in this repository):
   * the factory alternate GPT is invalid; the primary is authoritative
         artifacts/parity/stock/11-dmesg.txt
 
+  * EVERY PARTITION START OFFSET, and therefore every size up to rootfs2, from
+    the vendor's own Ingenic Cloner profile
+        configs/x2000/x2000e_mmc0_lpddr2_linux.cfg inside the official
+        Ender-3_V3_KE_1.1.0.12.ingenic recovery package (LFS object
+        sha256:5388b168...783f3c, 130364076 bytes). Its [policy0..policy9]
+        sections name each partition and its offset outright:
+            uboot   0x0        ota     0x100000   sn_mac  0x200000
+            rtos    0x300000   rtos2   0x700000   kernel  0xb00000
+            kernel2 0x1300000  rootfs  0x1b00000  rootfs2 0x20f00000
+        The derived sizes corroborate the two constants flash-spare-slot.sh
+        arrived at independently: kernel/kernel2 are exactly 8388608 bytes
+        (0x1300000-0xb00000) and rootfs/rootfs2 exactly 524288000
+        (0x20f00000-0x1b00000). Two unrelated sources agreeing exactly is what
+        makes this verified rather than merely plausible.
+  * that the vendor's own erase policy PRESERVES sn_mac
+        the same profile's [mmc] erase_list is
+            "0x0,0x1fffff;0x300000,0xffffffff;"
+        which erases 0..0x1fffff and 0x300000..end, leaving exactly
+        0x200000..0x2fffff - the sn_mac region - untouched. The per-unit
+        factory identity is deliberately excluded from a full recovery erase.
+
 NOT VERIFIED - NO EVIDENCE EXISTS IN THIS WORKSPACE:
 
-  * the absolute start LBA of ANY partition
-  * the total capacity of the eMMC
-  * whether p3 is rtos and p4 rtos2, or the reverse (the capture records the
-    pair, not the order - harmless, since nothing here ever addresses either)
-  * the sizes of rtos, rtos2, rootfs_data and userdata as exact byte counts
-    (docs give "300 MB" and "~6 GB" in prose, which is not a number)
+  * the total capacity of the eMMC, and therefore the size of userdata
+  * the size of rootfs_data (docs say "300 MB", which is prose, not a number);
+    its offset follows rootfs2 but the profile stops at rootfs2 because the
+    Cloner never programs the data partitions
   * every partition type GUID, and the mapping of the ten recorded PARTUUIDs
     (artifacts/parity/custom/12-dev-tree.txt) to partitions
 
@@ -109,8 +128,8 @@ class LayoutFact:
 PARTITION_ORDER = (
     LayoutFact("p1", "ota", VERIFIED, "docs/A_B_SLOT_MODEL.md + flash-spare-slot.sh"),
     LayoutFact("p2", "sn_mac", VERIFIED, "docs/NEBULAOS_DISPLAY_LIVE_READ_ONLY_REPORT.md live read"),
-    LayoutFact("p3", "rtos", DECLARED, "live read records the p3/p4 pair, not which is which"),
-    LayoutFact("p4", "rtos2", DECLARED, "live read records the p3/p4 pair, not which is which"),
+    LayoutFact("p3", "rtos", VERIFIED, "vendor cloner profile: rtos 0x300000 precedes rtos2 0x700000"),
+    LayoutFact("p4", "rtos2", VERIFIED, "vendor cloner profile: rtos2 0x700000"),
     LayoutFact("p5", "kernel", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
     LayoutFact("p6", "kernel2", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
     LayoutFact("p7", "rootfs", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
@@ -121,11 +140,11 @@ PARTITION_ORDER = (
 
 # Sizes in bytes. Only the four slot partitions are verified numbers.
 PARTITION_SIZES = (
-    LayoutFact("ota", 1024 * 1024, DECLARED, "docs say '1 MB'; exact bytes unproven"),
+    LayoutFact("ota", 1024 * 1024, VERIFIED, "cloner profile: 0x200000 - 0x100000"),
     LayoutFact("sn_mac", 1024, VERIFIED,
                "docs/NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md: 1024 bytes"),
-    LayoutFact("rtos", 8 * 1024 * 1024, DECLARED, "no evidence of size"),
-    LayoutFact("rtos2", 8 * 1024 * 1024, DECLARED, "no evidence of size"),
+    LayoutFact("rtos", 4 * 1024 * 1024, VERIFIED, "cloner profile: 0x700000 - 0x300000"),
+    LayoutFact("rtos2", 4 * 1024 * 1024, VERIFIED, "cloner profile: 0xb00000 - 0x700000"),
     LayoutFact("kernel", KERNEL_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
     LayoutFact("kernel2", KERNEL_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
     LayoutFact("rootfs", ROOTFS_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
@@ -135,12 +154,68 @@ PARTITION_SIZES = (
 )
 
 # There is no evidence for any start LBA at all.
+# Absolute byte offsets, straight from the vendor Cloner profile. These are the
+# numbers a USB/mask-ROM write aims at, so they are kept as a first-class table
+# rather than derived from the size list: a size list cannot express the 1 MiB
+# uboot region before ota, and getting that wrong shifts everything.
+PARTITION_OFFSETS = (
+    LayoutFact("uboot", 0x0, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy0"),
+    LayoutFact("ota", 0x100000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy1"),
+    LayoutFact("sn_mac", 0x200000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy2"),
+    LayoutFact("rtos", 0x300000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy4"),
+    LayoutFact("rtos2", 0x700000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy5"),
+    LayoutFact("kernel", 0xB00000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy6"),
+    LayoutFact("kernel2", 0x1300000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy7"),
+    LayoutFact("rootfs", 0x1B00000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy8"),
+    LayoutFact("rootfs2", 0x20F00000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy9"),
+)
+
+# The vendor's full-erase policy, and the hole in it that preserves per-unit
+# identity. Any erase range this project ever emits is checked against this.
+VENDOR_ERASE_LIST = "0x0,0x1fffff;0x300000,0xffffffff;"
+SN_MAC_PRESERVED_RANGE = (0x200000, 0x2FFFFF)
+
 GEOMETRY_FACTS = (
-    LayoutFact("first_partition_lba", 2048, DECLARED, "conventional 1 MiB alignment; unproven"),
+    LayoutFact("partition_offsets", "vendor cloner profile", VERIFIED,
+               "x2000e_mmc0_lpddr2_linux.cfg [policy0..policy9]"),
+    LayoutFact("sn_mac_preserved_by_vendor_erase", True, VERIFIED,
+               "erase_list leaves 0x200000..0x2fffff untouched"),
     LayoutFact("disk_total_bytes", None, DECLARED, "eMMC capacity never captured"),
     LayoutFact("partition_type_guids", None, DECLARED, "never captured"),
     LayoutFact("partition_uuids", None, DECLARED, "per-device; never captured"),
 )
+
+
+def partition_offset(label):
+    """Absolute byte offset of a partition, from the vendor Cloner profile."""
+    for fact in PARTITION_OFFSETS:
+        if fact.name == label:
+            return fact.value
+    raise KeyError("no recorded offset for partition %r" % label)
+
+
+def erase_list_preserves_sn_mac(erase_list):
+    """True if `erase_list` leaves the whole sn_mac region untouched.
+
+    Parses the Cloner's own "start,end;start,end;" syntax and checks that no
+    range intersects sn_mac. Used to assert that a package we build has not
+    widened the erase beyond what the vendor does - the one check standing
+    between a recovery flash and a permanently unidentifiable printer.
+    """
+    lo, hi = SN_MAC_PRESERVED_RANGE
+    for chunk in erase_list.strip().strip('"').split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        start_s, _, end_s = chunk.partition(",")
+        try:
+            start, end = int(start_s, 0), int(end_s, 0)
+        except ValueError:
+            # An unparseable range is not provably safe, so it is not safe.
+            return False
+        if start <= hi and end >= lo:
+            return False
+    return True
 
 
 # Partitions whose contents are per-unit and cannot be regenerated or obtained.
@@ -184,7 +259,8 @@ def require_whole_disk_preconditions():
 
 
 def all_facts():
-    return tuple(PARTITION_ORDER) + tuple(PARTITION_SIZES) + tuple(GEOMETRY_FACTS)
+    return (tuple(PARTITION_ORDER) + tuple(PARTITION_SIZES)
+            + tuple(PARTITION_OFFSETS) + tuple(GEOMETRY_FACTS))
 
 
 def unverified_facts():

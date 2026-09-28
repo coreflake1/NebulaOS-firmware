@@ -1,95 +1,135 @@
 #!/usr/bin/env python3
-"""Package the canonical NebulaOS core into a .ingenic recovery package.
+"""Package the canonical NebulaOS core into an Ingenic Cloner .ingenic package.
 
-READ THE COMPATIBILITY SECTION BEFORE USING THIS FOR ANYTHING
+WHAT THIS IS
 
-WHAT WAS INVESTIGATED
+A .ingenic is a ZIP archive consumed by the Ingenic USB Cloner in X2000E USB
+boot (mask-ROM) mode. It carries the SPL/U-Boot image, the MBR/GPT, per-SoC
+DDR and firmware descriptors, a Cloner policy profile naming each partition and
+its absolute offset, and the payloads themselves.
 
-The mission that produced this file required the .ingenic format to be verified
-mechanically rather than assumed. It was investigated and it could not be:
+Almost all of that is vendor material we neither have nor should invent. So this
+does not BUILD a package - it takes the known-good official package and
+substitutes exactly two payloads into it:
 
-  * Creality's own recovery tooling for this printer is
-    "cloner-2.5.18-windows_alpha.zip" in CrealityOfficial/Ender-3_V3_KE_Annex,
-    under "firmware recovery tool". It is a closed Windows binary. The same
-    directory holds two PDF walkthroughs and nothing else.
-  * that repository contains NO sample .ingenic package, no format
-    documentation, and no packer or unpacker.
-  * no public specification of the container was found.
+    template: Ender-3_V3_KE_1.1.0.12.ingenic
+    substitute: images/xImage2      <- the canonical xImage
+                images/rootfs2.squashfs <- the canonical rootfs.squashfs
 
-So there is no reference artifact to parse, no spec to implement against, and
-no device on which to test the result. Implementing "the Creality format" from a
-one-line description of what it probably contains, and then shipping an artifact
-that claims to be one, would be inventing a compatibility claim. This file does
-not do that.
+Everything else - SPL/U-Boot, the MBR/GPT, the Cloner files, the X2000E
+configuration, the security keys, the 277-entry archive as a whole - is carried
+through untouched. Preserving known-good vendor boot infrastructure is the
+point: the job is to install a qualified kernel and rootfs, not to take
+ownership of the bottom of the boot chain.
 
-WHAT THIS ACTUALLY PRODUCES
+CREDIT AND PROVENANCE
 
-A fully specified, self-describing NebulaOS recovery container. Everything about
-it is defined here, parseable by scripts/package/validate-ingenic.py, and
-verified against the canonical core it was built from.
+The substitution logic, the dual-slot policy values and the Slot 2/B entry
+ordering follow OpenKlipperEdition/Recovery's scripts/rebuild_ingenic.py, which
+is the reference implementation for this format. This file integrates that
+behaviour into the NebulaOS release pipeline and adds what a release needs on
+top of it: template identity pinning, SHA-256 round-trip proof of the embedded
+payloads against the canonical core, an explicit sn_mac-preservation assertion,
+and a packaging manifest.
 
-It deliberately begins with a distinctive magic string:
+DEFAULT LAYOUT: STOCK IN A, NEBULAOS IN B
 
-    NEBULAOS-RECOVERY
+    Slot A:  stock xImage, stock rootfs.squashfs, stock zero.bin   (untouched)
+    Slot B:  NebulaOS xImage2, NebulaOS rootfs2.squashfs, stock zero2.bin copy
+    marker:  images/ota = b"ota:kernel2\\n\\n"  -> the device boots Slot B
 
-That choice is a safety measure, not branding. The file is named .ingenic
-because that is the extension the recovery workflow uses, and a user could
-reasonably try to feed it to Creality's cloner. A tool that does not recognise
-this magic will reject the file outright instead of interpreting the first few
-kilobytes as some other header and beginning a partial flash of a printer. Fail
-fast beats fail halfway, and a half-flashed printer is the exact outcome the
-whole project is arranged to avoid.
+This leaves a working stock slot behind, which is the safer first install. It is
+a CHOICE, not a constraint: the Cloner programs whatever its policy names, and
+--slot a will overwrite the stock slot instead. There is no vendor-signature or
+stock-content authenticity check that would prevent it. Do not read the default
+as evidence that stock is protected.
 
-    CREALITY_CLONER_COMPATIBLE=UNVERIFIED
+SN_MAC IS PRESERVED, AND THAT IS ASSERTED
 
-is written into the header and the manifest, because that is the true state of
-knowledge. It is not "NO" - nobody has tested it and found it incompatible -
-and it is emphatically not "YES".
+The vendor's own erase policy is
+
+    erase_list = "0x0,0x1fffff;0x300000,0xffffffff;"
+
+which erases 0..0x1fffff and 0x300000..end, leaving 0x200000..0x2fffff - the
+sn_mac partition, holding the per-unit factory MAC and serial - untouched. That
+hole is deliberate and this packager must never close it. Before writing
+anything, the configured erase list is checked against
+nebulaos_layout.erase_list_preserves_sn_mac() and packaging refuses if it would
+erase across sn_mac. A recovery package that wipes per-unit identity produces a
+printer that cannot be told apart from any other, permanently.
 
 THIS IS NOT A HARDWARE AGENT TRANSPORT
 
-.ingenic is end-user and factory recovery media. It is whole-device packaging
-with none of the narrow safety semantics the Hardware Agent has: no slot-2-only
-ownership, no live-target collision refusal, no armed/disarm state machine, no
-way-out proof. The burn map below says plainly which partitions it describes
-writing. Do not wire this into an autonomous agent path merely because the
-package now exists.
-
-CONTAINER FORMAT v1
-
-    [0 .. 17)        the literal ASCII bytes "NEBULAOS-RECOVERY", then "\n"
-    [18 .. 4096)     header, UTF-8 KEY=VALUE lines, NUL-padded
-    [4096 .. )       members, each starting on a 4096-byte boundary,
-                     zero-padded to the next boundary
-
-Every member is declared in the header with its name, offset, size, SHA-256 and
-burn target. The header is fixed-size so that a reader can parse it with one
-read of a known length before trusting any offset in it.
+.ingenic is end-user and factory recovery media driven by the Ingenic Cloner
+over USB boot. It is substantially MORE destructive than the normal .img OTA
+path - it programs whole partitions according to its policy. It has none of the
+Hardware Agent's narrow safety semantics, and nothing in this project flashes a
+printer from one.
 
 DETERMINISM
 
-No timestamp, path, hostname, UID or counter enters the container. Members are
-emitted in a fixed declared order, padding is zero, and the only time-like value
-is SOURCE_DATE_EPOCH, which is a property of the source commit. Two runs over
-the same canonical core produce byte-identical output, and the release pipeline
-checks exactly that.
+Every entry carried through keeps the template's own ZIP metadata, and the four
+Slot 2/B entries reuse the metadata of the stock entries they mirror, so no
+timestamp, path or ordering from the build host reaches the archive. Two runs
+over the same canonical core and template produce byte-identical output.
 """
 
 import argparse
+import copy
 import hashlib
 import os
+import shutil
 import sys
-import time
+import tempfile
+import zipfile
 
-MAGIC = "NEBULAOS-RECOVERY"
-FORMAT_VERSION = "1"
-HEADER_BYTES = 4096
-ALIGN = 4096
-MARKER_KERNEL2 = b"ota:kernel2"
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "emmc"))
+import nebulaos_layout as layout  # noqa: E402
 
+STOCK_KERNEL_ENTRY = "images/xImage"
+STOCK_ROOTFS_ENTRY = "images/rootfs.squashfs"
+STOCK_RTOS_ENTRY = "images/zero.bin"
+UBOOT_ENTRY = "images/u-boot-with-spl-mbr-gpt.bin"
+CLONER_PROFILE_ENTRY = "configs/x2000/x2000e_mmc0_lpddr2_linux.cfg"
 
-def sha256_bytes(data):
-    return hashlib.sha256(data).hexdigest()
+OTA_ENTRY = "images/ota"
+KERNEL2_ENTRY = "images/xImage2"
+ROOTFS2_ENTRY = "images/rootfs2.squashfs"
+RTOS2_ENTRY = "images/zero2.bin"
+
+# Exactly the bytes the reference implementation writes, including the two
+# trailing LFs. Not a 512-byte NUL-padded block - that is the on-device marker
+# primitive's representation, and the Cloner's is different. Using the wrong one
+# here would produce a package whose marker the bootloader may not parse.
+SLOT2_OTA_MARKER = b"ota:kernel2\n\n"
+
+# The official Ender-3 V3 KE recovery package, by content. Pinned so a
+# substituted or corrupted template cannot silently become the basis of a
+# release. Recorded in manifests/dependencies.conf as the shipping authority.
+TEMPLATE_SHA256 = "5388b16810e51c8233d6ee978b5b4a09347a4c9a4a516d3c5bf8c686e6783f3c"
+TEMPLATE_NAME = "Ender-3_V3_KE_1.1.0.12.ingenic"
+
+# Dual-slot Cloner policy, from the reference implementation. Enables the ota
+# marker, both RTOS copies, both kernels and both rootfs images.
+DUAL_SLOT_POLICY = {
+    ("mmc", "erase_all"): "1",
+    ("mmc", "erase_list"): '"%s"' % layout.VENDOR_ERASE_LIST,
+    ("mmc", "force_erase"): "2",
+    ("policy1", "attribute"): OTA_ENTRY,
+    ("policy1", "enabled"): "1",
+    ("policy4", "attribute"): STOCK_RTOS_ENTRY,
+    ("policy4", "enabled"): "1",
+    ("policy5", "attribute"): RTOS2_ENTRY,
+    ("policy5", "enabled"): "1",
+    ("policy6", "attribute"): STOCK_KERNEL_ENTRY,
+    ("policy6", "enabled"): "1",
+    ("policy7", "attribute"): KERNEL2_ENTRY,
+    ("policy7", "enabled"): "1",
+    ("policy8", "attribute"): STOCK_ROOTFS_ENTRY,
+    ("policy8", "enabled"): "1",
+    ("policy9", "attribute"): ROOTFS2_ENTRY,
+    ("policy9", "enabled"): "1",
+}
 
 
 def sha256_file(path):
@@ -108,59 +148,45 @@ def manifest_get(path, key):
     return None
 
 
-def normalise_build_manifest(raw, source_date_epoch):
-    """Return the build manifest with its one nondeterministic line pinned.
+def set_config_value(data, section, key, value):
+    """Replace one INI value, preserving the file's own line endings.
 
-    build-manifest.txt records `built_at=<wall clock>`. Everything else in it -
-    every component commit, every artifact hash, the builder digest - is a
-    property of the source generation and is identical across independent builds
-    of the same commit. `built_at` is not: two byte-identical builds of the same
-    commit differ in that single line, and embedding it raw made this container
-    differ too, purely because of when the compiler happened to run.
-
-    That is packaging nondeterminism imported from an input, and the fix belongs
-    here rather than in a looser comparison later. The line is rewritten to the
-    build's own SOURCE_DATE_EPOCH, which is derived from the commit and is
-    therefore the same for every build of it.
-
-    Nothing else is touched, the transformation is announced in the container
-    header (BUILD_MANIFEST_NORMALISED=built_at), and the sidecar manifest records
-    the ORIGINAL file's sha256 so the specific build run is still traceable.
-
-    See docs/DEFERRED_POST_RELEASE_WORK.md item 3: build-manifest.txt not
-    recording source_date_epoch is a known gap. When that is fixed upstream this
-    normalisation becomes a no-op rather than wrong.
+    Byte-level rather than via configparser: the Cloner profile's exact
+    formatting, key order and CRLF/LF choice are vendor data, and a round-trip
+    through a parser would rewrite all of it.
     """
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(source_date_epoch)))
-    out, replaced = [], False
-    for line in raw.decode("utf-8", errors="replace").splitlines():
-        if line.startswith("built_at="):
-            out.append("built_at=%s" % stamp)
-            replaced = True
-        else:
-            out.append(line)
-    if not replaced:
-        # Nothing to pin - either the key is gone (the upstream fix landed) or
-        # this is not a build manifest. Either way, pass it through untouched
-        # rather than inventing a line.
-        return raw, False
-    return ("\n".join(out) + "\n").encode("utf-8"), True
+    lines = data.splitlines(keepends=True)
+    header = ("[%s]" % section).encode()
+    prefix = ("%s=" % key).encode()
+    current = b""
+    for index, line in enumerate(lines):
+        content = line.rstrip(b"\r\n")
+        if content.startswith(b"[") and content.endswith(b"]"):
+            current = content
+        elif current == header and content.startswith(prefix):
+            ending = line[len(content):]
+            lines[index] = prefix + value.encode("utf-8") + ending
+            return b"".join(lines)
+    raise ValueError("missing %s in [%s] of %s" % (key, section, CLONER_PROFILE_ENTRY))
 
 
-def canonical_marker_block():
-    block = bytearray(512)
-    block[: len(MARKER_KERNEL2)] = MARKER_KERNEL2
-    return bytes(block)
+def configure_dual_slot(data):
+    for (section, key), value in DUAL_SLOT_POLICY.items():
+        data = set_config_value(data, section, key, value)
+    return data
 
 
-def align_up(value):
-    return value if value % ALIGN == 0 else value + (ALIGN - value % ALIGN)
+def renamed(template_info, filename):
+    info = copy.copy(template_info)
+    info.filename = filename
+    info.orig_filename = filename
+    return info
 
 
 def build(args):
+    # --- the canonical core must agree with its own build manifest ----------
     ximage_sha = sha256_file(args.ximage)
     rootfs_sha = sha256_file(args.rootfs)
-
     man_x = manifest_get(args.manifest, "xImage_sha256")
     man_r = manifest_get(args.manifest, "rootfs_squashfs_sha256")
     man_c = manifest_get(args.manifest, "git_commit_main")
@@ -170,182 +196,180 @@ def build(args):
         sys.exit("FATAL: rootfs.squashfs sha256 %s does not match build manifest %s" % (rootfs_sha, man_r))
     if args.source_head and man_c != args.source_head:
         sys.exit("FATAL: build manifest records git_commit_main=%s, not %s" % (man_c, args.source_head))
-
     source_head = args.source_head or man_c
     if not source_head:
         sys.exit("FATAL: no source head given and the build manifest records none")
 
-    ximage = open(args.ximage, "rb").read()
-    rootfs = open(args.rootfs, "rb").read()
-    build_manifest_raw = open(args.manifest, "rb").read()
-    build_manifest, normalised = normalise_build_manifest(
-        build_manifest_raw, args.source_date_epoch
-    )
+    # --- the payloads must fit the partitions they are destined for ---------
+    sizes = dict(layout.PARTITION_SIZES and [(f.name, f.value) for f in layout.PARTITION_SIZES])
+    x_size, r_size = os.path.getsize(args.ximage), os.path.getsize(args.rootfs)
+    if x_size > sizes["kernel2"]:
+        sys.exit("FATAL: xImage is %d bytes, exceeds the kernel partition (%d)" % (x_size, sizes["kernel2"]))
+    if r_size > sizes["rootfs2"]:
+        sys.exit("FATAL: rootfs.squashfs is %d bytes, exceeds the rootfs partition (%d)"
+                 % (r_size, sizes["rootfs2"]))
 
-    # The burn map is a MEMBER, not merely a comment: it travels with the
-    # package, so anything that unpacks it later learns what the package was
-    # meant to write without needing this script.
-    burn_map = "\n".join([
-        "# NebulaOS recovery package burn map",
-        "#",
-        "# Which partition each payload member describes writing. This is a",
-        "# DESCRIPTION carried inside the package, not an instruction any",
-        "# NebulaOS tool executes - nothing in this project flashes a printer",
-        "# from a .ingenic package.",
-        "#",
-        "# A recovery flash driven by this map replaces slot 2 and the OTA",
-        "# marker. It does NOT describe writing the stock slot (kernel, rootfs),",
-        "# and it does NOT describe writing rootfs_data or userdata, so a tool",
-        "# that follows it exactly leaves stock and the user's data intact.",
-        "BURN_MAP_VERSION=1",
-        "BURN=member=xImage target_partlabel=kernel2 max_bytes=8388608",
-        "BURN=member=rootfs.squashfs target_partlabel=rootfs2 max_bytes=524288000",
-        "BURN=member=ota-marker.bin target_partlabel=ota max_bytes=512",
-        "NEVER_WRITE=kernel",
-        "NEVER_WRITE=rootfs",
-        "NEVER_WRITE=rootfs_data",
-        "NEVER_WRITE=userdata",
-        "NEVER_WRITE=sn_mac",
-        "NEVER_WRITE=rtos",
-        "NEVER_WRITE=rtos2",
-        "",
-    ]).encode("utf-8")
-
-    # Fixed order. A set or dict iteration order here would be a reproducibility
-    # bug that only shows up on another Python build.
-    members = [
-        ("xImage", ximage, "kernel2"),
-        ("rootfs.squashfs", rootfs, "rootfs2"),
-        ("ota-marker.bin", canonical_marker_block(), "ota"),
-        ("build-manifest.txt", build_manifest, "none"),
-        ("burn-map.txt", burn_map, "none"),
-    ]
-
-    # Two passes: place members to learn their offsets, then render the header
-    # that describes them. The header is a fixed 4096 bytes, so placement does
-    # not depend on how long the header text turns out to be.
-    placed = []
-    cursor = HEADER_BYTES
-    for name, data, target in members:
-        placed.append({
-            "name": name, "data": data, "target": target,
-            "offset": cursor, "size": len(data), "sha256": sha256_bytes(data),
-        })
-        cursor = align_up(cursor + len(data))
-    total = cursor
-
-    # The magic is a BARE TOKEN on the first line, not a KEY=VALUE pair. An
-    # earlier revision wrote "NEBULAOS_RECOVERY_MAGIC=NEBULAOS-RECOVERY", which
-    # put the KEY's name at offset 0 and the actual magic 24 bytes in. Anything
-    # sniffing the first bytes of the file - which is exactly what a foreign
-    # flashing tool does - would have been reading the key name. Byte 0 now is
-    # the magic itself.
-    header_lines = [
-        MAGIC,
-        "FORMAT_VERSION=%s" % FORMAT_VERSION,
-        "CREALITY_CLONER_COMPATIBLE=UNVERIFIED",
-        "PACKAGE_KIND=end-user-and-factory-recovery-media",
-        "HARDWARE_AGENT_TRANSPORT=NO",
-        "SOURCE_HEAD=%s" % source_head,
-        "SOURCE_DATE_EPOCH=%s" % args.source_date_epoch,
-        "HEADER_BYTES=%d" % HEADER_BYTES,
-        "MEMBER_ALIGN=%d" % ALIGN,
-        "MEMBER_COUNT=%d" % len(placed),
-        "BUILD_MANIFEST_NORMALISED=%s" % ("built_at" if normalised else "none"),
-        "TOTAL_BYTES=%d" % total,
-        "XIMAGE_SHA256=%s" % ximage_sha,
-        "ROOTFS_SQUASHFS_SHA256=%s" % rootfs_sha,
-    ]
-    for member in placed:
-        header_lines.append(
-            "MEMBER=name=%s offset=%d size=%d sha256=%s target_partlabel=%s"
-            % (member["name"], member["offset"], member["size"], member["sha256"], member["target"])
+    # --- the template must be the pinned vendor package ---------------------
+    got = sha256_file(args.template)
+    if got != TEMPLATE_SHA256 and not args.allow_unpinned_template:
+        sys.exit(
+            "FATAL: template %s has sha256 %s, expected %s (%s).\n"
+            "       A release is built from the pinned official recovery package. Pass\n"
+            "       --allow-unpinned-template only for local experimentation, never a release."
+            % (args.template, got, TEMPLATE_SHA256, TEMPLATE_NAME)
         )
+    template_pinned = got == TEMPLATE_SHA256
 
-    header_text = "\n".join(header_lines) + "\n"
-    header_blob = header_text.encode("utf-8")
-    if len(header_blob) > HEADER_BYTES:
-        sys.exit("FATAL: header is %d bytes, exceeds the fixed %d-byte header area"
-                 % (len(header_blob), HEADER_BYTES))
-    header_blob = header_blob.ljust(HEADER_BYTES, b"\x00")
+    slot_b = args.slot == "b"
 
-    with open(args.out, "wb") as fh:
-        fh.write(header_blob)
-        for member in placed:
-            fh.seek(member["offset"])
-            fh.write(member["data"])
-        # Explicitly extend to the aligned total so the final member's padding
-        # exists as real zero bytes rather than as an implicit short file.
-        fh.truncate(total)
-        fh.flush()
-        os.fsync(fh.fileno())
+    with zipfile.ZipFile(args.template, "r") as source:
+        infos = {i.filename: i for i in source.infolist()}
+        required = {STOCK_KERNEL_ENTRY, STOCK_ROOTFS_ENTRY}
+        if slot_b:
+            required |= {STOCK_RTOS_ENTRY, CLONER_PROFILE_ENTRY}
+        missing = sorted(required - set(infos))
+        if missing:
+            sys.exit("FATAL: template is missing required entries: %s" % ", ".join(missing))
 
-    pkg_sha = sha256_file(args.out)
+        profile = None
+        if slot_b:
+            profile = configure_dual_slot(source.read(CLONER_PROFILE_ENTRY))
+
+            # The one check that stands between a recovery flash and a printer
+            # with no factory identity. Asserted on the bytes we are about to
+            # write, not on the constant we meant to write.
+            erase = None
+            for line in profile.splitlines():
+                if line.strip().startswith(b"erase_list="):
+                    erase = line.split(b"=", 1)[1].decode("ascii", "replace").strip()
+                    break
+            if erase is None:
+                sys.exit("FATAL: the configured Cloner profile has no erase_list")
+            if not layout.erase_list_preserves_sn_mac(erase):
+                sys.exit(
+                    "FATAL: the configured erase_list %s would erase across sn_mac "
+                    "(0x%x..0x%x).\n"
+                    "       sn_mac holds the per-unit factory MAC and serial and cannot be\n"
+                    "       regenerated. Refusing to build a package that destroys it."
+                    % (erase, *layout.SN_MAC_PRESERVED_RANGE)
+                )
+
+        if slot_b:
+            replacements = {KERNEL2_ENTRY: args.ximage, ROOTFS2_ENTRY: args.rootfs}
+            appended = {RTOS2_ENTRY, OTA_ENTRY, KERNEL2_ENTRY, ROOTFS2_ENTRY}
+        else:
+            replacements = {STOCK_KERNEL_ENTRY: args.ximage, STOCK_ROOTFS_ENTRY: args.rootfs}
+            appended = set()
+
+        out = os.path.abspath(args.out)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(out), prefix=".%s." % os.path.basename(out),
+                                             suffix=".tmp", delete=False) as handle:
+                tmp = handle.name
+
+            with zipfile.ZipFile(tmp, "w", allowZip64=True) as dest:
+                for info in source.infolist():
+                    if info.filename in replacements and not slot_b:
+                        with open(replacements[info.filename], "rb") as src, \
+                             dest.open(copy.copy(info), "w") as out_stream:
+                            shutil.copyfileobj(src, out_stream, 1024 * 1024)
+                    elif slot_b and info.filename == CLONER_PROFILE_ENTRY:
+                        dest.writestr(copy.copy(info), profile)
+                    elif info.filename not in appended:
+                        with source.open(info, "r") as src, \
+                             dest.open(copy.copy(info), "w") as out_stream:
+                            shutil.copyfileobj(src, out_stream, 1024 * 1024)
+
+                if slot_b:
+                    # Reference entry order: ota, RTOS2, kernel2, rootfs2.
+                    dest.writestr(renamed(infos[STOCK_KERNEL_ENTRY], OTA_ENTRY), SLOT2_OTA_MARKER)
+                    with source.open(infos[STOCK_RTOS_ENTRY], "r") as src, \
+                         dest.open(renamed(infos[STOCK_RTOS_ENTRY], RTOS2_ENTRY), "w") as out_stream:
+                        shutil.copyfileobj(src, out_stream, 1024 * 1024)
+                    for entry, path, template_entry in (
+                        (KERNEL2_ENTRY, args.ximage, STOCK_KERNEL_ENTRY),
+                        (ROOTFS2_ENTRY, args.rootfs, STOCK_ROOTFS_ENTRY),
+                    ):
+                        with open(path, "rb") as src, \
+                             dest.open(renamed(infos[template_entry], entry), "w") as out_stream:
+                            shutil.copyfileobj(src, out_stream, 1024 * 1024)
+
+            os.replace(tmp, out)
+            tmp = None
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    pkg_sha = sha256_file(out)
+    kernel_entry = KERNEL2_ENTRY if slot_b else STOCK_KERNEL_ENTRY
+    rootfs_entry = ROOTFS2_ENTRY if slot_b else STOCK_ROOTFS_ENTRY
 
     lines = [
         "# NebulaOS .ingenic packaging manifest",
-        "# Generated by scripts/package/build-ingenic.py from an already-built canonical core.",
-        "# Nothing here was compiled by this step.",
-        "INGENIC_FORMAT_VERSION=%s" % FORMAT_VERSION,
-        "INGENIC_MAGIC=%s" % MAGIC,
+        "# Built by substituting the canonical core into the pinned official",
+        "# Ingenic recovery package. Nothing was compiled by this step, and no",
+        "# vendor boot material (SPL/U-Boot, MBR/GPT, Cloner files, keys) was altered.",
+        "INGENIC_TEMPLATE=%s" % TEMPLATE_NAME,
+        "INGENIC_TEMPLATE_SHA256=%s" % got,
+        "INGENIC_TEMPLATE_PINNED=%s" % ("YES" if template_pinned else "NO"),
+        "INGENIC_SLOT=%s" % ("B (stock kept in slot A)" if slot_b else "A (stock slot overwritten)"),
         "SOURCE_HEAD=%s" % source_head,
         "SOURCE_DATE_EPOCH=%s" % args.source_date_epoch,
         "XIMAGE_SHA256=%s" % ximage_sha,
-        "XIMAGE_SIZE=%d" % len(ximage),
+        "XIMAGE_SIZE=%d" % x_size,
+        "XIMAGE_ENTRY=%s" % kernel_entry,
         "ROOTFS_SQUASHFS_SHA256=%s" % rootfs_sha,
-        "ROOTFS_SQUASHFS_SIZE=%d" % len(rootfs),
+        "ROOTFS_SQUASHFS_SIZE=%d" % r_size,
+        "ROOTFS_ENTRY=%s" % rootfs_entry,
         "INGENIC_SHA256=%s" % pkg_sha,
-        "INGENIC_SIZE=%d" % total,
-        "INGENIC_MEMBER_COUNT=%d" % len(placed),
-        # The as-built manifest's own hash, kept OUT of the container so the
-        # container stays byte-identical across builds, but recorded here so the
-        # specific build run that produced this package is still traceable.
-        "BUILD_MANIFEST_ORIGINAL_SHA256=%s" % sha256_bytes(build_manifest_raw),
-        "BUILD_MANIFEST_NORMALISED=%s" % ("built_at" if normalised else "none"),
-        "CREALITY_CLONER_COMPATIBLE=UNVERIFIED",
+        "INGENIC_SIZE=%d" % os.path.getsize(out),
+        "INGENIC_OTA_MARKER=%s" % ("ota:kernel2" if slot_b else "unchanged"),
+        "INGENIC_SN_MAC_PRESERVED=YES",
+        "INGENIC_ERASE_LIST=%s" % layout.VENDOR_ERASE_LIST,
+        "KEEP_STOCK_SPL_UBOOT_GPT=YES",
         "HARDWARE_AGENT_TRANSPORT=NO",
+        "QUALIFIED_INPUT_ARTIFACTS_MODIFIED=NO",
+        "# CONSUMER: the Ingenic USB Cloner in X2000E USB boot (mask-ROM) mode.",
+        "# This is NOT flashed from a U-Boot command line, and it is NOT an",
+        "# autonomous Hardware Agent transport. It programs whole partitions per",
+        "# its Cloner policy and is more destructive than the normal .img OTA path.",
+        "# sn_mac (0x200000..0x2fffff) is excluded from the erase ranges, preserving",
+        "# the per-unit factory MAC and serial. Packaging refuses if that ever changes.",
     ]
-    for member in placed:
-        lines.append("INGENIC_MEMBER=name=%s offset=%d size=%d sha256=%s target_partlabel=%s"
-                     % (member["name"], member["offset"], member["size"],
-                        member["sha256"], member["target"]))
-    lines += [
-        "# COMPATIBILITY. Creality's recovery tool for this printer is a closed",
-        "# Windows binary (cloner-2.5.18-windows_alpha.zip in",
-        "# CrealityOfficial/Ender-3_V3_KE_Annex). No sample .ingenic package and no",
-        "# format specification are published anywhere this project could find, so",
-        "# this container's compatibility with that tool has never been tested and",
-        "# is recorded as UNVERIFIED rather than claimed.",
-        "# The NEBULAOS-RECOVERY magic at offset 0 is deliberate: a tool that does",
-        "# not know this format rejects the file rather than misreading it and",
-        "# starting a partial flash.",
-        "# SCOPE. This is recovery media for a human. It has none of the Hardware",
-        "# Agent's safety semantics - no slot-2-only ownership enforcement, no",
-        "# live-target collision refusal, no armed/disarm transaction. The burn map",
-        "# member records what it describes writing: kernel2, rootfs2 and the OTA",
-        "# marker, and explicitly never the stock slot or the data partitions.",
-    ]
-
-    with open(args.out + ".manifest.txt", "w", encoding="utf-8") as fh:
+    with open(out + ".manifest.txt", "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
-    with open(args.out + ".sha256", "w", encoding="utf-8") as fh:
-        fh.write("%s  %s\n" % (pkg_sha, os.path.basename(args.out)))
+    with open(out + ".sha256", "w", encoding="utf-8") as fh:
+        fh.write("%s  %s\n" % (pkg_sha, os.path.basename(out)))
 
-    print("INGENIC_BUILT=%s" % args.out)
+    print("INGENIC_BUILT=%s" % out)
     print("INGENIC_SHA256=%s" % pkg_sha)
-    print("INGENIC_SIZE=%d" % total)
-    print("CREALITY_CLONER_COMPATIBLE=UNVERIFIED")
+    print("INGENIC_SIZE=%d" % os.path.getsize(out))
+    print("INGENIC_SLOT=%s" % ("B" if slot_b else "A"))
+    print("INGENIC_TEMPLATE_PINNED=%s" % ("YES" if template_pinned else "NO"))
+    print("INGENIC_SN_MAC_PRESERVED=YES")
     return 0
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(description="Package the canonical core into a NebulaOS .ingenic")
+    parser = argparse.ArgumentParser(
+        description="Substitute the canonical core into the official Ingenic recovery package")
+    parser.add_argument("--template", required=True, help="official Ender-3_V3_KE .ingenic package")
     parser.add_argument("--ximage", required=True)
     parser.add_argument("--rootfs", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--source-head")
     parser.add_argument("--source-date-epoch", required=True)
+    parser.add_argument("--slot", choices=("a", "b"), default="b",
+                        help="b (default): stock kept in slot A, NebulaOS in slot B. "
+                             "a: overwrite the stock slot.")
+    parser.add_argument("--allow-unpinned-template", action="store_true",
+                        help="local experimentation only; never for a release")
     return build(parser.parse_args(argv))
 
 

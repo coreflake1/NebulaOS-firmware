@@ -1,42 +1,44 @@
 #!/usr/bin/env python3
-"""Validate a NebulaOS .ingenic package by unpacking it again.
+"""Validate a NebulaOS .ingenic against its canonical core AND its template.
 
-Parses the container independently of the packer - it reads the fixed header,
-follows the declared offsets, extracts every member to disk, and hashes what
-came out. Nothing is taken from the packer's own manifest until the end, and
-then only to check that the manifest agrees with the artifact.
+A packaging command that exits 0 proves only that it did not crash. This opens
+the finished archive and proves three separate things:
 
-Checks:
-  1. the magic and format version are ours
-  2. the header parses and declares a coherent member table
-  3. every declared member is present, in range, and hashes to its declaration
-  4. the xImage and rootfs.squashfs members are byte-identical to the canonical
-     core the package claims to carry
-  5. the extracted rootfs is a real, readable squashfs (unsquashfs listing)
-  6. the burn map is present, parses, and names only partitions this project is
-     willing to describe writing - a burn map that named the stock slot or the
-     user's data partitions would be a defect, so it is asserted against
-  7. padding between members is zero
-  8. the packaging manifest agrees with the artifact
-  9. the compatibility claim is UNVERIFIED and has not drifted to YES
+  1. the NebulaOS payloads that went in are the ones that came out, byte for
+     byte, compared by SHA-256 against the canonical xImage and rootfs.squashfs
+  2. nothing else changed. Every entry the template carried - SPL/U-Boot, the
+     MBR/GPT, the per-SoC firmware and DDR descriptors, the Cloner files, the
+     security keys - is compared against the template entry by entry. Vendor
+     boot material we did not mean to touch must be bit-identical.
+  3. the safety properties hold: the erase policy still leaves sn_mac alone,
+     the OTA marker selects the intended slot, and in the default slot-B layout
+     the stock slot is genuinely untouched.
+
+(2) is the check that matters most and is the easiest to omit. A package that
+embeds the right kernel but silently re-encoded U-Boot is not a package anyone
+should put a printer into mask-ROM for.
 """
 
 import argparse
 import hashlib
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
+import zipfile
 
-MAGIC = "NEBULAOS-RECOVERY"
-HEADER_BYTES = 4096
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "emmc"))
+import nebulaos_layout as layout  # noqa: E402
+
+STOCK_KERNEL_ENTRY = "images/xImage"
+STOCK_ROOTFS_ENTRY = "images/rootfs.squashfs"
+STOCK_RTOS_ENTRY = "images/zero.bin"
+UBOOT_ENTRY = "images/u-boot-with-spl-mbr-gpt.bin"
+CLONER_PROFILE_ENTRY = "configs/x2000/x2000e_mmc0_lpddr2_linux.cfg"
+OTA_ENTRY = "images/ota"
+KERNEL2_ENTRY = "images/xImage2"
+ROOTFS2_ENTRY = "images/rootfs2.squashfs"
+RTOS2_ENTRY = "images/zero2.bin"
+SLOT2_OTA_MARKER = b"ota:kernel2\n\n"
 CHUNK = 1024 * 1024
-
-# Exactly the partitions a recovery flash is allowed to describe writing.
-ALLOWED_TARGETS = {"kernel2", "rootfs2", "ota", "none"}
-# Naming any of these in a burn map is a defect, not a warning.
-FORBIDDEN_TARGETS = {"kernel", "rootfs", "rootfs_data", "userdata", "sn_mac", "rtos", "rtos2"}
 
 PASS, FAIL = [], []
 
@@ -61,43 +63,25 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def manifest_get(path, key):
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if line.startswith(key + "="):
-                return line.split("=", 1)[1].strip()
+def sha256_entry(archive, name):
+    digest = hashlib.sha256()
+    with archive.open(name, "r") as stream:
+        for chunk in iter(lambda: stream.read(CHUNK), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def ini_value(data, section, key):
+    header = ("[%s]" % section).encode()
+    prefix = ("%s=" % key).encode()
+    current = b""
+    for line in data.splitlines():
+        content = line.rstrip(b"\r\n")
+        if content.startswith(b"[") and content.endswith(b"]"):
+            current = content
+        elif current == header and content.startswith(prefix):
+            return content[len(prefix):].decode("ascii", "replace").strip()
     return None
-
-
-def parse_header(blob):
-    """Parse the fixed header.
-
-    The first line is a bare magic token, not an assignment, so it is consumed
-    before the KEY=VALUE loop. Reported back under the synthetic key MAGIC so
-    callers have one place to check it.
-    """
-    text = blob.split(b"\x00", 1)[0].decode("utf-8")
-    lines = text.splitlines()
-    header, members = {}, []
-    if lines:
-        header["MAGIC"] = lines[0].strip()
-        lines = lines[1:]
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        key, _, value = line.partition("=")
-        if key == "MEMBER":
-            fields = {}
-            for token in value.split():
-                k, _, v = token.partition("=")
-                fields[k] = v
-            members.append(fields)
-        else:
-            header[key] = value
-    return header, members
 
 
 def report():
@@ -111,270 +95,179 @@ def report():
 def main(argv):
     parser = argparse.ArgumentParser(description="Validate a NebulaOS .ingenic package")
     parser.add_argument("--package", required=True)
+    parser.add_argument("--template", required=True, help="the official package it was built from")
     parser.add_argument("--ximage", required=True, help="canonical xImage to compare against")
     parser.add_argument("--rootfs", required=True, help="canonical rootfs.squashfs to compare against")
-    parser.add_argument("--manifest", help="the package's own manifest (defaults to <package>.manifest.txt)")
-    parser.add_argument("--skip-extract", action="store_true")
+    parser.add_argument("--slot", choices=("a", "b"), default="b")
     args = parser.parse_args(argv)
 
-    pkg_manifest = args.manifest or (args.package + ".manifest.txt")
+    slot_b = args.slot == "b"
     canonical_x = sha256_file(args.ximage)
     canonical_r = sha256_file(args.rootfs)
-    total_size = os.path.getsize(args.package)
 
     print("=== .ingenic validation: %s ===" % args.package)
     print("CANONICAL_XIMAGE_SHA256=%s" % canonical_x)
     print("CANONICAL_ROOTFS_SHA256=%s" % canonical_r)
+    print("SLOT=%s" % args.slot.upper())
     print()
 
-    with open(args.package, "rb") as fh:
-        header_blob = fh.read(HEADER_BYTES)
-    if len(header_blob) != HEADER_BYTES:
-        bad("the package is large enough to hold its fixed header")
-        return report()
-
     try:
-        header, members = parse_header(header_blob)
-    except (UnicodeDecodeError, ValueError) as exc:
-        bad("the fixed header parses", str(exc))
+        pkg = zipfile.ZipFile(args.package, "r")
+        tpl = zipfile.ZipFile(args.template, "r")
+    except (zipfile.BadZipFile, OSError) as exc:
+        bad("the package and template open as ZIP archives", str(exc))
         return report()
+    ok("the package opens as a ZIP archive (the Ingenic Cloner container)")
 
-    # Checked against the raw first bytes, not merely against the parsed field:
-    # the whole point of the magic is where it sits, so a check that only looks
-    # at a parsed dictionary would pass on a file with the token anywhere.
-    if header_blob[:len(MAGIC)].decode("ascii", "replace") == MAGIC and header.get("MAGIC") == MAGIC:
-        ok("the package begins with the NEBULAOS-RECOVERY magic at byte 0")
-    else:
-        bad("the package begins with the NEBULAOS-RECOVERY magic at byte 0",
-            "first %d bytes are %r" % (len(MAGIC), header_blob[:len(MAGIC)]))
-        return report()
+    pkg_names = [i.filename for i in pkg.infolist()]
+    tpl_names = [i.filename for i in tpl.infolist()]
 
-    # A foreign flashing tool must not mistake this for a disk image. Assert the
-    # two signatures such a tool looks for are absent.
-    if header_blob[510:512] != b"\x55\xaa":
-        ok("the package carries no MBR boot signature (a disk-image sniffer will reject it)")
-    else:
-        bad("the package carries no MBR boot signature")
-    if header_blob[512:520] != b"EFI PART":
-        ok("the package carries no GPT signature at LBA1")
-    else:
-        bad("the package carries no GPT signature at LBA1")
+    kernel_entry = KERNEL2_ENTRY if slot_b else STOCK_KERNEL_ENTRY
+    rootfs_entry = ROOTFS2_ENTRY if slot_b else STOCK_ROOTFS_ENTRY
 
-    if header.get("FORMAT_VERSION") == "1":
-        ok("the container format version is 1")
-    else:
-        bad("the container format version is 1", "got %r" % header.get("FORMAT_VERSION"))
+    # --- 1. the NebulaOS payloads round-trip --------------------------------
+    for entry, canonical, label in ((kernel_entry, canonical_x, "xImage"),
+                                    (rootfs_entry, canonical_r, "rootfs.squashfs")):
+        if entry not in pkg_names:
+            bad("the package carries %s" % entry)
+            continue
+        got = sha256_entry(pkg, entry)
+        if got == canonical:
+            ok("%s is byte-identical to the canonical %s" % (entry, label))
+        else:
+            bad("%s is byte-identical to the canonical %s" % (entry, label),
+                "package=%s canonical=%s" % (got, canonical))
 
-    declared = header.get("MEMBER_COUNT")
-    if declared is not None and declared.isdigit() and int(declared) == len(members):
-        ok("MEMBER_COUNT (%s) matches the number of declared members" % declared)
-    else:
-        bad("MEMBER_COUNT matches the number of declared members",
-            "declared=%s actual=%d" % (declared, len(members)))
+    # --- 2. nothing else changed -------------------------------------------
+    # The heart of the check. Every template entry must survive untouched
+    # except the ones we deliberately substituted or rewrote.
+    expected_changed = {kernel_entry, rootfs_entry}
+    if slot_b:
+        expected_changed |= {CLONER_PROFILE_ENTRY}
+    expected_new = {OTA_ENTRY, RTOS2_ENTRY, KERNEL2_ENTRY, ROOTFS2_ENTRY} if slot_b else set()
 
-    if header.get("TOTAL_BYTES") == str(total_size):
-        ok("TOTAL_BYTES matches the file size (%d)" % total_size)
+    missing = [n for n in tpl_names if n not in pkg_names]
+    if not missing:
+        ok("every one of the template's %d entries is still present" % len(tpl_names))
     else:
-        bad("TOTAL_BYTES matches the file size",
-            "header=%s actual=%d" % (header.get("TOTAL_BYTES"), total_size))
+        bad("every template entry is still present", "missing: %s" % ", ".join(missing[:5]))
 
-    # --- members ------------------------------------------------------------
-    tmpdir = tempfile.mkdtemp(prefix="nebulaos-ingenic-validate.", dir=os.environ.get("TMPDIR") or None)
-    extracted = {}
-    try:
-        for member in members:
-            name = member.get("name")
-            try:
-                offset = int(member["offset"])
-                size = int(member["size"])
-            except (KeyError, ValueError):
-                bad("member %r declares a numeric offset and size" % name, repr(member))
+    unexpected = [n for n in pkg_names if n not in tpl_names and n not in expected_new]
+    if not unexpected:
+        ok("the package adds only the %d intended new entries" % len(expected_new))
+    else:
+        bad("the package adds only the intended new entries",
+            "unexpected: %s" % ", ".join(unexpected[:5]))
+
+    drifted = []
+    for name in tpl_names:
+        if name in expected_changed or name not in pkg_names:
+            continue
+        if tpl.getinfo(name).file_size != pkg.getinfo(name).file_size:
+            drifted.append(name)
+            continue
+        if sha256_entry(tpl, name) != sha256_entry(pkg, name):
+            drifted.append(name)
+    if not drifted:
+        ok("all %d carried-through vendor entries are bit-identical to the template"
+           % (len(tpl_names) - len(expected_changed)))
+    else:
+        bad("all carried-through vendor entries are bit-identical to the template",
+            "drifted: %s" % ", ".join(drifted[:8]))
+
+    # Called out individually because these are the ones that would matter most.
+    for entry, what in ((UBOOT_ENTRY, "SPL/U-Boot + MBR/GPT"),
+                        ("security/x2000/key.bin", "X2000 security key"),
+                        ("firmwares/x2000/uboot.bin", "X2000 U-Boot firmware"),
+                        ("firmwares/x2000/spl.bin", "X2000 SPL firmware")):
+        if entry in tpl_names and entry in pkg_names and sha256_entry(tpl, entry) == sha256_entry(pkg, entry):
+            ok("%s (%s) is unchanged" % (entry, what))
+        else:
+            bad("%s (%s) is unchanged" % (entry, what))
+
+    # --- 3. slot A is genuinely stock in the default layout -----------------
+    if slot_b:
+        for entry, what in ((STOCK_KERNEL_ENTRY, "stock kernel"),
+                            (STOCK_ROOTFS_ENTRY, "stock rootfs"),
+                            (STOCK_RTOS_ENTRY, "stock RTOS")):
+            if sha256_entry(tpl, entry) == sha256_entry(pkg, entry):
+                ok("slot A's %s is the untouched stock payload" % what)
+            else:
+                bad("slot A's %s is the untouched stock payload" % what)
+
+        # The NebulaOS payload must NOT have landed in slot A.
+        if sha256_entry(pkg, STOCK_KERNEL_ENTRY) != canonical_x:
+            ok("the NebulaOS kernel did not land in slot A")
+        else:
+            bad("the NebulaOS kernel did not land in slot A",
+                "slot A holds the NebulaOS kernel - the stock fallback is gone")
+
+        if RTOS2_ENTRY in pkg_names and sha256_entry(pkg, RTOS2_ENTRY) == sha256_entry(tpl, STOCK_RTOS_ENTRY):
+            ok("zero2.bin is a deliberate copy of the stock RTOS")
+        else:
+            bad("zero2.bin is a deliberate copy of the stock RTOS")
+
+        # --- the OTA marker ---
+        if OTA_ENTRY in pkg_names:
+            marker = pkg.read(OTA_ENTRY)
+            if marker == SLOT2_OTA_MARKER:
+                ok("the OTA marker is exactly %r (selects slot B)" % SLOT2_OTA_MARKER)
+            else:
+                bad("the OTA marker is exactly %r (selects slot B)" % SLOT2_OTA_MARKER,
+                    "got %r" % marker)
+        else:
+            bad("the package carries an OTA marker entry")
+
+        # --- the dual-slot Cloner policy ---
+        profile = pkg.read(CLONER_PROFILE_ENTRY)
+        enabled = {}
+        for policy, label in (("policy1", "ota"), ("policy4", "rtos"), ("policy5", "rtos2"),
+                              ("policy6", "kernel"), ("policy7", "kernel2"),
+                              ("policy8", "rootfs"), ("policy9", "rootfs2")):
+            enabled[label] = ini_value(profile, policy, "enabled")
+        if all(v == "1" for v in enabled.values()):
+            ok("the Cloner profile enables all 7 dual-slot policies (%s)" % ", ".join(sorted(enabled)))
+        else:
+            bad("the Cloner profile enables all 7 dual-slot policies",
+                "; ".join("%s=%s" % (k, v) for k, v in sorted(enabled.items())))
+
+        for policy, want in (("policy7", KERNEL2_ENTRY), ("policy9", ROOTFS2_ENTRY),
+                             ("policy1", OTA_ENTRY), ("policy5", RTOS2_ENTRY)):
+            got = ini_value(profile, policy, "attribute")
+            if got == want:
+                ok("%s points at %s" % (policy, want))
+            else:
+                bad("%s points at %s" % (policy, want), "got %r" % got)
+
+        # --- sn_mac preservation: the irreversible one --------------------
+        erase = ini_value(profile, "mmc", "erase_list")
+        if erase and layout.erase_list_preserves_sn_mac(erase):
+            ok("the erase policy leaves sn_mac (0x%x..0x%x) untouched: %s"
+               % (*layout.SN_MAC_PRESERVED_RANGE, erase))
+        else:
+            bad("the erase policy leaves sn_mac untouched",
+                "erase_list=%r would erase across the per-unit factory MAC/serial" % erase)
+
+        # sn_mac's own policy must stay disabled - it is never programmed.
+        if ini_value(profile, "policy2", "enabled") == "0":
+            ok("the sn_mac policy remains disabled (never programmed)")
+        else:
+            bad("the sn_mac policy remains disabled (never programmed)",
+                "policy2 enabled=%s" % ini_value(profile, "policy2", "enabled"))
+
+        # The offsets are vendor geometry and must not have moved.
+        for policy, label in (("policy1", "ota"), ("policy6", "kernel"), ("policy7", "kernel2"),
+                              ("policy8", "rootfs"), ("policy9", "rootfs2"), ("policy2", "sn_mac")):
+            got = ini_value(profile, policy, "offset")
+            want = layout.partition_offset(label)
+            if got is not None and int(got, 0) == want:
                 continue
-
-            if offset < HEADER_BYTES or offset + size > total_size:
-                bad("member %r lies inside the package" % name,
-                    "offset=%d size=%d total=%d" % (offset, size, total_size))
-                continue
-
-            out = os.path.join(tmpdir, name.replace("/", "_"))
-            digest = hashlib.sha256()
-            with open(args.package, "rb") as src, open(out, "wb") as dst:
-                src.seek(offset)
-                remaining = size
-                while remaining:
-                    data = src.read(min(CHUNK, remaining))
-                    if not data:
-                        break
-                    digest.update(data)
-                    dst.write(data)
-                    remaining -= len(data)
-            got = digest.hexdigest()
-            extracted[name] = out
-
-            if got == member.get("sha256"):
-                ok("member %r extracts and hashes to its declaration (%d bytes)" % (name, size))
-            else:
-                bad("member %r extracts and hashes to its declaration" % name,
-                    "declared=%s extracted=%s" % (member.get("sha256"), got))
-
-            target = member.get("target_partlabel")
-            if target in ALLOWED_TARGETS:
-                ok("member %r declares an allowed burn target (%s)" % (name, target))
-            else:
-                bad("member %r declares an allowed burn target" % name,
-                    "target=%r is not one of %s" % (target, sorted(ALLOWED_TARGETS)))
-
-        # --- payload equals the canonical core ------------------------------
-        if "xImage" in extracted:
-            got = sha256_file(extracted["xImage"])
-            if got == canonical_x:
-                ok("the xImage member is byte-identical to the canonical xImage")
-            else:
-                bad("the xImage member is byte-identical to the canonical xImage",
-                    "package=%s canonical=%s" % (got, canonical_x))
+            bad("%s (%s) offset is unchanged at 0x%x" % (policy, label, want), "got %r" % got)
         else:
-            bad("the package carries an xImage member")
+            ok("every partition offset in the Cloner profile is unchanged vendor geometry")
 
-        if "rootfs.squashfs" in extracted:
-            got = sha256_file(extracted["rootfs.squashfs"])
-            if got == canonical_r:
-                ok("the rootfs.squashfs member is byte-identical to the canonical rootfs")
-            else:
-                bad("the rootfs.squashfs member is byte-identical to the canonical rootfs",
-                    "package=%s canonical=%s" % (got, canonical_r))
-        else:
-            bad("the package carries a rootfs.squashfs member")
-
-        # --- the extracted filesystem is real -------------------------------
-        if args.skip_extract:
-            print("SKIP  unsquashfs listing (--skip-extract)")
-        elif "rootfs.squashfs" not in extracted:
-            pass
-        elif not shutil.which("unsquashfs"):
-            bad("the extracted rootfs is a readable squashfs",
-                "unsquashfs is not installed; pass --skip-extract to acknowledge this gap explicitly")
-        else:
-            proc = subprocess.run(["unsquashfs", "-l", extracted["rootfs.squashfs"]],
-                                  capture_output=True, text=True, timeout=300)
-            if proc.returncode != 0:
-                bad("the extracted rootfs is a readable squashfs", proc.stderr.strip()[:400])
-            else:
-                entries = [l for l in proc.stdout.splitlines() if l.startswith("squashfs-root")]
-                if len(entries) >= 100 and "squashfs-root/etc/ota_marker.sh" in proc.stdout:
-                    ok("the extracted rootfs is a readable NebulaOS squashfs (%d entries)" % len(entries))
-                else:
-                    bad("the extracted rootfs is a readable NebulaOS squashfs",
-                        "%d entries, ota_marker.sh present=%s"
-                        % (len(entries), "squashfs-root/etc/ota_marker.sh" in proc.stdout))
-
-        # --- the marker member ----------------------------------------------
-        if "ota-marker.bin" in extracted:
-            with open(extracted["ota-marker.bin"], "rb") as fh:
-                block = fh.read()
-            expected = bytearray(512)
-            expected[: len(b"ota:kernel2")] = b"ota:kernel2"
-            if block == bytes(expected):
-                ok("the ota-marker member is exactly one canonical ota:kernel2 block")
-            else:
-                bad("the ota-marker member is exactly one canonical ota:kernel2 block",
-                    "got %r" % block[:32])
-        else:
-            bad("the package carries an ota-marker member")
-
-        # --- the burn map ----------------------------------------------------
-        if "burn-map.txt" not in extracted:
-            bad("the package carries a burn map member")
-        else:
-            burn_text = open(extracted["burn-map.txt"], "r", encoding="utf-8").read()
-            burns, nevers = [], set()
-            for line in burn_text.splitlines():
-                line = line.strip()
-                if line.startswith("BURN="):
-                    fields = dict(tok.partition("=")[::2] for tok in line[5:].split())
-                    burns.append(fields)
-                elif line.startswith("NEVER_WRITE="):
-                    nevers.add(line.split("=", 1)[1])
-
-            if burns:
-                ok("the burn map declares %d burn target(s)" % len(burns))
-            else:
-                bad("the burn map declares at least one burn target")
-
-            offenders = [b for b in burns if b.get("target_partlabel") in FORBIDDEN_TARGETS]
-            if not offenders:
-                ok("the burn map names no forbidden partition (stock slot, data partitions)")
-            else:
-                bad("the burn map names no forbidden partition",
-                    "offending targets: %s" % [b.get("target_partlabel") for b in offenders])
-
-            if FORBIDDEN_TARGETS <= nevers:
-                ok("the burn map explicitly lists every forbidden partition as NEVER_WRITE")
-            else:
-                bad("the burn map explicitly lists every forbidden partition as NEVER_WRITE",
-                    "missing: %s" % sorted(FORBIDDEN_TARGETS - nevers))
-
-            # The declared capacities must match what the slot partitions really are.
-            caps = {b.get("target_partlabel"): b.get("max_bytes") for b in burns}
-            if caps.get("kernel2") == "8388608" and caps.get("rootfs2") == "524288000":
-                ok("the burn map's slot capacities match the real partition sizes")
-            else:
-                bad("the burn map's slot capacities match the real partition sizes", repr(caps))
-
-        # --- padding is zero -------------------------------------------------
-        ordered = sorted((m for m in members if "offset" in m and "size" in m),
-                         key=lambda m: int(m["offset"]))
-        padding_clean = True
-        with open(args.package, "rb") as fh:
-            for i, member in enumerate(ordered):
-                end = int(member["offset"]) + int(member["size"])
-                next_start = int(ordered[i + 1]["offset"]) if i + 1 < len(ordered) else total_size
-                if next_start > end:
-                    fh.seek(end)
-                    if fh.read(next_start - end).strip(b"\x00"):
-                        padding_clean = False
-                        bad("padding after member %r is zero" % member.get("name"))
-        if padding_clean:
-            ok("all inter-member padding is zero")
-
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    # --- the packaging manifest agrees --------------------------------------
-    if not os.path.exists(pkg_manifest):
-        bad("the .ingenic manifest exists", pkg_manifest)
-    else:
-        checks = [
-            ("XIMAGE_SHA256", canonical_x),
-            ("ROOTFS_SQUASHFS_SHA256", canonical_r),
-            ("INGENIC_SHA256", sha256_file(args.package)),
-            ("INGENIC_SIZE", str(total_size)),
-        ]
-        disagreements = [(k, v, manifest_get(pkg_manifest, k)) for k, v in checks
-                         if manifest_get(pkg_manifest, k) != v]
-        if not disagreements:
-            ok("the .ingenic manifest agrees with the artifact and the canonical core")
-        else:
-            bad("the .ingenic manifest agrees with the artifact and the canonical core",
-                "; ".join("%s: manifest=%s actual=%s" % (k, got, want) for k, want, got in disagreements))
-
-    # --- the compatibility claim has not drifted ----------------------------
-    # Asserted in both places it is written. If a future change ever flips this
-    # to YES without a real reference artifact to test against, this fails.
-    claims = [header.get("CREALITY_CLONER_COMPATIBLE"),
-              manifest_get(pkg_manifest, "CREALITY_CLONER_COMPATIBLE")]
-    if all(c == "UNVERIFIED" for c in claims):
-        ok("CREALITY_CLONER_COMPATIBLE is UNVERIFIED in both the header and the manifest")
-    else:
-        bad("CREALITY_CLONER_COMPATIBLE is UNVERIFIED in both the header and the manifest",
-            "header=%r manifest=%r - compatibility must not be claimed without a reference artifact"
-            % (claims[0], claims[1]))
-
-    if header.get("HARDWARE_AGENT_TRANSPORT") == "NO":
-        ok("the package declares HARDWARE_AGENT_TRANSPORT=NO")
-    else:
-        bad("the package declares HARDWARE_AGENT_TRANSPORT=NO",
-            "got %r" % header.get("HARDWARE_AGENT_TRANSPORT"))
-
+    pkg.close()
+    tpl.close()
     return report()
 
 

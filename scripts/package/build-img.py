@@ -1,82 +1,143 @@
 #!/usr/bin/env python3
-"""Package the canonical NebulaOS core into a full-disk .img, deterministically.
+"""Package the canonical NebulaOS core into a Creality F005 OTA .img.
 
-THIS IS PACKAGING, NOT BUILDING
+WHAT A KE .img ACTUALLY IS
 
-It consumes an already-built canonical core - xImage, rootfs.squashfs and the
-build manifest that binds them - and rearranges those exact bytes into a disk
-image. It compiles nothing. If the xImage inside the .img is not byte-identical
-to the xImage the build produced, that is a bug in this script, and the
-validator exists to catch it.
+Not a raw disk image. It is the OTA package the stock Creality updater consumes,
+delivered over USB or the touchscreen, or from the CLI:
 
-WHAT THIS IMAGE IS FOR - READ THIS BEFORE WRITING IT ANYWHERE
+    /etc/ota_bin/local_ota_update.sh /path/to/NebulaOS-....img
 
-This is a BLANK-MEDIA PROVISIONING IMAGE. It is for bringing up NebulaOS on
-storage that carries no factory data: a replacement eMMC, a bench/development
-board, or an emulated device.
+The .img extension is checked by the stock updater, which is why the output must
+carry it; it says nothing about the contents. Inside is an encrypted 7z archive
+holding a versioned directory of metadata and chunked payloads.
 
-It is NOT an update path for a printer you own, and writing it to one is
-destructive in three distinct ways, two of which no amount of care on our side
-can fix:
+An earlier revision of this file produced a raw GPT disk image. That was simply
+the wrong format - it would not have been accepted by the updater at all, and
+writing it to a device would have destroyed the stock slot, the persistent data
+partitions and the per-unit sn_mac identity. This replaces it entirely.
 
-  1. it zeroes p2/sn_mac, which holds the PER-UNIT factory MAC and serial
-     (confirmed on real hardware:
-      26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1, the address stock's
-      wlan0 actually uses). That value is programmed per unit, exists nowhere
-      else, and cannot be regenerated. Destroying it is permanent.
+WHERE IT INSTALLS, AND WHAT THAT MEANS
 
-  2. it leaves the stock slot (p5/p7) empty, removing the fallback that
-     docs/DEVELOPER_RECOVERY.md designates as the way back. We do not have
-     Creality's stock kernel and rootfs and could not redistribute them, so this
-     image cannot restore what it removes.
+The stock updater writes whichever A/B set is INACTIVE and then flips the ota
+marker to point at what it just wrote:
 
-  3. it replaces rootfs_data and userdata - printer.cfg, calibration, macros,
-     uploads, Wi-Fi credentials - and its partition table's absolute offsets have
-     never been captured from a real KE, so they may not even land where the
-     factory put them.
+    booted A (ota:kernel)   ->  writes kernel2 + rootfs2, sets ota:kernel2
+    booted B (ota:kernel2)  ->  writes kernel  + rootfs,  sets ota:kernel
 
-To install or update NebulaOS on a printer that already works, use the narrow
-two-partition path instead: scripts/flash-spare-slot.sh, driven by the Hardware
-Agent. That writes kernel2 and rootfs2 and touches nothing else.
+So the destination is not a property of this package - it is a property of which
+slot the printer is running when the package is applied. A NebulaOS .img applied
+while NebulaOS is booted will overwrite the STOCK slot. There is no
+vendor-signature check and no comparison of the target's existing contents
+against a Creality release that would prevent that.
 
-The manifest states this scope in machine-readable form
-(IMG_TARGET=BLANK_MEDIA_ONLY, IMG_WRITE_TO_PROVISIONED_PRINTER=FORBIDDEN) and
-lists all three reasons, so a tool consuming the manifest can refuse rather than
-relying on someone having read this comment.
+That is worth stating precisely. It does NOT mean "there are no checks": the
+updater validates package extraction, version, metadata, partition capacity,
+per-chunk MD5 and declared full sizes, and this packager exists to satisfy every
+one of them. It means there is no AUTHENTICITY check tying a partition to
+Creality's own bytes. A structurally valid custom package is writable, which is
+exactly why custom F005 firmware can be installed through the stock update path.
 
-GEOMETRY PROVENANCE
+THE CHAINED-MD5 CHUNK SCHEME
 
-The partition table is authored from tools/emmc/nebulaos_layout.py, which records
-per fact whether a value came from real hardware or is a declaration with no
-evidence behind it. Absolute start offsets have never been captured from a KE, so
-they are declared. The manifest carries every unverified fact by name. That is
-also why IMG_FACTORY_FLASHABLE stays NO: even on blank media this image's
-geometry is our best reconstruction, not a reproduction of the factory layout.
+Each payload is split into 1 MiB chunks whose filenames form a chain:
 
-DETERMINISM
+    <name>.0000.<md5 of the WHOLE payload>
+    <name>.0001.<md5 of chunk 0000>
+    <name>.0002.<md5 of chunk 0001>
+    ...
 
-Two runs over the same canonical core must produce byte-identical output:
+so each chunk's name carries the digest of its PREDECESSOR, and only the first
+carries the digest of the complete image. Alongside them:
 
-  * every GUID is derived by uuid5 from a seed, never generated randomly
-  * the seed is the source commit, so it is a property of the release
-  * unused space is zero, not uninitialised
-  * no timestamp, hostname, path or build counter reaches the image
-  * the manifest inside the image records SOURCE_DATE_EPOCH rather than now()
+    ota_md5_<name>.<md5 of the whole payload>
 
-The packaging reproducibility check re-runs this and compares SHA-256.
+whose lines are the per-chunk digests in order. The updater verifies that list
+before streaming anything into the MMC partition, so getting the chain wrong
+produces a package that is rejected rather than one that half-installs.
+
+THE ARCHIVE PASSWORD
+
+Derived, not hardcoded:
+
+    mkpasswd -m md5 "F005C3_7e_bz" -S cxswfile
+
+computed here through the same MD5-crypt algorithm and then asserted against the
+known-good result, so a wrong algorithm is caught at build time rather than by a
+printer refusing to open the package.
+
+VERIFICATION IS A HARD GATE
+
+build() does not return success because 7z exited 0. scripts/package/
+validate-img.py re-opens the archive, reassembles both payloads from the
+packaged chunks, and requires
+
+    SHA256(reassembled) == SHA256(canonical)
+
+for xImage and rootfs.squashfs both. Anything less would let a chunking bug ship.
 """
 
 import argparse
 import hashlib
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "emmc"))
+import nebulaos_layout as layout  # noqa: E402
 
-import nebulaos_gpt as gpt          # noqa: E402
-import nebulaos_layout as layout    # noqa: E402
+CHUNK_BYTES = 1048576
+BOARD_SHORT_NAME = "F005"
+SECRET_INPUT = "%sC3_7e_bz" % BOARD_SHORT_NAME
+SECRET_SALT = "cxswfile"
+EXPECTED_SECRET = "$1$cxswfile$ZFd0RWFYkJQugbtKVGL9y0"
 
-MARKER_KERNEL2 = b"ota:kernel2"
+
+def derive_archive_secret():
+    """MD5-crypt of the board string under the vendor salt.
+
+    Equivalent to `mkpasswd -m md5 "F005C3_7e_bz" -S cxswfile`. This is a
+    PUBLISHED, derivable value used by every tool that builds F005 packages -
+    it is an envelope format detail, not a secret, which is why it may appear
+    in a process argument list where the attestation key never may.
+
+    Derived and then checked against the known-good result so that a Python
+    build without crypt(3), or a different algorithm, fails here rather than
+    producing an archive the stock updater silently refuses to open.
+    """
+    got = None
+    try:
+        import crypt  # removed in Python 3.13; present on most build hosts
+        got = crypt.crypt(SECRET_INPUT, "$1$%s" % SECRET_SALT)
+    except Exception:
+        if shutil.which("mkpasswd"):
+            proc = subprocess.run(
+                ["mkpasswd", "-m", "md5", SECRET_INPUT, "-S", SECRET_SALT],
+                capture_output=True, text=True,
+            )
+            if proc.returncode == 0:
+                got = proc.stdout.strip()
+    if got != EXPECTED_SECRET:
+        sys.exit(
+            "FATAL: OTA envelope secret derivation produced %r, expected %r.\n"
+            "       Install `mkpasswd` (whois package) or use a Python with crypt(3).\n"
+            "       Refusing to build a package the stock updater cannot open." % (got, EXPECTED_SECRET)
+        )
+    return got
+
+
+def md5_bytes(data):
+    return hashlib.md5(data).hexdigest()
+
+
+def md5_file(path):
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def sha256_file(path):
@@ -95,154 +156,192 @@ def manifest_get(path, key):
     return None
 
 
-def canonical_marker_block():
-    """The exact 512 bytes the OTA marker partition should hold for slot 2.
+def chunk_payload(source, out_dir, name):
+    """Split `source` into the chained-MD5 chunk set.
 
-    One canonical representation, NUL-padded. The marker primitive that runs on
-    the device uses the same rule, so an image built here and a marker written
-    there are indistinguishable.
+    Returns (full_md5, [per-chunk md5 in order]).
+
+    The chain is the part that is easy to get subtly wrong: chunk 0000's
+    filename carries the digest of the COMPLETE payload, and every later chunk
+    carries the digest of the chunk BEFORE it. A scheme where each chunk named
+    its own digest would look almost identical and would be rejected by the
+    updater.
     """
-    block = bytearray(512)
-    block[: len(MARKER_KERNEL2)] = MARKER_KERNEL2
-    return bytes(block)
+    full_md5 = md5_file(source)
+    per_chunk = []
+    previous = full_md5
+    index = 0
+    with open(source, "rb") as fh:
+        while True:
+            data = fh.read(CHUNK_BYTES)
+            if not data:
+                break
+            with open(os.path.join(out_dir, "%s.%04d.%s" % (name, index, previous)), "wb") as out:
+                out.write(data)
+            digest = md5_bytes(data)
+            per_chunk.append(digest)
+            previous = digest
+            index += 1
+    if not per_chunk:
+        sys.exit("FATAL: %s is empty" % source)
+    with open(os.path.join(out_dir, "ota_md5_%s.%s" % (name, full_md5)), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(per_chunk) + "\n")
+    return full_md5, per_chunk
 
 
 def build(args):
+    # --- the canonical core must agree with its own build manifest ----------
     ximage_sha = sha256_file(args.ximage)
     rootfs_sha = sha256_file(args.rootfs)
-    manifest_sha = sha256_file(args.manifest)
-
-    # The canonical core must agree with its own manifest before it is packaged.
-    # Packaging a set whose manifest disagrees with its bytes would bind the
-    # .img to a release generation that never existed.
-    man_x = manifest_get(args.manifest, "xImage_sha256")
-    man_r = manifest_get(args.manifest, "rootfs_squashfs_sha256")
+    if manifest_get(args.manifest, "xImage_sha256") != ximage_sha:
+        sys.exit("FATAL: xImage sha256 does not match the build manifest")
+    if manifest_get(args.manifest, "rootfs_squashfs_sha256") != rootfs_sha:
+        sys.exit("FATAL: rootfs.squashfs sha256 does not match the build manifest")
     man_c = manifest_get(args.manifest, "git_commit_main")
-    if man_x != ximage_sha:
-        sys.exit("FATAL: xImage sha256 %s does not match build manifest %s" % (ximage_sha, man_x))
-    if man_r != rootfs_sha:
-        sys.exit("FATAL: rootfs.squashfs sha256 %s does not match build manifest %s" % (rootfs_sha, man_r))
     if args.source_head and man_c != args.source_head:
         sys.exit("FATAL: build manifest records git_commit_main=%s, not %s" % (man_c, args.source_head))
-
     source_head = args.source_head or man_c
     if not source_head:
         sys.exit("FATAL: no source head given and the build manifest records none")
 
-    ximage = open(args.ximage, "rb").read()
-    rootfs = open(args.rootfs, "rb").read()
+    # --- capacity, before anything is packed --------------------------------
+    sizes = {f.name: f.value for f in layout.PARTITION_SIZES}
+    x_size, r_size = os.path.getsize(args.ximage), os.path.getsize(args.rootfs)
+    if x_size > sizes["kernel"]:
+        sys.exit("FATAL: xImage is %d bytes, exceeds the kernel partition capacity %d"
+                 % (x_size, sizes["kernel"]))
+    if r_size > sizes["rootfs"]:
+        sys.exit("FATAL: rootfs.squashfs is %d bytes, exceeds the rootfs partition capacity %d"
+                 % (r_size, sizes["rootfs"]))
 
-    plan = layout.ke_partition_plan()
-    sizes = dict(plan)
-    if len(ximage) > sizes["kernel2"]:
-        sys.exit("FATAL: xImage is %d bytes, exceeds the kernel2 partition (%d)"
-                 % (len(ximage), sizes["kernel2"]))
-    if len(rootfs) > sizes["rootfs2"]:
-        sys.exit("FATAL: rootfs.squashfs is %d bytes, exceeds the rootfs2 partition (%d)"
-                 % (len(rootfs), sizes["rootfs2"]))
+    secret = derive_archive_secret()
+    if not shutil.which("7z"):
+        sys.exit("FATAL: 7z is required to build the OTA envelope and was not found")
 
-    disk_bytes = sum(size for _, size in plan) + 64 * 1024 * 1024  # headroom for table + alignment
-    if disk_bytes % layout.SECTOR:
-        disk_bytes += layout.SECTOR - (disk_bytes % layout.SECTOR)
+    version = args.ota_version
+    top = "Ender-3_V3_KE_%s_ota_img_V%s" % (BOARD_SHORT_NAME, version)
+    inner = "ota_v%s" % version
 
-    # The seed is the source commit: same release, same GUIDs, every time.
-    placed, geometry = layout.plan_partitions(plan, disk_bytes)
-    placed_by_label = {p["label"]: p for p in placed}
+    work = tempfile.mkdtemp(prefix="nebulaos-img-pack.", dir=os.environ.get("TMPDIR") or None)
+    try:
+        root = os.path.join(work, top)
+        payload_dir = os.path.join(root, inner)
+        os.makedirs(payload_dir)
 
-    # Written SPARSELY. The logical image is ~7.5 GB and all but ~110 MB of it
-    # is zero; ftruncate creates the extent and the filesystem stores the holes,
-    # so the artifact costs its payload on disk while still being a complete,
-    # dd-able disk image. Building it as one in-memory buffer instead would cost
-    # 7.5 GB of RAM per packaging run, and the reproducibility check runs two.
-    writes = list(layout.gpt_blocks(placed, geometry, seed=source_head, alternate="valid"))
-    for label, payload in (("kernel2", ximage), ("rootfs2", rootfs),
-                           ("ota", canonical_marker_block())):
-        writes.append((placed_by_label[label]["offset"], payload))
+        x_md5, x_chunks = chunk_payload(args.ximage, payload_dir, "xImage")
+        r_md5, r_chunks = chunk_payload(args.rootfs, payload_dir, "rootfs.squashfs")
 
-    with open(args.out, "wb") as fh:
-        fh.truncate(disk_bytes)
-        for offset, payload in writes:
-            fh.seek(offset)
-            fh.write(payload)
-        fh.flush()
-        os.fsync(fh.fileno())
+        # The metadata the updater parses. Sizes and digests are the REAL ones
+        # for the payloads actually included - never carried over from a stock
+        # template, which would make the updater reject the package or, worse,
+        # mis-stream the image into the partition.
+        update_in = "\n".join([
+            "ota_version=%s" % version,
+            "",
+            "img_type=kernel",
+            "img_name=xImage",
+            "img_size=%d" % x_size,
+            "img_md5=%s" % x_md5,
+            "",
+            "img_type=rootfs",
+            "img_name=rootfs.squashfs",
+            "img_size=%d" % r_size,
+            "img_md5=%s" % r_md5,
+            "",
+        ])
+        with open(os.path.join(payload_dir, "ota_update.in"), "w", encoding="utf-8") as fh:
+            fh.write(update_in)
 
-    img_sha = sha256_file(args.out)
-    img_size = os.path.getsize(args.out)
+        # The completion marker the updater looks for.
+        open(os.path.join(payload_dir, "%s.ok" % inner), "w").close()
 
-    verified = layout.geometry_is_verified()
-    unverified = layout.unverified_facts()
-    refusals = layout.require_whole_disk_preconditions()
+        # ota_config.in. PROVENANCE GAP, recorded rather than hidden: no stock
+        # F005 .img was available to copy this from, so it is synthesised from
+        # the package's own facts. If a vendor package is later obtained, pass
+        # --ota-config-template to use its real one instead.
+        if args.ota_config_template:
+            shutil.copyfile(args.ota_config_template, os.path.join(root, "ota_config.in"))
+            config_provenance = "VENDOR_TEMPLATE(%s)" % os.path.basename(args.ota_config_template)
+        else:
+            with open(os.path.join(root, "ota_config.in"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join([
+                    "ota_version=%s" % version,
+                    "ota_dir=%s" % inner,
+                    "board=%s" % BOARD_SHORT_NAME,
+                    "",
+                ]))
+            config_provenance = "SYNTHESISED_NO_VENDOR_TEMPLATE"
 
+        out = os.path.abspath(args.out)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if os.path.exists(out):
+            os.unlink(out)
+
+        # -mhe=on matches the vendor envelope's header encryption.
+        proc = subprocess.run(
+            ["7z", "a", "-t7z", "-mhe=on", "-mx=9", "-p%s" % secret, out, top],
+            capture_output=True, text=True, cwd=work,
+        )
+        if proc.returncode != 0:
+            sys.exit("FATAL: 7z failed:\n%s\n%s" % (proc.stdout[-2000:], proc.stderr[-2000:]))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    img_sha = sha256_file(out)
     lines = [
-        "# NebulaOS .img packaging manifest",
-        "# Generated by scripts/package/build-img.py from an already-built canonical core.",
-        "# Nothing here was compiled by this step.",
-        "IMG_FORMAT_VERSION=1",
+        "# NebulaOS .img (Creality F005 OTA package) manifest",
+        "# Built from an already-built canonical core. Nothing was compiled here.",
+        "IMG_FORMAT=creality-f005-ota",
+        "IMG_TOP_DIR=%s" % top,
+        "IMG_OTA_VERSION=%s" % version,
+        "IMG_OTA_CONFIG_PROVENANCE=%s" % config_provenance,
         "SOURCE_HEAD=%s" % source_head,
         "SOURCE_DATE_EPOCH=%s" % args.source_date_epoch,
         "XIMAGE_SHA256=%s" % ximage_sha,
-        "XIMAGE_SIZE=%d" % len(ximage),
+        "XIMAGE_MD5=%s" % x_md5,
+        "XIMAGE_SIZE=%d" % x_size,
+        "XIMAGE_CHUNKS=%d" % len(x_chunks),
         "ROOTFS_SQUASHFS_SHA256=%s" % rootfs_sha,
-        "ROOTFS_SQUASHFS_SIZE=%d" % len(rootfs),
-        "BUILD_MANIFEST_SHA256=%s" % manifest_sha,
+        "ROOTFS_SQUASHFS_MD5=%s" % r_md5,
+        "ROOTFS_SQUASHFS_SIZE=%d" % r_size,
+        "ROOTFS_SQUASHFS_CHUNKS=%d" % len(r_chunks),
         "IMG_SHA256=%s" % img_sha,
-        "IMG_SIZE=%d" % img_size,
-        "IMG_NEBULAOS_SLOT=2",
-        "IMG_OTA_MARKER=ota:kernel2",
-        "IMG_STOCK_SLOT_POPULATED=NO",
-        "IMG_FACTORY_FLASHABLE=%s" % ("YES" if verified else "NO"),
-        "EMMC_LAYOUT_GEOMETRY_VERIFIED=%s" % ("YES" if verified else "NO"),
-        # The scope declaration. Machine-readable on purpose: a consumer can
-        # refuse on these two lines without having to parse the prose below.
-        "IMG_TARGET=BLANK_MEDIA_ONLY",
-        "IMG_WRITE_TO_PROVISIONED_PRINTER=FORBIDDEN",
-        "IMG_UPDATE_PATH_FOR_A_WORKING_PRINTER=scripts/flash-spare-slot.sh",
-        "IMG_DESTROYS_PARTITIONS=%s" % ",".join(sorted(
-            layout.IRREPLACEABLE_LABELS | layout.UNOBTAINABLE_LABELS | layout.USER_DATA_LABELS)),
+        "IMG_SIZE=%d" % os.path.getsize(out),
+        "IMG_CHUNK_BYTES=%d" % CHUNK_BYTES,
+        "QUALIFIED_INPUT_ARTIFACTS_MODIFIED=NO",
+        "# INSTALL TARGET: the stock updater writes whichever A/B slot is INACTIVE",
+        "# and then flips the ota marker to it. Applied while NebulaOS is booted,",
+        "# this package overwrites the STOCK slot. That is a property of the",
+        "# printer's current slot, not of this file.",
+        "# CLI entrypoint: /etc/ota_bin/local_ota_update.sh <this file>",
     ]
-    for reason in refusals:
-        lines.append("IMG_NOT_FOR_PROVISIONED_PRINTER_BECAUSE=%s" % reason)
-    for part in placed:
-        lines.append("IMG_PART=label=%s offset=0x%x size=%d" % (part["label"], part["offset"], part["size"]))
-    if not verified:
-        lines.append("# Refusing to declare this image factory-flashable. Every fact below is a")
-        lines.append("# value with no hardware evidence behind it; writing a partition table built")
-        lines.append("# on them would relocate rootfs_data/userdata and destroy user data.")
-        for fact in unverified:
-            lines.append("IMG_UNVERIFIED_LAYOUT_FACT=%s value=%r reason=%s"
-                         % (fact.name, fact.value, fact.source))
-    lines.append("# SCOPE: blank media only - a replacement eMMC, a bench board, or an")
-    lines.append("# emulated device. Writing this to a printer that already carries factory")
-    lines.append("# data permanently destroys the per-unit sn_mac identity, removes the stock")
-    lines.append("# recovery slot, and replaces the user's persistent partitions. To update a")
-    lines.append("# working printer use scripts/flash-spare-slot.sh, which writes kernel2 and")
-    lines.append("# rootfs2 and nothing else.")
-
-    with open(args.out + ".manifest.txt", "w", encoding="utf-8") as fh:
+    with open(out + ".manifest.txt", "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
-    with open(args.out + ".sha256", "w", encoding="utf-8") as fh:
-        fh.write("%s  %s\n" % (img_sha, os.path.basename(args.out)))
+    with open(out + ".sha256", "w", encoding="utf-8") as fh:
+        fh.write("%s  %s\n" % (img_sha, os.path.basename(out)))
 
-    print("IMG_BUILT=%s" % args.out)
+    print("IMG_BUILT=%s" % out)
     print("IMG_SHA256=%s" % img_sha)
-    print("IMG_SIZE=%d" % img_size)
-    print("IMG_FACTORY_FLASHABLE=%s" % ("YES" if verified else "NO"))
-    print("IMG_TARGET=BLANK_MEDIA_ONLY")
-    print("IMG_WRITE_TO_PROVISIONED_PRINTER=FORBIDDEN")
-    for reason in refusals:
-        print("  reason: %s" % reason)
+    print("IMG_SIZE=%d" % os.path.getsize(out))
+    print("IMG_OTA_VERSION=%s" % version)
+    print("IMG_XIMAGE_CHUNKS=%d IMG_ROOTFS_CHUNKS=%d" % (len(x_chunks), len(r_chunks)))
+    print("IMG_OTA_CONFIG_PROVENANCE=%s" % config_provenance)
     return 0
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(description="Package the canonical core into a NebulaOS .img")
+    parser = argparse.ArgumentParser(
+        description="Package the canonical core into a Creality F005 OTA .img")
     parser.add_argument("--ximage", required=True)
     parser.add_argument("--rootfs", required=True)
-    parser.add_argument("--manifest", required=True, help="build-manifest.txt from the canonical build")
+    parser.add_argument("--manifest", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--source-head")
     parser.add_argument("--source-date-epoch", required=True)
+    parser.add_argument("--ota-version", required=True,
+                        help="OTA version namespace; must exceed the stock version the updater knows")
+    parser.add_argument("--ota-config-template",
+                        help="a vendor ota_config.in to copy instead of synthesising one")
     return build(parser.parse_args(argv))
 
 
