@@ -96,11 +96,36 @@ log() {
 # Sourced AFTER log() so the library's messages go to this script's own log.
 # Non-fatal if absent: S05's other work (bind mounts for apps, config) must
 # still happen, and the one call site below fails closed on its own.
-NEBULAOS_VENV_LIB=/usr/libexec/nebulaos-venv-lib.sh
-if [ -r "$NEBULAOS_VENV_LIB" ]; then
+# Locate the shared persistent-venv helpers.
+#
+# The same expression has to work in two places. On the device this script is
+# /etc/init.d/S04nebulaos-factory-seed and the library is
+# /usr/libexec/nebulaos-venv-lib.sh. In the overlay source tree - which is what
+# every test harness runs against - they are <overlay>/etc/init.d/... and
+# <overlay>/usr/libexec/... So `<dir of this script>/../../usr/libexec/...`
+# resolves correctly in BOTH, and an absolute /usr/libexec path resolves only
+# on the device.
+#
+# An earlier revision hardcoded the absolute path and hard-failed when it was
+# missing. That was fail-closed in the right direction but it broke seven test
+# suites that stage the init script without a full rootfs - the script aborted
+# before doing any of its real work. Try the override, then the device path,
+# then the script-relative path; fail closed only if none exists.
+# $0 is not reliable here: the test harnesses source this script inside
+# `sh -c ". <path>"`, where $0 is empty and `dirname ""` errors out. Guard it.
+if [ -n "${0:-}" ]; then _venv_lib_dir=$(dirname "$0"); else _venv_lib_dir=.; fi
+for _cand in \
+	"${NEBULAOS_VENV_LIB:-}" \
+	/usr/libexec/nebulaos-venv-lib.sh \
+	"$_venv_lib_dir/../../usr/libexec/nebulaos-venv-lib.sh"; do
+	[ -n "$_cand" ] && [ -r "$_cand" ] || continue
+	NEBULAOS_VENV_LIB=$_cand
+	break
+done
+if [ -n "${NEBULAOS_VENV_LIB:-}" ] && [ -r "$NEBULAOS_VENV_LIB" ]; then
 	. "$NEBULAOS_VENV_LIB"
 else
-	log "WARNING: $NEBULAOS_VENV_LIB missing - treating the klipper venv as unusable"
+	log "WARNING: nebulaos-venv-lib.sh not found - treating the klipper venv as unusable"
 	venv_is_usable() { return 1; }
 fi
 

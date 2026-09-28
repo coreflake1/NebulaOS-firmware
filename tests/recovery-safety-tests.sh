@@ -49,6 +49,16 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# S04nebulaos-factory-seed and S05nebulaos-activate source the shared
+# persistent-venv helpers. On the device that library is an absolute path
+# (/usr/libexec/nebulaos-venv-lib.sh); here it lives in the overlay source
+# tree, and these suites source the init script inside `sh -c`, where $0 gives
+# the script no way to find it. Point at the real library so these tests
+# exercise the real predicate rather than a stub.
+NEBULAOS_VENV_LIB="$REPO_ROOT/scripts/build/overlay/usr/libexec/nebulaos-venv-lib.sh"
+export NEBULAOS_VENV_LIB
+
 DEPS_MANIFEST="$REPO_ROOT/manifests/dependencies.conf"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/recovery-safety-tests.XXXXXX")
 [ -n "${WORK:-}" ] && [ -e "$WORK" ] || { echo "FATAL: recovery-safety-tests.sh: mktemp did not produce a usable path (fixture creation must fail closed - an empty path variable silently retargets later commands at the caller's own directory)" >&2; exit 1; }

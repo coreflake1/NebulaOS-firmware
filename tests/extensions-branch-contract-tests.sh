@@ -29,6 +29,16 @@ set -u
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# S04nebulaos-factory-seed and S05nebulaos-activate source the shared
+# persistent-venv helpers. On the device that library is an absolute path
+# (/usr/libexec/nebulaos-venv-lib.sh); here it lives in the overlay source
+# tree, and these suites source the init script inside `sh -c`, where $0 gives
+# the script no way to find it. Point at the real library so these tests
+# exercise the real predicate rather than a stub.
+NEBULAOS_VENV_LIB="$REPO_ROOT/scripts/build/overlay/usr/libexec/nebulaos-venv-lib.sh"
+export NEBULAOS_VENV_LIB
+
 FACTORY_SEED="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-factory-seed"
 MIGRATE="$REPO_ROOT/scripts/build/overlay/etc/init.d/S04nebulaos-migrate"
 MANIFEST_LIB="$REPO_ROOT/scripts/build/overlay/etc/nebulaos-seed-manifest.sh"
