@@ -71,10 +71,16 @@ ota:kernel2     (boot slot 2 / custom next)
 Two different tools write it, depending which OS you're currently on — and that's intentional, not
 an inconsistency:
 
-| From | Tool |
-|---|---|
-| Custom (NebulaOS) | `/etc/ota_marker.sh`'s `write_ota_marker()` — NebulaOS's own helper, ships as part of the rootfs |
-| Stock (Creality) | `/etc/ota_bin/ota_local_method.sh`'s `local_set_next_boot_device()` — Creality's own pre-existing tool, already on stock |
+| From | Tool | Semantics |
+|---|---|---|
+| Custom (NebulaOS) | `/etc/ota_marker.sh`'s `write_ota_marker()` — NebulaOS's own helper, ships as part of the rootfs | **sets an exact state** — you name the slot |
+| Stock (Creality) | `/etc/ota_bin/ota_local_method.sh`'s `local_set_next_boot_device()` — Creality's own pre-existing tool, already on stock | **toggles** — takes no argument, flips to whatever it currently is not |
+
+That asymmetry matters. From stock you cannot ask for a particular slot, only
+for "the other one", and the command succeeding tells you nothing about which
+slot you ended up pointed at. Always read the marker back before rebooting —
+`docs/DEVELOPER_RECOVERY.md` §2 has the exact command — and never reboot on a
+marker whose value you could not read cleanly.
 
 If you're switching over from stock for the first time, you use stock's own tool, since NebulaOS's
 helper doesn't exist there yet. Once you're running NebulaOS, its own tool takes over. Both have

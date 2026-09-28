@@ -29,19 +29,38 @@ The `write_ota_marker` function is still available in `/etc/ota_marker.sh` for m
 
 If the currently-running OS still has working SSH, this takes about two minutes and no tools.
 
-From custom:
+From custom — this sets an EXACT state, and you say which one:
 ```sh
 . /etc/ota_marker.sh
 write_ota_marker "ota:kernel"    # or "ota:kernel2" to go the other way
 reboot
 ```
 
-From stock:
+From stock — **this is a toggle, not a set**:
 ```sh
 . /etc/ota_bin/ota_local_method.sh
 local_set_next_boot_device
-reboot
 ```
+
+`local_set_next_boot_device` takes no argument. It flips the marker to whatever
+it currently is not. That means you cannot ask it for a particular slot, and you
+cannot tell from the command succeeding which slot you are now pointed at.
+
+**Read the marker back before you reboot.** Do not trust the command's own
+output, and do not assume the toggle went the way you wanted:
+
+```sh
+dd if=/dev/mmcblk0p1 bs=512 count=1 2>/dev/null | head -c 32 | xxd
+```
+
+You want to see `ota:kernel` for stock or `ota:kernel2` for custom. If it is not
+what you intended, run the toggle again and re-check. Only reboot once the bytes
+say what you want.
+
+If the read shows anything else — an empty block, a truncated string, or a value
+you do not recognise — **do not reboot**. An indeterminate marker is the one
+state from which you cannot predict which slot comes up, and a power cycle into
+stock has its own consequences (see §1 above on the MCU).
 
 This doesn't erase anything on either side — see the persistence table below.
 
@@ -63,7 +82,15 @@ You'll need:
   make
   ```
   The compiled binary ends up named `usbboot`, not `ingenic-usbboot` — that's just the repo's name.
-  This is a third-party tool and we don't pin a specific version of it.
+
+  The repository and this project's own patch are now recorded in
+  `manifests/dependencies.conf` (`INGENIC_USBBOOT_REPO`,
+  `INGENIC_USBBOOT_PATCH`, `INGENIC_USBBOOT_PATCH_SHA256`). An earlier version of
+  this document said we don't pin a version, which meant "the recovery path"
+  named whatever upstream happened to be that day. `patches/ingenic-usbboot-write-partition.patch`
+  adds `mmc_write_partition()` — a chunked write with an immediate read-back
+  verification of every chunk — plus libusb control-transfer retry for the
+  post-write `LIBUSB_ERROR_TIMEOUT` seen on real hardware.
 
 Here's the actual procedure, including a couple of gotchas we hit doing this for real:
 
@@ -80,7 +107,8 @@ Here's the actual procedure, including a couple of gotchas we hit doing this for
    sudo ./usbboot --swap-ota
    ```
    There's no `--force-swap-ota` flag — `--swap-ota` toggles between the two, it doesn't let you
-   pick a side. It prints the state before and after, so read that output.
+   pick a side. It prints the state before and after, but see the next step: that output has been
+   observed to be wrong, so treat it as a hint and never as confirmation.
 4. **Don't trust that printed output on its own.** We saw two consecutive runs both print the exact
    same "before/after" text despite actually starting from different states — the raw USB-boot
    session doesn't reliably remember what happened in a previous invocation. Check the real bytes
