@@ -82,6 +82,42 @@ BUILDER_DIGEST=$(v1 BUILDER_DIGEST)
 SOURCE_DATE_EPOCH=$(v1 SOURCE_DATE_EPOCH)
 [ -n "$SOURCE_HEAD" ] && [ -n "$SOURCE_DATE_EPOCH" ] || die "the build record is missing SOURCE_HEAD or SOURCE_DATE_EPOCH"
 
+# Checked HERE, before any network access, so that a mislabelled dev build is
+# refused offline and fails fast (it is also what makes the refusal testable).
+# ccache is OFF for release and candidate builds by construction - build.sh
+# refuses to enable it outside dev mode - so this records the fact rather than
+# asking. A release attestation with ccache enabled is refused by the signer.
+case "$BUILD_MODE" in
+  candidate|qualified) CCACHE=disabled ;;
+  *)                   CCACHE=unknown ;;
+esac
+
+# BUILD_PROFILE IS CROSS-CHECKED, NOT TRUSTED.
+#
+# --profile is a caller-supplied string that lands in a signed field, and
+# nebulaos_evidence accepts release and candidate as installable. An independent
+# review pointed out that nothing stopped
+#   attest-build-run.sh --build-run <a DEV build> --profile candidate
+# from minting a valid attestation with BUILD_MODE=dev and CCACHE=unknown -
+# which would defeat the one property the profile field exists to carry, that a
+# dev build with ccache and reused incremental output never reaches a printer.
+#
+# The build's OWN recorded mode is the authority; the flag may only agree with it.
+case "$PROFILE" in
+  release|candidate)
+    case "$BUILD_MODE" in
+      candidate|qualified) ;;
+      *) die "refusing to attest BUILD_PROFILE=$PROFILE for a build whose own record says
+       BUILD_MODE=$BUILD_MODE. Only a candidate or qualified build may carry an installable
+       profile: a dev build may have used ccache and reused incremental output, so its bytes
+       are not the bytes a clean build of that source produces." ;;
+    esac ;;
+  dev) ;;
+  *) die "unknown --profile '$PROFILE'. Use release, candidate or dev." ;;
+esac
+[ "$CCACHE" = disabled ] || [ "$PROFILE" = dev ] \
+  || die "refusing to attest BUILD_PROFILE=$PROFILE with CCACHE=$CCACHE"
+
 # --- recompute every artifact fact from the bytes ---------------------------
 X_SHA=$(sha256sum "$XIMAGE" | cut -d' ' -f1)
 R_SHA=$(sha256sum "$ROOTFS"  | cut -d' ' -f1)
@@ -112,13 +148,6 @@ else
   LOG_SHA=$(printf '' | sha256sum | cut -d' ' -f1)
 fi
 
-# ccache is OFF for release and candidate builds by construction - build.sh
-# refuses to enable it outside dev mode - so this records the fact rather than
-# asking. A release attestation with ccache enabled is refused by the signer.
-case "$BUILD_MODE" in
-  candidate|qualified) CCACHE=disabled ;;
-  *)                   CCACHE=unknown ;;
-esac
 
 OUT=${OUT:-$BUILD_RUN/.nebulaos-build-attestation-v2}
 

@@ -438,6 +438,43 @@ else
   bad "signing leaves no temporary file behind" "tmp file remains"
 fi
 
+# --- attest-build-run.sh: the build's own recorded mode outranks --profile ---
+#
+# A dev build (ccache, reused incremental output) must never be attested with
+# an installable profile. The wrapper refuses offline, before it touches the
+# network, so this runs without one.
+BRUN="$SCRIPT_DIR/../tools/attest/attest-build-run.sh"
+mkrun(){ # dir mode
+  art="$1/artifacts/buildroot-halley5-v30-image"; mkdir -p "$art"
+  printf 'ximage' > "$art/xImage"; printf 'rootfs' > "$art/rootfs.squashfs"; printf 'manifest' > "$art/build-manifest.txt"
+  cat > "$1/.nebulaos-build-verified" <<EOF
+BUILD_VERIFIED=YES
+SOURCE_HEAD=$HEAD_SHA
+BUILD_MODE=$2
+BUILDER_DIGEST=sha256:$(printf 'builder' | sha256sum | cut -d' ' -f1)
+XIMAGE_SHA256=$X_SHA
+ROOTFS_SQUASHFS_SHA256=$R_SHA
+SOURCE_DATE_EPOCH=1790680624
+EOF
+}
+mkrun "$WORK/devrun" dev
+for prof in candidate release; do
+  out=$(NEBULAOS_ATTEST_KEY="$KEY" sh "$BRUN" --build-run "$WORK/devrun" --profile "$prof" \
+        --out "$WORK/devrun.$prof.att" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "refusing to attest BUILD_PROFILE=$prof" \
+     && [ ! -e "$WORK/devrun.$prof.att" ]; then
+    ok "attest-build-run refuses --profile $prof for a BUILD_MODE=dev build (no file written)"
+  else
+    bad "attest-build-run refuses --profile $prof for a BUILD_MODE=dev build (no file written)" "rc=$rc out=$out"
+  fi
+done
+out=$(NEBULAOS_ATTEST_KEY="$KEY" sh "$BRUN" --build-run "$WORK/devrun" --profile bogus 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "unknown --profile 'bogus'"; then
+  ok "attest-build-run refuses an unknown --profile"
+else
+  bad "attest-build-run refuses an unknown --profile" "rc=$rc out=$out"
+fi
+
 echo
 printf 'ATTESTATION_V2_TESTS_PASS=%d\nATTESTATION_V2_TESTS_FAIL=%d\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
