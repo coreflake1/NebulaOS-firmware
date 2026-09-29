@@ -27,6 +27,7 @@ HOST=(
   tools/emmc/nebulaos_layout.py
   tools/hardware/nebulaos_control.py
   tools/hardware/nebulaos_device.py
+  tools/hardware/nebulaos_evidence.py
   tools/hardware/nebulaos_install.py
   tools/hardware/nebulaos_journal.py
   tools/hardware/nebulaos_marker.py

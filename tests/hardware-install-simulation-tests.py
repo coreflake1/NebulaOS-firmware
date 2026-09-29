@@ -42,6 +42,7 @@ import nebulaos_journal as journal    # noqa: E402
 import nebulaos_marker as marker      # noqa: E402
 import nebulaos_profile as profiles   # noqa: E402
 import nebulaos_target as targets     # noqa: E402
+import nebulaos_evidence as evidence  # noqa: E402
 import nebulaos_device_sim as sim     # noqa: E402
 
 PASS = []
@@ -716,6 +717,114 @@ def case_control_provenance():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_attestation_required():
+    """A destructive operation must be able to PROVE what it is installing."""
+    fx, root = scenario("attestation")
+    try:
+        store = os.path.join(root, "attstore")
+        os.makedirs(store, mode=0o700)
+        keydir = os.path.join(root, "key")
+        os.makedirs(keydir, mode=0o700)
+        keypath = os.path.join(keydir, "attest.key")
+        with open(keypath, "wb") as fh:
+            fh.write(os.urandom(64))
+        os.chmod(keypath, 0o600)
+        os.environ["NEBULAOS_ATTEST_KEY"] = keypath
+        tool = os.path.join(FW, "tools", "attest", "nebulaos-attest.py")
+        a = fx.artifacts
+
+        # 1. nothing at all
+        try:
+            evidence.require_v2(SOURCE_HEAD, a.ximage_sha, a.ximage_size,
+                                a.rootfs_sha, a.rootfs_size, store=store, attest_tool=tool)
+            bad("an install with no v2 attestation is refused", "it was allowed")
+        except evidence.EvidenceError as exc:
+            ok("an install with no v2 attestation is refused", str(exc).splitlines()[0][:90])
+
+        # 2. a v1 record is NOT accepted as a substitute
+        run_dir = os.path.join(root, "buildrun")
+        os.makedirs(run_dir)
+        with open(os.path.join(run_dir, ".nebulaos-build-verified"), "w") as fh:
+            fh.write("BUILD_VERIFIED=YES\nSOURCE_HEAD=%s\n" % SOURCE_HEAD)
+        try:
+            evidence.require_v2(SOURCE_HEAD, a.ximage_sha, a.ximage_size,
+                                a.rootfs_sha, a.rootfs_size, build_run=run_dir,
+                                store=store, attest_tool=tool)
+            bad("a v1 record is not accepted in place of v2", "it was allowed")
+        except evidence.EvidenceError as exc:
+            check("a v1 record is not accepted in place of v2", "unauthenticated" in str(exc),
+                  str(exc).splitlines()[-1][:110])
+
+        # 3. a real, signed v2 attestation for these artifacts
+        def sign(profile, head=SOURCE_HEAD, xs=None, out=None):
+            fields = "\n".join([
+                "ATTESTATION_VERSION=2", "SOURCE_HEAD=%s" % head,
+                "SOURCE_REPO=https://example/repo.git", "SOURCE_PUBLISHED_TIP=%s" % head,
+                "BUILD_LAUNCHER_BLOB=%s" % ("b" * 64), "BUILD_MODE=candidate",
+                "BUILD_PROFILE=%s" % profile,
+                "CCACHE=%s" % ("disabled" if profile != "dev" else "enabled"),
+                "BUILD_LOG_SHA256=%s" % ("c" * 64),
+                "XIMAGE_SHA256=%s" % (xs or a.ximage_sha), "XIMAGE_SIZE=%d" % a.ximage_size,
+                "ROOTFS_SQUASHFS_SHA256=%s" % a.rootfs_sha,
+                "ROOTFS_SQUASHFS_SIZE=%d" % a.rootfs_size,
+                "MANIFEST_SHA256=%s" % ("d" * 64), "BUILDER_DIGEST=sha256:%s" % ("e" * 64),
+                "SOURCE_DATE_EPOCH=1790633082", "BUILD_RUN=%s" % run_dir,
+                "ATTESTED_AT=2026-09-29T00:00:00Z", ""])
+            target = out or os.path.join(store, "%s.att" % head)
+            proc = subprocess.run([sys.executable, tool, "sign", "--out", target],
+                                  input=fields, capture_output=True, text=True)
+            return proc.returncode == 0, target
+
+        signed, path = sign("candidate")
+        if not signed:
+            bad("a v2 attestation can be produced for the test artifacts")
+        else:
+            try:
+                ev = evidence.require_v2(SOURCE_HEAD, a.ximage_sha, a.ximage_size,
+                                         a.rootfs_sha, a.rootfs_size, store=store,
+                                         attest_tool=tool)
+                ok("a verified v2 attestation for these exact artifacts is accepted",
+                   "profile=%s" % ev.profile)
+            except evidence.EvidenceError as exc:
+                bad("a verified v2 attestation is accepted", str(exc)[:160])
+
+        # 4. an attestation whose artifact digests do not match
+        try:
+            evidence.require_v2(SOURCE_HEAD, "f" * 64, a.ximage_size,
+                                a.rootfs_sha, a.rootfs_size, store=store, attest_tool=tool)
+            bad("an attestation that does not match the artifacts is refused", "it was allowed")
+        except evidence.EvidenceError as exc:
+            ok("an attestation that does not match the artifacts is refused",
+               str(exc).splitlines()[0][:90])
+
+        # 5. a dev-profile build may not reach a printer
+        os.unlink(path)
+        sign("dev")
+        try:
+            evidence.require_v2(SOURCE_HEAD, a.ximage_sha, a.ximage_size,
+                                a.rootfs_sha, a.rootfs_size, store=store, attest_tool=tool)
+            bad("a dev-profile build is refused", "it was allowed")
+        except evidence.EvidenceError as exc:
+            check("a dev-profile build is refused", "dev" in str(exc) or "profile" in str(exc),
+                  str(exc).splitlines()[0][:110])
+
+        # 6. a tampered attestation
+        os.unlink(os.path.join(store, "%s.att" % SOURCE_HEAD))
+        sign("candidate")
+        att = os.path.join(store, "%s.att" % SOURCE_HEAD)
+        text = open(att).read().replace("BUILD_PROFILE=candidate", "BUILD_PROFILE=release")
+        open(att, "w").write(text)
+        try:
+            evidence.require_v2(SOURCE_HEAD, a.ximage_sha, a.ximage_size,
+                                a.rootfs_sha, a.rootfs_size, store=store, attest_tool=tool)
+            bad("a tampered attestation is refused", "it was allowed")
+        except evidence.EvidenceError as exc:
+            ok("a tampered attestation is refused", str(exc).splitlines()[0][:90])
+    finally:
+        os.environ.pop("NEBULAOS_ATTEST_KEY", None)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def case_capability_vs_policy():
     """The distinction the mission requires, asserted on the real objects."""
     report = targets.capability_report()
@@ -781,6 +890,7 @@ SCENARIOS = [
     ("capability vs policy", case_capability_vs_policy),
     ("closed vocabulary", case_no_raw_surface),
     ("control provenance", case_control_provenance),
+    ("attestation v2 required", case_attestation_required),
     ("happy path", case_happy_path),
     ("already on stock", case_already_on_stock),
     ("wrong printer", case_wrong_printer),
