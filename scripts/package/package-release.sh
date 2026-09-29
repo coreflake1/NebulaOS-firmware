@@ -118,16 +118,31 @@ cp -f "$XIMAGE" "$ROOTFS" "$MANIFEST" "$OUT/" || die "cannot copy the canonical 
 echo "  xImage          $X_SHA"
 echo "  rootfs.squashfs $R_SHA"
 
+# --- the stock RTOS ---------------------------------------------------------
+# The real vendor ota_update.in lists THREE payloads - kernel, rootfs and
+# rtos/zero.bin (FIRMWARE.md, recorded from extracting Creality's own V1.1.0.12
+# package). NebulaOS has no reason to replace the RTOS, so the stock copy is
+# carried through unchanged, and the only genuine copy this project has of it is
+# inside the official .ingenic template.
+RTOS="$OUT/.zero.bin"
+python3 - "$TEMPLATE" "$RTOS" <<'PY' || die "cannot extract zero.bin from the template"
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    with z.open("images/zero.bin") as src, open(sys.argv[2], "wb") as dst:
+        dst.write(src.read())
+PY
+echo "  stock RTOS: $(sha256sum "$RTOS" | cut -d' ' -f1) ($(stat -c %s "$RTOS") bytes, from the template)"
+
 # --- B. Creality F005 OTA .img --------------------------------------------
 echo
 echo "== .img (Creality F005 OTA package) =="
 python3 "$SCRIPT_DIR/build-img.py" \
-  --ximage "$XIMAGE" --rootfs "$ROOTFS" --manifest "$MANIFEST" \
+  --ximage "$XIMAGE" --rootfs "$ROOTFS" --manifest "$MANIFEST" --rtos "$RTOS" \
   --out "$IMG" --source-head "$SOURCE_HEAD" \
   --source-date-epoch "$SOURCE_DATE_EPOCH" --ota-version "$OTA_VERSION" \
   || die ".img packaging failed"
 
-python3 "$SCRIPT_DIR/validate-img.py" --img "$IMG" --ximage "$XIMAGE" --rootfs "$ROOTFS" \
+python3 "$SCRIPT_DIR/validate-img.py" --img "$IMG" --ximage "$XIMAGE" --rootfs "$ROOTFS" --rtos "$RTOS" \
   > "$OUT/$BASE.img.validation.txt" 2>&1 \
   || { tail -20 "$OUT/$BASE.img.validation.txt" >&2; die ".img validation failed - see $OUT/$BASE.img.validation.txt"; }
 echo "  validation: $(grep '^IMG_VALIDATED=' "$OUT/$BASE.img.validation.txt")"
@@ -195,6 +210,8 @@ PKG_COMMIT=$(git -C "$FW" rev-parse HEAD 2>/dev/null || echo unknown)
   echo "IMG_VALIDATED=$(grep -m1 '^IMG_VALIDATED=' "$OUT/$BASE.img.validation.txt" | cut -d= -f2)"
   echo "IMG_CONSUMER=stock Creality updater (USB / touchscreen / local_ota_update.sh)"
   echo "IMG_INSTALL_TARGET=whichever A/B slot is INACTIVE at apply time"
+  echo "IMG_RTOS_SHA256=$(sha256sum "$RTOS" | cut -d' ' -f1)"
+  echo "IMG_RTOS_PROVENANCE=stock zero.bin from the pinned .ingenic template, unchanged"
   echo
   echo "# --- C. Ingenic Cloner recovery package ---"
   echo "INGENIC_ARTIFACT=$BASE.ingenic"
@@ -211,6 +228,8 @@ PKG_COMMIT=$(git -C "$FW" rev-parse HEAD 2>/dev/null || echo unknown)
   echo "QUALIFIED_INPUT_ARTIFACTS_MODIFIED=NO"
   echo "PACKAGING_RECOMPILED_ANYTHING=NO"
 } > "$OUT/release-manifest.txt"
+
+rm -f "$RTOS"
 
 ( cd "$OUT" && sha256sum "$BASE.img" "$BASE.ingenic" xImage rootfs.squashfs build-manifest.txt \
     > SHA256SUMS ) || die "cannot write SHA256SUMS"

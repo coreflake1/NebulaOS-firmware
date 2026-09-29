@@ -169,8 +169,12 @@ def main(argv):
         if sha256_entry(tpl, name) != sha256_entry(pkg, name):
             drifted.append(name)
     if not drifted:
-        ok("all %d carried-through vendor entries are bit-identical to the template"
-           % (len(tpl_names) - len(expected_changed)))
+        # Count what was actually compared. Subtracting len(expected_changed)
+        # was wrong: for slot B two of those three names do not exist in the
+        # template, so the reported figure was 274 when 276 entries had been
+        # checked.
+        compared = sum(1 for n in tpl_names if n not in expected_changed)
+        ok("all %d carried-through vendor entries are bit-identical to the template" % compared)
     else:
         bad("all carried-through vendor entries are bit-identical to the template",
             "drifted: %s" % ", ".join(drifted[:8]))
@@ -239,32 +243,50 @@ def main(argv):
             else:
                 bad("%s points at %s" % (policy, want), "got %r" % got)
 
-        # --- sn_mac preservation: the irreversible one --------------------
-        erase = ini_value(profile, "mmc", "erase_list")
-        if erase and layout.erase_list_preserves_sn_mac(erase):
-            ok("the erase policy leaves sn_mac (0x%x..0x%x) untouched: %s"
-               % (*layout.SN_MAC_PRESERVED_RANGE, erase))
-        else:
-            bad("the erase policy leaves sn_mac untouched",
-                "erase_list=%r would erase across the per-unit factory MAC/serial" % erase)
-
-        # sn_mac's own policy must stay disabled - it is never programmed.
-        if ini_value(profile, "policy2", "enabled") == "0":
-            ok("the sn_mac policy remains disabled (never programmed)")
-        else:
-            bad("the sn_mac policy remains disabled (never programmed)",
-                "policy2 enabled=%s" % ini_value(profile, "policy2", "enabled"))
-
         # The offsets are vendor geometry and must not have moved.
+        #
+        # An earlier revision used `for ... else:` here with no `break`, so the
+        # else clause fired unconditionally and printed "every partition offset
+        # is unchanged" directly beneath its own FAIL line. The verdict and exit
+        # code were right, but the output contradicted itself and anything
+        # grepping for the PASS line was misled. An explicit flag instead.
+        offsets_ok = True
         for policy, label in (("policy1", "ota"), ("policy6", "kernel"), ("policy7", "kernel2"),
                               ("policy8", "rootfs"), ("policy9", "rootfs2"), ("policy2", "sn_mac")):
             got = ini_value(profile, policy, "offset")
             want = layout.partition_offset(label)
-            if got is not None and int(got, 0) == want:
-                continue
-            bad("%s (%s) offset is unchanged at 0x%x" % (policy, label, want), "got %r" % got)
-        else:
+            if got is None or int(got, 0) != want:
+                bad("%s (%s) offset is unchanged at 0x%x" % (policy, label, want), "got %r" % got)
+                offsets_ok = False
+        if offsets_ok:
             ok("every partition offset in the Cloner profile is unchanged vendor geometry")
+
+    # --- sn_mac preservation: checked on EVERY path ------------------------
+    #
+    # This block used to sit inside `if slot_b:`. An independent review
+    # demonstrated the consequence: a --slot a package carrying a full-device
+    # erase_list validated clean. The one irreversible property must not be
+    # conditional on which slot mode was used, so it is checked here, against
+    # the profile bytes actually inside the package.
+    if CLONER_PROFILE_ENTRY in pkg_names:
+        shipped = pkg.read(CLONER_PROFILE_ENTRY)
+        erase = ini_value(shipped, "mmc", "erase_list")
+        if erase and layout.erase_list_preserves_sn_mac(erase):
+            ok("the erase policy in the package leaves sn_mac (0x%x..0x%x) untouched: %s"
+               % (*layout.SN_MAC_PRESERVED_RANGE, erase))
+        else:
+            bad("the erase policy in the package leaves sn_mac untouched",
+                "erase_list=%r would erase across the per-unit factory MAC/serial, "
+                "which cannot be regenerated" % erase)
+
+        # sn_mac's own policy must stay disabled - it is never programmed.
+        if ini_value(shipped, "policy2", "enabled") == "0":
+            ok("the sn_mac policy remains disabled (never programmed)")
+        else:
+            bad("the sn_mac policy remains disabled (never programmed)",
+                "policy2 enabled=%s" % ini_value(shipped, "policy2", "enabled"))
+    else:
+        bad("the package carries a Cloner profile to check the erase policy against")
 
     pkg.close()
     tpl.close()

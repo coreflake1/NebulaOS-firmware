@@ -38,8 +38,12 @@ import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tools", "emmc"))
 import nebulaos_layout as layout  # noqa: E402
 
-CHUNK_BYTES = 1048576
 PASS, FAIL = [], []
+
+# The chunk size is NOT defined here. It is imported from the packager below,
+# alongside the envelope secret. An earlier revision kept its own copy while its
+# own comment claimed both were shared - so a divergence in chunk size would have
+# been "checked" by a validator that had already agreed with the wrong value.
 
 
 def ok(msg):
@@ -104,6 +108,7 @@ def main(argv):
     parser.add_argument("--img", required=True)
     parser.add_argument("--ximage", required=True, help="canonical xImage to compare against")
     parser.add_argument("--rootfs", required=True, help="canonical rootfs.squashfs to compare against")
+    parser.add_argument("--rtos", help="stock zero.bin, if the package carries an rtos record")
     args = parser.parse_args(argv)
 
     # Import the packager so the envelope secret and chunk size are derived by
@@ -115,11 +120,14 @@ def main(argv):
         "nebulaos_build_img", os.path.join(os.path.dirname(os.path.abspath(__file__)), "build-img.py"))
     packer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(packer)
+    chunk_bytes = packer.CHUNK_BYTES
 
     canonical = {
         "xImage": (sha256_file(args.ximage), os.path.getsize(args.ximage), args.ximage),
         "rootfs.squashfs": (sha256_file(args.rootfs), os.path.getsize(args.rootfs), args.rootfs),
     }
+    if args.rtos:
+        canonical["zero.bin"] = (sha256_file(args.rtos), os.path.getsize(args.rtos), args.rtos)
 
     print("=== .img (Creality F005 OTA) validation: %s ===" % args.img)
     for name, (sha, size, _) in canonical.items():
@@ -172,9 +180,24 @@ def main(argv):
 
         records = {r["img_name"]: r for r in parse_update_in(open(update_path, encoding="utf-8").read())}
         if set(records) == set(canonical):
-            ok("ota_update.in declares exactly the two expected images")
+            ok("ota_update.in declares exactly the %d expected payloads (%s)"
+               % (len(canonical), ", ".join(sorted(canonical))))
         else:
-            bad("ota_update.in declares exactly the two expected images", repr(sorted(records)))
+            bad("ota_update.in declares exactly the expected payloads",
+                "declared=%s expected=%s" % (sorted(records), sorted(canonical)))
+
+        # FIRMWARE.md records, from extracting Creality's real V1.1.0.12 package,
+        # that ota_update.in lists THREE payloads including rtos/zero.bin. A
+        # two-record manifest is not the vendor shape, and a purely structural
+        # validator cannot discover that on its own - so its absence is called
+        # out here rather than silently accepted.
+        if "zero.bin" in records:
+            ok("ota_update.in carries the rtos/zero.bin record the vendor package has")
+        else:
+            bad("ota_update.in carries the rtos/zero.bin record the vendor package has",
+                "only %d payload(s) declared. FIRMWARE.md records the real V1.1.0.12 "
+                "ota_update.in listing kernel, rootfs AND rtos/zero.bin. Pass --rtos to "
+                "both the packager and this validator." % len(records))
 
         entries = os.listdir(payload_dir)
 
@@ -206,7 +229,7 @@ def main(argv):
                 if match:
                     found[int(match.group(1))] = (entry, match.group(2))
 
-            expected_count = (canon_size + CHUNK_BYTES - 1) // CHUNK_BYTES
+            expected_count = (canon_size + chunk_bytes - 1) // chunk_bytes
             if sorted(found) == list(range(expected_count)):
                 ok("%s: all %d chunks present in an unbroken 0000..%04d sequence"
                    % (name, expected_count, expected_count - 1))
@@ -270,7 +293,10 @@ def main(argv):
 
     # --- capacity ----------------------------------------------------------
     sizes = {f.name: f.value for f in layout.PARTITION_SIZES}
-    for name, partition in (("xImage", "kernel"), ("rootfs.squashfs", "rootfs")):
+    capacity = [("xImage", "kernel"), ("rootfs.squashfs", "rootfs")]
+    if "zero.bin" in canonical:
+        capacity.append(("zero.bin", "rtos"))
+    for name, partition in capacity:
         size = canonical[name][1]
         if size <= sizes[partition]:
             ok("%s fits the %s partition (%d / %d bytes, %d%% full)"

@@ -1,111 +1,68 @@
-"""The Ender-3 V3 KE eMMC layout, with per-fact provenance, plus a GPT builder.
+"""The Ender-3 V3 KE eMMC layout, with per-fact provenance.
 
-READ THIS BEFORE USING IT TO WRITE ANYTHING
+WHERE THESE NUMBERS COME FROM
 
-This module exists because of a gap that must not be papered over. NebulaOS
-knows a great deal about this device's partitions and almost nothing about
-their absolute positions.
+The vendor's own Ingenic Cloner profile, inside the official recovery package:
 
-VERIFIED FROM REAL HARDWARE (captured evidence in this repository):
+    configs/x2000/x2000e_mmc0_lpddr2_linux.cfg
+    in Ender-3_V3_KE_1.1.0.12.ingenic
+    (pinned by content in manifests/dependencies.conf)
 
-  * there are exactly ten partitions, p1..p10
-  * their labels are ota, sn_mac, rtos, rtos2, kernel, kernel2, rootfs,
-    rootfs2, rootfs_data, userdata
-        artifacts/parity/{stock,custom}/12-dev-tree.txt
-  * kernel/kernel2 are 8388608 bytes and rootfs/rootfs2 are 524288000 bytes
-        scripts/flash-spare-slot.sh, enforced against real hardware
-  * the full index-to-role map: p1=ota, p2=sn_mac, p3/p4=rtos/rtos2,
-    p5/p6=kernel/kernel2, p7/p8=rootfs/rootfs2, p9=rootfs_data, p10=userdata
-        docs/NEBULAOS_DISPLAY_LIVE_READ_ONLY_REPORT.md, recorded during a live
-        read-only session, corroborated by artifacts/parity/*/12-dev-tree.txt
-        (by-path part1..part10) and by flash-spare-slot.sh's device paths
-  * p2 = sn_mac is 1024 bytes and holds the PER-UNIT FACTORY IDENTITY
-        docs/NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md: a bounded
-        read returned
-            26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1;;;;;
-        - a serial number and the factory MAC fc:ee:11:00:4c:14, confirmed to be
-        the address stock's wlan0 actually uses. This data is programmed per
-        unit, exists nowhere else on the device, and cannot be regenerated.
-  * the factory alternate GPT is invalid; the primary is authoritative
-        artifacts/parity/stock/11-dmesg.txt
+Its [policy0..policy9] sections name every partition and its absolute byte
+offset outright:
 
-  * EVERY PARTITION START OFFSET, and therefore every size up to rootfs2, from
-    the vendor's own Ingenic Cloner profile
-        configs/x2000/x2000e_mmc0_lpddr2_linux.cfg inside the official
-        Ender-3_V3_KE_1.1.0.12.ingenic recovery package (LFS object
-        sha256:5388b168...783f3c, 130364076 bytes). Its [policy0..policy9]
-        sections name each partition and its offset outright:
-            uboot   0x0        ota     0x100000   sn_mac  0x200000
-            rtos    0x300000   rtos2   0x700000   kernel  0xb00000
-            kernel2 0x1300000  rootfs  0x1b00000  rootfs2 0x20f00000
-        The derived sizes corroborate the two constants flash-spare-slot.sh
-        arrived at independently: kernel/kernel2 are exactly 8388608 bytes
-        (0x1300000-0xb00000) and rootfs/rootfs2 exactly 524288000
-        (0x20f00000-0x1b00000). Two unrelated sources agreeing exactly is what
-        makes this verified rather than merely plausible.
-  * that the vendor's own erase policy PRESERVES sn_mac
-        the same profile's [mmc] erase_list is
-            "0x0,0x1fffff;0x300000,0xffffffff;"
-        which erases 0..0x1fffff and 0x300000..end, leaving exactly
-        0x200000..0x2fffff - the sn_mac region - untouched. The per-unit
-        factory identity is deliberately excluded from a full recovery erase.
+    uboot   0x0        ota     0x100000   sn_mac  0x200000
+    rtos    0x300000   rtos2   0x700000   kernel  0xb00000
+    kernel2 0x1300000  rootfs  0x1b00000  rootfs2 0x20f00000
 
-NOT VERIFIED - NO EVIDENCE EXISTS IN THIS WORKSPACE:
+That is a stronger source than anything this project had before, and it
+corroborates an independent one. The two slot capacities derived from those
+offsets equal, exactly, the constants scripts/flash-spare-slot.sh has enforced
+against real hardware since long before this module existed:
 
-  * the total capacity of the eMMC, and therefore the size of userdata
-  * the size of rootfs_data (docs say "300 MB", which is prose, not a number);
-    its offset follows rootfs2 but the profile stops at rootfs2 because the
-    Cloner never programs the data partitions
-  * every partition type GUID, and the mapping of the ten recorded PARTUUIDs
-    (artifacts/parity/custom/12-dev-tree.txt) to partitions
+    0x1300000 - 0xb00000  = 8388608     == KERNEL_PART_BYTES
+    0x20f00000 - 0x1b00000 = 524288000  == ROOTFS_PART_BYTES
 
-WHAT THAT MEANS FOR A DISK IMAGE
+Two unrelated sources agreeing to the byte is what makes these VERIFIED rather
+than merely plausible. assert_agrees_with_flash_script() below re-derives that
+agreement from the shell script's own text, so the two copies cannot drift apart
+silently.
 
-A full-disk .img carries a partition table and, written raw, replaces the whole
-device. Three separate things make that unsafe here, and only the first is about
-the missing offsets:
+WHAT IS STILL NOT KNOWN
 
-  1. if any start offset is wrong the write does not fail cleanly, it relocates
-     p9 and p10 - the user's printer.cfg, calibration, macros, uploads and Wi-Fi
-     credentials - and may disturb the bootloader region below first_usable_lba.
+The eMMC's total capacity, and therefore the size of userdata; the exact size of
+rootfs_data (the docs say "300 MB", which is prose); every partition type GUID;
+and which of the ten recorded PARTUUIDs belongs to which partition. None of that
+is needed to write slot 2, which is the only thing this project writes.
 
-  2. a whole-disk write zeroes p2/sn_mac, destroying the per-unit factory MAC and
-     serial number recorded above. That is irreversible and unrecoverable: the
-     value is not derivable from anything else on the device, and NebulaOS is
-     separately scheduled to START reading it rather than deriving its own MAC.
+sn_mac IS THE ONE THAT CANNOT BE UNDONE
 
-  3. a whole-disk write also zeroes p5/p7, the stock slot, which
-     docs/A_B_SLOT_MODEL.md and docs/DEVELOPER_RECOVERY.md designate as THE
-     fallback path. We do not have Creality's stock kernel and rootfs and could
-     not redistribute them, so an image we build cannot restore what it removes.
+/dev/mmcblk0p2 holds the per-unit factory MAC and serial number. A bounded
+read on the reference unit returned
 
-Points 2 and 3 are not fixed by capturing the GPT. They are properties of raw
-whole-disk writing, and they are why build-img.py gates the whole-disk path
-behind require_whole_disk_preconditions() and emits a slot-scoped image instead.
+    26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1;;;;;
 
-To close point 1, a human with the device runs, on the printer:
+and stock's wlan0 uses exactly fc:ee:11:00:4c:14. The value is programmed per
+unit, exists nowhere else on the device, and cannot be regenerated. The vendor's
+own erase policy deliberately skips it, and erase_list_preserves_sn_mac() exists
+so that no package this project builds can close that gap.
 
-    sgdisk --print /dev/mmcblk0          # or: gdisk -l /dev/mmcblk0
-    cat /proc/partitions
-    blkid
+SCOPE OF THIS MODULE
 
-and records the result here. Points 2 and 3 additionally require a per-unit
-sn_mac preservation step and a redistributable stock slot before a whole-disk
-image is a defensible artifact at all.
+It is a fact table and two small helpers. An earlier revision also carried a GPT
+parser and a GPT builder, written for a raw-disk-image approach that was
+abandoned once the real .img format turned out to be the Creality OTA package.
+Both were left behind, referenced by nothing, and one of them documented
+behaviour that no longer existed. They have been removed rather than kept "in
+case": dead code that describes a design the project rejected is worse than no
+code at all.
 """
 
-import binascii
-import struct
-import uuid
-
-SECTOR = 512
+import os
+import re
 
 VERIFIED = "VERIFIED_FROM_HARDWARE"
 DECLARED = "DECLARED_UNVERIFIED"
-
-# Sizes that real hardware has enforced.
-KERNEL_PART_BYTES = 8388608
-ROOTFS_PART_BYTES = 524288000
 
 
 class LayoutFact:
@@ -123,41 +80,10 @@ class LayoutFact:
         return "LayoutFact(%s=%r %s)" % (self.name, self.value, self.provenance)
 
 
-# Index -> label. p1 and p5..p10 are verified; p2..p4 are a declared guess at
-# the ORDER of three labels we know exist but never touch.
-PARTITION_ORDER = (
-    LayoutFact("p1", "ota", VERIFIED, "docs/A_B_SLOT_MODEL.md + flash-spare-slot.sh"),
-    LayoutFact("p2", "sn_mac", VERIFIED, "docs/NEBULAOS_DISPLAY_LIVE_READ_ONLY_REPORT.md live read"),
-    LayoutFact("p3", "rtos", VERIFIED, "vendor cloner profile: rtos 0x300000 precedes rtos2 0x700000"),
-    LayoutFact("p4", "rtos2", VERIFIED, "vendor cloner profile: rtos2 0x700000"),
-    LayoutFact("p5", "kernel", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
-    LayoutFact("p6", "kernel2", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
-    LayoutFact("p7", "rootfs", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
-    LayoutFact("p8", "rootfs2", VERIFIED, "artifacts/parity/*/12-dev-tree.txt + flash-spare-slot.sh"),
-    LayoutFact("p9", "rootfs_data", VERIFIED, "docs/A_B_SLOT_MODEL.md + dmesg EXT4 mount"),
-    LayoutFact("p10", "userdata", VERIFIED, "docs/A_B_SLOT_MODEL.md + dmesg EXT4 mount"),
-)
-
-# Sizes in bytes. Only the four slot partitions are verified numbers.
-PARTITION_SIZES = (
-    LayoutFact("ota", 1024 * 1024, VERIFIED, "cloner profile: 0x200000 - 0x100000"),
-    LayoutFact("sn_mac", 1024, VERIFIED,
-               "docs/NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md: 1024 bytes"),
-    LayoutFact("rtos", 4 * 1024 * 1024, VERIFIED, "cloner profile: 0x700000 - 0x300000"),
-    LayoutFact("rtos2", 4 * 1024 * 1024, VERIFIED, "cloner profile: 0xb00000 - 0x700000"),
-    LayoutFact("kernel", KERNEL_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
-    LayoutFact("kernel2", KERNEL_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
-    LayoutFact("rootfs", ROOTFS_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
-    LayoutFact("rootfs2", ROOTFS_PART_BYTES, VERIFIED, "scripts/flash-spare-slot.sh"),
-    LayoutFact("rootfs_data", 300 * 1024 * 1024, DECLARED, "docs say '300 MB'; exact bytes unproven"),
-    LayoutFact("userdata", 6 * 1024 * 1024 * 1024, DECLARED, "docs say '~6 GB'; exact bytes unproven"),
-)
-
-# There is no evidence for any start LBA at all.
-# Absolute byte offsets, straight from the vendor Cloner profile. These are the
-# numbers a USB/mask-ROM write aims at, so they are kept as a first-class table
-# rather than derived from the size list: a size list cannot express the 1 MiB
-# uboot region before ota, and getting that wrong shifts everything.
+# Absolute byte offsets, straight from the vendor Cloner profile. Kept as a
+# first-class table rather than derived from sizes: a size list cannot express
+# the 1 MiB uboot region before ota, and getting that wrong shifts everything
+# after it.
 PARTITION_OFFSETS = (
     LayoutFact("uboot", 0x0, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy0"),
     LayoutFact("ota", 0x100000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy1"),
@@ -170,302 +96,118 @@ PARTITION_OFFSETS = (
     LayoutFact("rootfs2", 0x20F00000, VERIFIED, "x2000e_mmc0_lpddr2_linux.cfg policy9"),
 )
 
+_OFFSET = {f.name: f.value for f in PARTITION_OFFSETS}
+
+# Capacities. The four that matter are DERIVED from the offsets above rather
+# than restated, so there is one source of truth and no opportunity for a typo
+# to disagree with the evidence.
+KERNEL_PART_BYTES = _OFFSET["kernel2"] - _OFFSET["kernel"]      # 8388608
+ROOTFS_PART_BYTES = _OFFSET["rootfs2"] - _OFFSET["rootfs"]      # 524288000
+
+PARTITION_SIZES = (
+    LayoutFact("ota", _OFFSET["sn_mac"] - _OFFSET["ota"], VERIFIED,
+               "cloner profile: 0x200000 - 0x100000"),
+    # sn_mac's PARTITION is 1 MiB by the gap to rtos, but its programmed CONTENT
+    # is 1024 bytes - the figure a live bounded read actually returned. The
+    # content size is the useful one and the one recorded here.
+    LayoutFact("sn_mac", 1024, VERIFIED,
+               "NEBULAOS_WIFI_CAMERA_RT_LIVE_QUALIFICATION_REPORT.md: 1024 bytes read live"),
+    LayoutFact("rtos", _OFFSET["rtos2"] - _OFFSET["rtos"], VERIFIED,
+               "cloner profile: 0x700000 - 0x300000"),
+    LayoutFact("rtos2", _OFFSET["kernel"] - _OFFSET["rtos2"], VERIFIED,
+               "cloner profile: 0xb00000 - 0x700000"),
+    LayoutFact("kernel", KERNEL_PART_BYTES, VERIFIED,
+               "cloner profile offsets; equals flash-spare-slot.sh KERNEL_PART_BYTES"),
+    LayoutFact("kernel2", KERNEL_PART_BYTES, VERIFIED,
+               "cloner profile offsets; equals flash-spare-slot.sh KERNEL_PART_BYTES"),
+    LayoutFact("rootfs", ROOTFS_PART_BYTES, VERIFIED,
+               "cloner profile offsets; equals flash-spare-slot.sh ROOTFS_PART_BYTES"),
+    LayoutFact("rootfs2", ROOTFS_PART_BYTES, VERIFIED,
+               "cloner profile offsets; equals flash-spare-slot.sh ROOTFS_PART_BYTES"),
+    # The Cloner profile stops at rootfs2 because the Cloner never programs the
+    # data partitions, so these two remain prose-derived.
+    LayoutFact("rootfs_data", 300 * 1024 * 1024, DECLARED,
+               "docs say '300 MB'; exact bytes never captured"),
+    LayoutFact("userdata", 6 * 1024 * 1024 * 1024, DECLARED,
+               "docs say '~6 GB'; eMMC capacity never captured"),
+)
+
 # The vendor's full-erase policy, and the hole in it that preserves per-unit
-# identity. Any erase range this project ever emits is checked against this.
+# identity. Any erase range this project emits is checked against this.
 VENDOR_ERASE_LIST = "0x0,0x1fffff;0x300000,0xffffffff;"
 SN_MAC_PRESERVED_RANGE = (0x200000, 0x2FFFFF)
-
-GEOMETRY_FACTS = (
-    LayoutFact("partition_offsets", "vendor cloner profile", VERIFIED,
-               "x2000e_mmc0_lpddr2_linux.cfg [policy0..policy9]"),
-    LayoutFact("sn_mac_preserved_by_vendor_erase", True, VERIFIED,
-               "erase_list leaves 0x200000..0x2fffff untouched"),
-    LayoutFact("disk_total_bytes", None, DECLARED, "eMMC capacity never captured"),
-    LayoutFact("partition_type_guids", None, DECLARED, "never captured"),
-    LayoutFact("partition_uuids", None, DECLARED, "per-device; never captured"),
-)
 
 
 def partition_offset(label):
     """Absolute byte offset of a partition, from the vendor Cloner profile."""
-    for fact in PARTITION_OFFSETS:
+    try:
+        return _OFFSET[label]
+    except KeyError:
+        raise KeyError("no recorded offset for partition %r (have: %s)"
+                       % (label, ", ".join(sorted(_OFFSET))))
+
+
+def partition_size(label):
+    for fact in PARTITION_SIZES:
         if fact.name == label:
             return fact.value
-    raise KeyError("no recorded offset for partition %r" % label)
+    raise KeyError("no recorded size for partition %r" % label)
 
 
 def erase_list_preserves_sn_mac(erase_list):
     """True if `erase_list` leaves the whole sn_mac region untouched.
 
     Parses the Cloner's own "start,end;start,end;" syntax and checks that no
-    range intersects sn_mac. Used to assert that a package we build has not
-    widened the erase beyond what the vendor does - the one check standing
-    between a recovery flash and a permanently unidentifiable printer.
+    range intersects sn_mac. This is the single check standing between a
+    recovery flash and a printer whose factory identity is gone for good, so it
+    FAILS CLOSED: anything it cannot parse is treated as not-provably-safe,
+    because it is not.
     """
     lo, hi = SN_MAC_PRESERVED_RANGE
     for chunk in erase_list.strip().strip('"').split(";"):
         chunk = chunk.strip()
         if not chunk:
             continue
-        start_s, _, end_s = chunk.partition(",")
+        start_s, sep, end_s = chunk.partition(",")
+        if not sep:
+            return False
         try:
-            start, end = int(start_s, 0), int(end_s, 0)
+            start, end = int(start_s.strip(), 0), int(end_s.strip(), 0)
         except ValueError:
-            # An unparseable range is not provably safe, so it is not safe.
             return False
         if start <= hi and end >= lo:
             return False
     return True
 
 
-# Partitions whose contents are per-unit and cannot be regenerated or obtained.
-# Overwriting one is not a recoverable mistake, so every write path names this
-# set explicitly rather than relying on it merely being absent from an allowlist.
-IRREPLACEABLE_LABELS = frozenset({"sn_mac"})
+def assert_agrees_with_flash_script(path=None):
+    """Re-derive the cross-source agreement instead of asserting it in a comment.
 
-# Partitions we do not have contents for and could not redistribute if we did.
-UNOBTAINABLE_LABELS = frozenset({"kernel", "rootfs", "rtos", "rtos2"})
+    scripts/flash-spare-slot.sh carries its own KERNEL_PART_BYTES and
+    ROOTFS_PART_BYTES. It runs ON the device, in shell, and cannot import this
+    module, so that duplication is structural rather than careless - but a
+    duplication nobody checks is one that drifts. This reads the shell script's
+    own text and compares.
 
-# Partitions holding the user's own data.
-USER_DATA_LABELS = frozenset({"rootfs_data", "userdata"})
-
-
-def require_whole_disk_preconditions():
-    """Return the list of reasons a whole-disk image must not be produced today.
-
-    Empty list means all three preconditions hold. Anything else is a refusal,
-    and the strings are meant to be printed verbatim: each one names a concrete
-    artifact someone must supply, not a vague concern.
+    Returns a list of human-readable agreement lines; raises ValueError on any
+    disagreement.
     """
-    reasons = []
-    if not geometry_is_verified():
-        reasons.append(
-            "GPT geometry is unverified (%d declared fact(s)): a wrong start offset "
-            "relocates rootfs_data/userdata. Capture `sgdisk --print /dev/mmcblk0` "
-            "from a real unit." % len(unverified_facts())
-        )
-    reasons.append(
-        "sn_mac (%d bytes) holds the per-unit factory MAC and serial. A raw whole-disk "
-        "write zeroes it and the value cannot be recovered. A whole-disk image needs a "
-        "per-unit sn_mac preservation step that does not exist."
-        % dict((f.name, f.value) for f in PARTITION_SIZES)["sn_mac"]
-    )
-    reasons.append(
-        "the stock slot (kernel, rootfs) is the documented recovery fallback. We do not "
-        "have Creality's stock images and could not redistribute them, so a whole-disk "
-        "image would remove a fallback it cannot restore."
-    )
-    return reasons
+    if path is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "..", "scripts", "flash-spare-slot.sh")
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        text = fh.read()
 
-
-def all_facts():
-    return (tuple(PARTITION_ORDER) + tuple(PARTITION_SIZES)
-            + tuple(PARTITION_OFFSETS) + tuple(GEOMETRY_FACTS))
-
-
-def unverified_facts():
-    return tuple(f for f in all_facts() if f.provenance != VERIFIED)
-
-
-def geometry_is_verified():
-    """True only when every fact needed to place bytes on a real disk is proven.
-
-    Deliberately strict: a single DECLARED start offset is enough to make a
-    full-disk image unsafe, so there is no partial credit here.
-    """
-    return not unverified_facts()
-
-
-def provenance_report():
-    lines = ["EMMC_LAYOUT_GEOMETRY_VERIFIED=%s" % ("YES" if geometry_is_verified() else "NO")]
-    verified = [f for f in all_facts() if f.provenance == VERIFIED]
-    unverified = list(unverified_facts())
-    lines.append("EMMC_LAYOUT_FACTS_VERIFIED=%d" % len(verified))
-    lines.append("EMMC_LAYOUT_FACTS_UNVERIFIED=%d" % len(unverified))
-    for fact in unverified:
-        lines.append(
-            "EMMC_LAYOUT_UNVERIFIED=%s value=%r reason=%s" % (fact.name, fact.value, fact.source)
-        )
-    return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------
-# GPT construction
-# --------------------------------------------------------------------------
-#
-# Used for two things and only two things:
-#   1. building synthetic devices for the offline test harnesses
-#   2. building the partition table inside a full-disk .img
-#
-# It is fully deterministic: every GUID is derived from a caller-supplied seed
-# rather than randomly generated, because a packaging step that produces
-# different bytes on every run cannot be checked for reproducibility.
-
-_GPT_SIGNATURE = b"EFI PART"
-_ENTRY_SIZE = 128
-_ENTRY_COUNT = 128
-
-# Linux filesystem data. Used for every entry: the real device's type GUIDs were
-# never captured, and inventing distinct per-role GUIDs would be fabricating
-# detail. One honest generic type is better than ten invented specific ones.
-LINUX_FS_TYPE_GUID = uuid.UUID("0fc63daf-8483-4772-8e79-3d69d8477de4")
-
-
-def derive_guid(seed, tag):
-    """A GUID derived deterministically from a seed string.
-
-    uuid5 over a fixed namespace: same seed and tag always give the same GUID,
-    different ones essentially never collide, and nothing reads the clock or
-    /dev/urandom. That is what makes a packaged image reproducible.
-    """
-    return uuid.uuid5(uuid.NAMESPACE_URL, "nebulaos:%s:%s" % (seed, tag))
-
-
-def plan_partitions(partitions, disk_bytes):
-    """Place `partitions` on a disk of `disk_bytes`, without allocating anything.
-
-    Split out from the block generation below so that a multi-gigabyte image can
-    be written sparsely. An earlier revision built the whole disk as one
-    bytearray, which for this product's ~7.5 GB layout meant holding the entire
-    image - almost all of it zeroes - in RAM, twice over when comparing two
-    packaging runs. Planning and emitting are now separate: the caller learns
-    where every partition goes, then writes only the bytes that are not zero.
-
-    Returns (placed, geometry).
-    """
-    if disk_bytes % SECTOR:
-        raise ValueError("disk size must be a whole number of 512-byte sectors")
-    total_lba = disk_bytes // SECTOR
-
-    entries_sectors = (_ENTRY_COUNT * _ENTRY_SIZE + SECTOR - 1) // SECTOR  # 32
-    first_usable = 2 + entries_sectors                                     # 34
-    # The backup header occupies the last LBA and the backup entry array sits
-    # immediately below it.
-    last_usable = total_lba - 1 - entries_sectors - 1
-
-    placed = []
-    cursor = 2048  # 1 MiB alignment, the conventional choice
-    if cursor < first_usable:
-        cursor = first_usable
-    for label, size in partitions:
-        if size % SECTOR:
-            raise ValueError("partition %r size must be a whole number of sectors" % label)
-        sectors = size // SECTOR
-        first = cursor
-        last = first + sectors - 1
-        if last > last_usable:
+    notes = []
+    for name, ours in (("KERNEL_PART_BYTES", KERNEL_PART_BYTES),
+                       ("ROOTFS_PART_BYTES", ROOTFS_PART_BYTES)):
+        match = re.search(r"^%s=(\d+)" % name, text, re.M)
+        if not match:
+            raise ValueError("%s not found in %s" % (name, path))
+        theirs = int(match.group(1))
+        if theirs != ours:
             raise ValueError(
-                "partition %r does not fit: needs up to LBA %d, last usable is %d"
-                % (label, last, last_usable)
-            )
-        placed.append({"label": label, "first_lba": first, "last_lba": last,
-                       "offset": first * SECTOR, "size": size})
-        cursor = last + 1
-        # Re-align the next partition to a 1 MiB boundary, as a real tool would.
-        if cursor % 2048:
-            cursor += 2048 - (cursor % 2048)
-
-    geometry = {
-        "total_lba": total_lba,
-        "first_usable": first_usable,
-        "last_usable": last_usable,
-        "entries_sectors": entries_sectors,
-        "disk_bytes": disk_bytes,
-    }
-    return placed, geometry
-
-
-def gpt_blocks(placed, geometry, seed, alternate="valid"):
-    """Return [(offset, bytes)] for every non-zero region of the GPT container.
-
-    Everything not listed is zero, so a caller can create a sparse file and write
-    only these. `alternate` is "valid", "invalid" or "absent" - the KE ships an
-    invalid backup GPT, so the test harness must be able to reproduce that exact
-    condition and not merely the textbook-correct case.
-    """
-    total_lba = geometry["total_lba"]
-    first_usable = geometry["first_usable"]
-    last_usable = geometry["last_usable"]
-    entries_sectors = geometry["entries_sectors"]
-
-    blocks = []
-
-    # --- protective MBR ---
-    mbr = bytearray(SECTOR)
-    mbr[446] = 0x00
-    mbr[450] = 0xEE          # GPT protective type
-    struct.pack_into("<I", mbr, 454, 1)
-    struct.pack_into("<I", mbr, 458, min(total_lba - 1, 0xFFFFFFFF))
-    mbr[510:512] = b"\x55\xaa"
-    blocks.append((0, bytes(mbr)))
-
-    # --- entry array ---
-    array = bytearray(_ENTRY_COUNT * _ENTRY_SIZE)
-    for i, part in enumerate(placed):
-        name = part["label"].encode("utf-16-le")[:72].ljust(72, b"\x00")
-        struct.pack_into(
-            "<16s16sQQQ72s", array, i * _ENTRY_SIZE,
-            LINUX_FS_TYPE_GUID.bytes_le,
-            derive_guid(seed, part["label"]).bytes_le,
-            part["first_lba"], part["last_lba"], 0, name,
-        )
-    entries_crc = binascii.crc32(bytes(array)) & 0xFFFFFFFF
-
-    disk_guid = derive_guid(seed, "__disk__")
-
-    def header(current_lba, backup_lba, entries_lba):
-        raw = bytearray(SECTOR)
-        struct.pack_into(
-            "<8sIIIIQQQQ16sQIII", raw, 0,
-            _GPT_SIGNATURE, 0x00010000, 92, 0, 0,
-            current_lba, backup_lba, first_usable, last_usable,
-            disk_guid.bytes_le, entries_lba, _ENTRY_COUNT, _ENTRY_SIZE, entries_crc,
-        )
-        crc = binascii.crc32(bytes(raw[:92])) & 0xFFFFFFFF
-        struct.pack_into("<I", raw, 16, crc)
-        return bytes(raw)
-
-    blocks.append((SECTOR, header(1, total_lba - 1, 2)))
-    blocks.append((2 * SECTOR, bytes(array)))
-
-    backup_entries_lba = total_lba - 1 - entries_sectors
-    if alternate == "valid":
-        blocks.append((backup_entries_lba * SECTOR, bytes(array)))
-        blocks.append(((total_lba - 1) * SECTOR, header(total_lba - 1, 1, backup_entries_lba)))
-    elif alternate == "invalid":
-        # Reproduce the factory condition: a header that is present but does not
-        # validate. Corrupting the CRC (not the signature) is the closest match
-        # to what the kernel reports on a real KE.
-        raw = bytearray(header(total_lba - 1, 1, backup_entries_lba))
-        struct.pack_into("<I", raw, 16, 0xDEADBEEF)
-        blocks.append(((total_lba - 1) * SECTOR, bytes(raw)))
-    elif alternate == "absent":
-        pass
-    else:
-        raise ValueError("alternate must be valid, invalid or absent")
-
-    return blocks
-
-
-def build_gpt(partitions, disk_bytes, seed, alternate="valid"):
-    """Convenience wrapper that materialises a whole small disk in memory.
-
-    For test harnesses only. Real packaging uses plan_partitions + gpt_blocks and
-    writes sparsely - see the note on plan_partitions.
-    """
-    placed, geometry = plan_partitions(partitions, disk_bytes)
-    image = bytearray(disk_bytes)
-    for offset, data in gpt_blocks(placed, geometry, seed, alternate):
-        image[offset:offset + len(data)] = data
-    return image, placed
-
-
-def ke_partition_plan():
-    """The ten (label, size) pairs this product is declared to have.
-
-    Callers that intend to WRITE this to hardware must first consult
-    geometry_is_verified(); this function will happily return a plan built on
-    declared values, because the test harness needs exactly that.
-    """
-    sizes = {f.name: f.value for f in PARTITION_SIZES}
-    return [(f.value, sizes[f.value]) for f in PARTITION_ORDER]
+                "%s disagrees: this module derives %d from the vendor Cloner offsets, "
+                "flash-spare-slot.sh says %d" % (name, ours, theirs))
+        notes.append("%s=%d agrees (vendor offsets and flash-spare-slot.sh)" % (name, ours))
+    return notes

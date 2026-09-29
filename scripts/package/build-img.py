@@ -231,11 +231,31 @@ def build(args):
         x_md5, x_chunks = chunk_payload(args.ximage, payload_dir, "xImage")
         r_md5, r_chunks = chunk_payload(args.rootfs, payload_dir, "rootfs.squashfs")
 
+        # THE RTOS RECORD.
+        #
+        # An earlier revision emitted two records and its validator asserted
+        # "exactly the two expected images" - builder and validator agreeing with
+        # each other and with nothing else. FIRMWARE.md records, from actually
+        # extracting Creality's real V1.1.0.12 package, that ota_update.in lists
+        # EXACTLY THREE payloads: kernel/xImage, rootfs/rootfs.squashfs and
+        # rtos/zero.bin. A two-record manifest is not the vendor shape, and a
+        # structural validator cannot discover that by construction.
+        #
+        # zero.bin is stock RTOS material. NebulaOS has no reason to replace it,
+        # so the stock copy is carried through unchanged - retained, not
+        # regenerated. It comes from the official .ingenic template, which is the
+        # only place this project has a genuine copy of it.
+        rtos_md5 = rtos_size = None
+        rtos_chunks = []
+        if args.rtos:
+            rtos_size = os.path.getsize(args.rtos)
+            rtos_md5, rtos_chunks = chunk_payload(args.rtos, payload_dir, "zero.bin")
+
         # The metadata the updater parses. Sizes and digests are the REAL ones
         # for the payloads actually included - never carried over from a stock
         # template, which would make the updater reject the package or, worse,
         # mis-stream the image into the partition.
-        update_in = "\n".join([
+        records = [
             "ota_version=%s" % version,
             "",
             "img_type=kernel",
@@ -248,7 +268,16 @@ def build(args):
             "img_size=%d" % r_size,
             "img_md5=%s" % r_md5,
             "",
-        ])
+        ]
+        if args.rtos:
+            records += [
+                "img_type=rtos",
+                "img_name=zero.bin",
+                "img_size=%d" % rtos_size,
+                "img_md5=%s" % rtos_md5,
+                "",
+            ]
+        update_in = "\n".join(records)
         with open(os.path.join(payload_dir, "ota_update.in"), "w", encoding="utf-8") as fh:
             fh.write(update_in)
 
@@ -324,6 +353,12 @@ def build(args):
         "ROOTFS_SQUASHFS_MD5=%s" % r_md5,
         "ROOTFS_SQUASHFS_SIZE=%d" % r_size,
         "ROOTFS_SQUASHFS_CHUNKS=%d" % len(r_chunks),
+        "RTOS_INCLUDED=%s" % ("YES" if args.rtos else "NO"),
+        "RTOS_NAME=%s" % ("zero.bin" if args.rtos else ""),
+        "RTOS_MD5=%s" % (rtos_md5 or ""),
+        "RTOS_SIZE=%s" % (rtos_size if rtos_size is not None else ""),
+        "RTOS_CHUNKS=%d" % len(rtos_chunks),
+        "RTOS_PROVENANCE=%s" % ("stock copy, carried through unchanged" if args.rtos else "absent"),
         "IMG_SHA256=%s" % img_sha,
         "IMG_SIZE=%d" % os.path.getsize(out),
         "IMG_CHUNK_BYTES=%d" % CHUNK_BYTES,
@@ -343,7 +378,9 @@ def build(args):
     print("IMG_SHA256=%s" % img_sha)
     print("IMG_SIZE=%d" % os.path.getsize(out))
     print("IMG_OTA_VERSION=%s" % version)
-    print("IMG_XIMAGE_CHUNKS=%d IMG_ROOTFS_CHUNKS=%d" % (len(x_chunks), len(r_chunks)))
+    print("IMG_XIMAGE_CHUNKS=%d IMG_ROOTFS_CHUNKS=%d IMG_RTOS_CHUNKS=%d"
+          % (len(x_chunks), len(r_chunks), len(rtos_chunks)))
+    print("IMG_RTOS_INCLUDED=%s" % ("YES" if args.rtos else "NO"))
     print("IMG_OTA_CONFIG_PROVENANCE=%s" % config_provenance)
     return 0
 
@@ -361,6 +398,10 @@ def main(argv):
                         help="OTA version namespace; must exceed the stock version the updater knows")
     parser.add_argument("--ota-config-template",
                         help="a vendor ota_config.in to copy instead of synthesising one")
+    parser.add_argument("--rtos",
+                        help="stock zero.bin (RTOS). The real vendor ota_update.in lists three "
+                             "payloads; omitting this produces a two-record manifest that does "
+                             "not match the vendor shape. Extracted from the official .ingenic.")
     return build(parser.parse_args(argv))
 
 

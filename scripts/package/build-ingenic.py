@@ -231,31 +231,60 @@ def build(args):
         if missing:
             sys.exit("FATAL: template is missing required entries: %s" % ", ".join(missing))
 
+        # THE sn_mac CHECK RUNS ON EVERY PATH.
+        #
+        # An earlier revision put this inside `if slot_b:` and then wrote
+        # INGENIC_SN_MAC_PRESERVED=YES unconditionally. An independent review
+        # reproduced the consequence: a --slot a package built from a template
+        # whose profile said erase_list="0x0,0xffffffff;" - a full-device wipe
+        # that destroys sn_mac irreversibly - was produced with exit 0 and a
+        # manifest asserting YES, and the validator passed it. A false
+        # machine-readable claim about the one irreversible property is worse
+        # than no claim.
+        #
+        # So the profile that will ACTUALLY be in the package is resolved first,
+        # on both paths - rewritten for slot B, the template's own bytes for
+        # slot A - and the erase list is read out of those exact bytes.
+        template_profile = None
+        if CLONER_PROFILE_ENTRY in infos:
+            template_profile = source.read(CLONER_PROFILE_ENTRY)
+
         profile = None
         if slot_b:
-            profile = configure_dual_slot(source.read(CLONER_PROFILE_ENTRY))
+            profile = configure_dual_slot(template_profile)
+            effective_profile = profile
+        else:
+            # Slot A does not rewrite the profile, so whatever the template says
+            # is what ships. That is exactly why it must be checked rather than
+            # assumed: for slot A the erase list is an INPUT, not something we
+            # control.
+            effective_profile = template_profile
 
-            # The one check that stands between a recovery flash and a printer
-            # with no factory identity. Asserted on the bytes we are about to
-            # write, not on the constant we meant to write.
-            erase = None
-            for line in profile.splitlines():
-                if line.strip().startswith(b"erase_list="):
-                    erase = line.split(b"=", 1)[1].decode("ascii", "replace").strip()
-                    break
-            if erase is None:
-                sys.exit("FATAL: the configured Cloner profile has no erase_list")
-            if not layout.erase_list_preserves_sn_mac(erase):
-                sys.exit(
-                    "FATAL: the configured erase_list %s would erase across sn_mac "
-                    "(0x%x..0x%x).\n"
-                    "       sn_mac holds the per-unit factory MAC and serial and cannot be\n"
-                    "       regenerated. Refusing to build a package that destroys it."
-                    % (erase, *layout.SN_MAC_PRESERVED_RANGE)
-                )
+        if effective_profile is None:
+            sys.exit("FATAL: the template has no %s - cannot establish the erase policy"
+                     % CLONER_PROFILE_ENTRY)
+
+        effective_erase = None
+        for line in effective_profile.splitlines():
+            if line.strip().startswith(b"erase_list="):
+                effective_erase = line.split(b"=", 1)[1].decode("ascii", "replace").strip()
+                break
+        if effective_erase is None:
+            sys.exit("FATAL: the Cloner profile that would ship has no erase_list")
+        if not layout.erase_list_preserves_sn_mac(effective_erase):
+            sys.exit(
+                "FATAL: the erase_list that would ship, %s, erases across sn_mac "
+                "(0x%x..0x%x).\n"
+                "       sn_mac holds the per-unit factory MAC and serial. It is programmed per\n"
+                "       unit, exists nowhere else, and cannot be regenerated. Refusing to build\n"
+                "       a package that destroys it."
+                % (effective_erase, *layout.SN_MAC_PRESERVED_RANGE)
+            )
 
         if slot_b:
-            replacements = {KERNEL2_ENTRY: args.ximage, ROOTFS2_ENTRY: args.rootfs}
+            # Slot B's payloads are APPENDED under new names, not substituted
+            # over template entries, so there is nothing to replace in-place.
+            replacements = {}
             appended = {RTOS2_ENTRY, OTA_ENTRY, KERNEL2_ENTRY, ROOTFS2_ENTRY}
         else:
             replacements = {STOCK_KERNEL_ENTRY: args.ximage, STOCK_ROOTFS_ENTRY: args.rootfs}
@@ -271,7 +300,7 @@ def build(args):
 
             with zipfile.ZipFile(tmp, "w", allowZip64=True) as dest:
                 for info in source.infolist():
-                    if info.filename in replacements and not slot_b:
+                    if info.filename in replacements:
                         with open(replacements[info.filename], "rb") as src, \
                              dest.open(copy.copy(info), "w") as out_stream:
                             shutil.copyfileobj(src, out_stream, 1024 * 1024)
@@ -291,7 +320,7 @@ def build(args):
                     for entry, path, template_entry in (
                         (KERNEL2_ENTRY, args.ximage, STOCK_KERNEL_ENTRY),
                         (ROOTFS2_ENTRY, args.rootfs, STOCK_ROOTFS_ENTRY),
-                    ):
+                    ):  # noqa: E501 - payload, source file, metadata donor
                         with open(path, "rb") as src, \
                              dest.open(renamed(infos[template_entry], entry), "w") as out_stream:
                             shutil.copyfileobj(src, out_stream, 1024 * 1024)
@@ -329,8 +358,10 @@ def build(args):
         "INGENIC_SHA256=%s" % pkg_sha,
         "INGENIC_SIZE=%d" % os.path.getsize(out),
         "INGENIC_OTA_MARKER=%s" % ("ota:kernel2" if slot_b else "unchanged"),
+        # Both derived from the bytes in the package, never from a constant.
+        # Reaching this line at all means the check above passed.
         "INGENIC_SN_MAC_PRESERVED=YES",
-        "INGENIC_ERASE_LIST=%s" % layout.VENDOR_ERASE_LIST,
+        "INGENIC_ERASE_LIST=%s" % effective_erase.strip('"'),
         "KEEP_STOCK_SPL_UBOOT_GPT=YES",
         "HARDWARE_AGENT_TRANSPORT=NO",
         "QUALIFIED_INPUT_ARTIFACTS_MODIFIED=NO",

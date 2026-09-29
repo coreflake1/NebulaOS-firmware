@@ -30,7 +30,18 @@ export LC_ALL=C
 die(){ printf 'PACKAGING_REPRODUCIBILITY=FAILED\nREASON: %s\n' "$1" >&2; exit 2; }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-SECRET='$1$cxswfile$ZFd0RWFYkJQugbtKVGL9y0'
+
+# The envelope secret is DERIVED by the packager, not copied here. An earlier
+# revision hardcoded a third copy of it - the exact duplication that build-img.py
+# and validate-img.py already avoid, and which would let this script keep
+# "verifying" packages after the derivation changed.
+SECRET=$(python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('m', '$SCRIPT_DIR/build-img.py')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+sys.stdout.write(m.derive_archive_secret())
+") || die "cannot derive the OTA envelope secret"
+[ -n "$SECRET" ] || die "the derived OTA envelope secret is empty"
 
 BUILD_RUN_A=""; BUILD_RUN_B=""; TEMPLATE=""; OTA_VERSION="9.9.9.1"
 while [ "$#" -gt 0 ]; do
@@ -65,11 +76,14 @@ printf 'PACKAGING_REPRODUCIBILITY=STARTING\nSOURCE_HEAD=%s\nRUN_A=%s\nRUN_B=%s\n
   "$HEAD_A" "$BUILD_RUN_A" "$BUILD_RUN_B"
 
 # --- the two canonical cores must themselves be identical ------------------
+CORE_IDENTICAL_XIMAGE=NO
+CORE_IDENTICAL_ROOTFS=NO
 for name in xImage rootfs.squashfs; do
   a=$(sha256sum "$(art "$BUILD_RUN_A")/$name" | cut -d' ' -f1)
   b=$(sha256sum "$(art "$BUILD_RUN_B")/$name" | cut -d' ' -f1)
   if [ "$a" = "$b" ]; then
     printf 'PASS  %s is byte-identical across the two builds (%s)\n' "$name" "$a"
+    [ "$name" = xImage ] && CORE_IDENTICAL_XIMAGE=YES || CORE_IDENTICAL_ROOTFS=YES
   else
     printf 'FAIL  %s is byte-identical across the two builds\n       A=%s B=%s\n' "$name" "$a" "$b"
     FAIL=$((FAIL+1))
@@ -145,7 +159,11 @@ printf '      identity is impossible here and is NOT claimed. Content identity a
 printf '      the real reproducibility proof.\n'
 
 echo
-printf 'XIMAGE_BYTE_IDENTICAL=YES\nROOTFS_SQUASHFS_BYTE_IDENTICAL=YES\n'
+# Derived from the comparison, never printed unconditionally. An earlier revision
+# asserted YES here even when the loop above had just proven otherwise - and
+# these lines are this script's machine-readable output contract.
+printf 'XIMAGE_BYTE_IDENTICAL=%s\nROOTFS_SQUASHFS_BYTE_IDENTICAL=%s\n' \
+  "$CORE_IDENTICAL_XIMAGE" "$CORE_IDENTICAL_ROOTFS"
 printf 'INGENIC_BYTE_IDENTICAL=%s\n' "$(cmp -s "$WORK/A.ingenic" "$WORK/B.ingenic" && echo YES || echo NO)"
 printf 'IMG_BYTE_IDENTICAL=NO\nIMG_BYTE_IDENTICAL_REASON=encrypted-7z-random-aes-iv\n'
 printf 'IMG_CONTENT_IDENTICAL=%s\n' "$([ "$TREE_A" = "$TREE_B" ] && echo YES || echo NO)"
