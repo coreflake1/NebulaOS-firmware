@@ -586,6 +586,89 @@ def case_mcu_guard_restored():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_mcu_restore_probe():
+    """The real SSH probe, executed by /bin/sh on the host against fixtures.
+
+    The simulator reports restores directly, so it never runs the shell text the
+    SSH session sends. This runs that exact text. The per-boot tmpfs state file
+    written by S50nebulaos-mcu-guard is the only authority, and an unreadable
+    verdict must never read as "no restore".
+    """
+    import nebulaos_verify as verify
+    root = tempfile.mkdtemp(prefix="mcuprobe.")
+    try:
+        def run(content):
+            path = os.path.join(root, "state")
+            if content is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                with open(path, "w") as fh:
+                    fh.write(content)
+            out = subprocess.run(["sh", "-c", device.mcu_restore_probe_cmd(path)],
+                                 capture_output=True, text=True).stdout
+            return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+        head = "MCU_GUARD_RESULT=PASS\nMCU_GUARD_DETAIL='a b ''c'\n"
+        cases = [
+            ("not_attempted -> 0", head + "MCU_RESTORE_RESULT=not_attempted\n", "0"),
+            ("RESTORED_AND_VERIFIED -> 1", head + "MCU_RESTORE_RESULT=RESTORED_AND_VERIFIED\n", "1"),
+            ("FLASH_FAILED -> 1", head + "MCU_RESTORE_RESULT=FLASH_FAILED\n", "1"),
+            ("field absent -> unknown", head, "unknown"),
+            ("empty file -> unknown", "", "unknown"),
+            ("state file missing -> unknown", None, "unknown"),
+        ]
+        for label, content, want in cases:
+            got = run(content).get("mcu_guard_restore")
+            check("probe: %s" % label, got == want, "got %r" % got)
+
+        class Fake:
+            def __init__(self, v):
+                self.v = v
+            def mcu_state(self):
+                return {"mcu_guard_restore": self.v, "mcu_serial": "usb-x",
+                        "stock_updater_marker": "absent", "mcu_restore_result": "?"}
+        check("observe: an unreadable verdict reports unknown, never not_attempted",
+              verify.observe_mcu_restore(Fake("unknown")) == "unknown")
+        check("observe: 0 reports not_attempted",
+              verify.observe_mcu_restore(Fake("0")) == "not_attempted")
+        check("observe: 1 reports performed",
+              verify.observe_mcu_restore(Fake("1")) == "performed")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_publication_fails_closed():
+    """product_is_published refreshes remote refs and refuses when it cannot."""
+    root = tempfile.mkdtemp(prefix="pubcheck.")
+    try:
+        def git(*a, cwd=None):
+            return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True,
+                                  env=dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null",
+                                           GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                                           GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+        bare = os.path.join(root, "remote.git"); work = os.path.join(root, "work")
+        git("init", "-q", "--bare", bare)
+        git("init", "-q", "-b", "main", work)
+        git("-C", work, "commit", "-q", "--allow-empty", "-m", "published")
+        git("-C", work, "remote", "add", "origin", bare)
+        git("-C", work, "push", "-q", "origin", "main")
+        pub = git("-C", work, "rev-parse", "HEAD").stdout.strip()
+        git("-C", work, "commit", "-q", "--allow-empty", "-m", "local only")
+        local = git("-C", work, "rev-parse", "HEAD").stdout.strip()
+        ok1, why1 = evidence.product_is_published(work, pub)
+        check("a pushed commit is published", ok1, why1)
+        ok2, why2 = evidence.product_is_published(work, local)
+        check("an unpushed commit is not published", not ok2, why2)
+        # The remote disappears: refs cannot be refreshed. The stale local
+        # remote-tracking ref still contains `pub`, and must NOT be trusted.
+        shutil.rmtree(bare)
+        ok3, why3 = evidence.product_is_published(work, pub)
+        check("an unreachable remote fails closed even for a previously-pushed commit",
+              not ok3 and "cannot be established" in why3, why3)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def case_new_image_will_not_boot():
     fx, root = scenario("noboot")
     try:
@@ -630,6 +713,140 @@ def case_already_on_stock():
               fx.printer.running_os == device.OS_NEBULAOS)
         check("slot 2 received the payload",
               hashlib.sha256(fx.printer.partitions["kernel2"]).hexdigest() == fx.artifacts.ximage_sha)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_armed_window_is_exception_safe():
+    """REGRESSION: every exit from the ARMED window must disarm.
+
+    An independent review reproduced two unguarded raises inside the window -
+    the post-arm idle_state() (which raises on a dropped SSH session) and the
+    journal advance (ENOSPC). Both left the device physically armed for stock
+    with no disarm, and neither was an InstallError, so the operator would have
+    seen a traceback instead of the "do NOT power cycle" text.
+    """
+    # (a) the transport dies at the post-arm idle check
+    fx, root = scenario("armedraise")
+    try:
+        original = sim.SimSession.idle_state
+        state = {"armed": False}
+
+        def idle_after_arming(self):
+            if marker.parse(self.printer.partitions["ota"])[0] == marker.KERNEL:
+                state["armed"] = True
+                raise sim.SimTransportError("connection dropped (simulated)")
+            return original(self)
+
+        sim.SimSession.idle_state = idle_after_arming
+        try:
+            result, err = run_install(fx)
+        finally:
+            sim.SimSession.idle_state = original
+
+        check("a transport failure at the post-arm idle check stops the install",
+              err is not None)
+        check("REGRESSION: it disarmed - the marker is back on NebulaOS",
+              marker_state(fx.printer) == marker.KERNEL2,
+              "marker is %s (armed was reached: %s)" % (marker_state(fx.printer), state["armed"]))
+        check("the failure is reported as an InstallError, not a raw traceback",
+              isinstance(err, install.InstallError), type(err).__name__ if err else "none")
+        check("the device was not rebooted", fx.printer.boot_id == "boot-0001")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # (b) the journal write fails after the marker has committed
+    fx, root = scenario("armedjournal")
+    try:
+        class ExplodingTxn:
+            def __init__(self, inner):
+                self.inner = inner
+                self.state = inner.state
+
+            def advance(self, new_state, note=""):
+                if new_state == journal.ARMED_STOCK:
+                    raise OSError(28, "No space left on device")
+                self.state = new_state
+                return self.inner.advance(new_state, note)
+
+            def note(self, text):
+                return self.inner.note(text)
+
+        os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "state")
+        inner = journal.Transaction.begin("printer-sim", fx.control_commit, SOURCE_HEAD,
+                                          fx.artifacts.ximage_sha, fx.artifacts.rootfs_sha)
+        result, err = run_install(fx, txn=ExplodingTxn(inner))
+        check("a journal write failure inside the armed window stops the install",
+              err is not None)
+        check("REGRESSION: it disarmed - the marker is back on NebulaOS",
+              marker_state(fx.printer) == marker.KERNEL2,
+              "marker is %s" % marker_state(fx.printer))
+        check("the failure is reported as an InstallError",
+              isinstance(err, install.InstallError), type(err).__name__ if err else "none")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_helper_provenance_on_every_path():
+    """REGRESSION: the privileged helper must come from C on BOTH entry paths.
+
+    The "device already on stock" path used to skip staging entirely, so
+    apply_write_plans executed whatever bytes were at
+    /usr/data/nebulaos-hwagent/flash-spare-slot.sh - a shared, non-root-owned
+    data partition.
+    """
+    fx, root = scenario("helperprov")
+    try:
+        fx.printer.running_os = device.OS_STOCK
+        fx.printer.partitions["ota"] = marker.canonical(marker.KERNEL)
+        fx.printer.staged["xImage"] = XIMAGE
+        fx.printer.staged["rootfs.squashfs"] = ROOTFS
+        fx.printer.staged["build-manifest.txt"] = b"x"
+        # The helper is deliberately NOT staged, and the simulator now refuses
+        # to "run" one that is not there.
+        expected = fx.control.helper("scripts/flash-spare-slot.sh")
+        fx.printer.helper_must_equal = expected
+
+        result, err = run_install(fx)
+        check("an install that starts on stock stages the helper from C",
+              err is None and result is not None and result.ok,
+              str(err)[:200] if err else "completed")
+        check("REGRESSION: the helper on the device is byte-identical to control commit C",
+              fx.printer.staged.get("flash-spare-slot.sh") == expected,
+              "staged %s" % ("<absent>" if fx.printer.staged.get("flash-spare-slot.sh") is None
+                             else "%d bytes" % len(fx.printer.staged["flash-spare-slot.sh"])))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # And a helper that does not match C must refuse rather than execute.
+    fx, root = scenario("helperdrift")
+    try:
+        fx.printer.running_os = device.OS_STOCK
+        fx.printer.partitions["ota"] = marker.canonical(marker.KERNEL)
+        fx.printer.staged["xImage"] = XIMAGE
+        fx.printer.staged["rootfs.squashfs"] = ROOTFS
+        fx.printer.staged["build-manifest.txt"] = b"x"
+
+        original = sim.SimSession.stage_file
+
+        def stage_but_corrupt_helper(self, local_path, name):
+            got = original(self, local_path, name)
+            if name == "flash-spare-slot.sh":
+                self.printer.staged[name] = b"#!/bin/sh\n# NOT the reviewed helper\n"
+            return got
+
+        sim.SimSession.stage_file = stage_but_corrupt_helper
+        try:
+            result, err = run_install(fx)
+        finally:
+            sim.SimSession.stage_file = original
+
+        check("a staged helper that does not match C refuses before it is executed",
+              err is not None, "" if err else "the install proceeded")
+        if err:
+            check("the refusal names the helper mismatch",
+                  "helper" in str(err).lower(), str(err)[:150])
+        check("slot 2 was not written", fx.printer.partitions["kernel2"] == b"")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -913,7 +1130,11 @@ SCENARIOS = [
     ("host lock", case_host_lock),
     ("mcu updater acted", case_mcu_updater_acted),
     ("mcu guard restored", case_mcu_guard_restored),
+    ("mcu restore probe (per-boot guard state)", case_mcu_restore_probe),
+    ("publication fails closed", case_publication_fails_closed),
     ("new image will not boot", case_new_image_will_not_boot),
+    ("armed window is exception-safe", case_armed_window_is_exception_safe),
+    ("helper provenance on every path", case_helper_provenance_on_every_path),
     ("journal vs reality", case_journal_reality_conflict),
     ("journal key mismatch", case_journal_key_mismatch),
 ]

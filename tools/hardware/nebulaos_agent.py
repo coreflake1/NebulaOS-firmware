@@ -316,6 +316,24 @@ def op_install(args):
             say("REASON: %s" % exc)
             txn.advance(journal.FAILED_NEEDS_ATTENTION, str(exc)[:200])
             return 3
+        except BaseException as exc:
+            # Anything the installer did not convert into an InstallError still
+            # has to reach the operator as a refusal with the safety text, not
+            # as a Python traceback. The installer's armed window converts its
+            # own failures, but a bug outside it must not silently lose the
+            # "do NOT power cycle" advice.
+            say(installer.result.render())
+            say()
+            say("INSTALL=REFUSED")
+            say("REASON: unexpected %s: %s" % (type(exc).__name__, str(exc)[:200]))
+            say("# The install did not complete. If a transaction is open, run `status` before")
+            say("# doing anything else, and do NOT power cycle a device that is armed for stock.")
+            try:
+                txn.advance(journal.FAILED_NEEDS_ATTENTION,
+                            "unexpected %s" % type(exc).__name__)
+            except Exception:
+                pass
+            return 3
         say(result.render())
         return 0 if result.ok else 1
 

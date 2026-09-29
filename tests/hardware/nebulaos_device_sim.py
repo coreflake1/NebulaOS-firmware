@@ -113,6 +113,7 @@ class SimulatedPrinter:
         self.corrupt_flash = False               # flash writes land wrong
         self.interrupt_flash_after = None        # write N bytes then drop
         self.flash_helper_fails = False
+        self.helper_must_equal = None            # bytes the staged helper must have
         self.stock_unavailable = False           # stock never answers
         self.nebulaos_unavailable = False
         self.drop_after_ops = None               # SSH dies after N operations
@@ -321,6 +322,21 @@ class SimSession(device.DeviceSession):
 
     def apply_write_plans(self, plans, manifest_name):
         self._t()
+
+        # The real session shells out to the STAGED helper:
+        #   sh /usr/data/nebulaos-hwagent/flash-spare-slot.sh ...
+        # so if nothing staged it, there is nothing to run. Modelling that is
+        # what makes the "already on stock" path testable: an independent review
+        # found that path never staged the helper, and this scenario passed
+        # anyway because the simulator wrote partitions directly and never
+        # consulted it.
+        helper = self.printer.staged.get("flash-spare-slot.sh")
+        if helper is None:
+            return False, ("sh: can't open '/usr/data/nebulaos-hwagent/flash-spare-slot.sh': "
+                           "No such file or directory")
+        if self.printer.helper_must_equal is not None and helper != self.printer.helper_must_equal:
+            return False, "flash-spare-slot.sh: staged helper is not the expected bytes"
+
         if self.printer.flash_helper_fails:
             return False, "flash-spare-slot.sh: preflight refused (simulated)"
 

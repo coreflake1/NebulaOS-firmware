@@ -329,6 +329,16 @@ class Installer:
             staged[name] = got
             self._say("STAGED=%s sha256=%s" % (name, got))
 
+        self._stage_helpers(session)
+        return self._check_staged_payload(session, staged)
+
+    def _stage_helpers(self, session):
+        """Put the privileged helpers on the device, from C's git objects.
+
+        Called from BOTH entry paths. The bytes never come from the working
+        tree, and the device's own hash of what arrived is compared against the
+        control commit's.
+        """
         import tempfile
         for control_path in self.control.paths_of_kind("on-device"):
             name = os.path.basename(control_path)
@@ -343,7 +353,9 @@ class Installer:
                     % (name, got[:16], expected[:16]), state=self.result.state)
             self._say("STAGED_HELPER=%s sha256=%s (from control commit %s)"
                       % (name, got, self.control.commit[:12]))
+        return True
 
+    def _check_staged_payload(self, session, staged):
         if staged.get("xImage") != self.artifacts.ximage_sha:
             raise InstallError("staged xImage hashes %s on the device, expected %s"
                                % (staged.get("xImage"), self.artifacts.ximage_sha),
@@ -379,6 +391,22 @@ class Installer:
                 raise InstallError(
                     "staged %s now hashes %s, expected %s - the payload changed across the reboot"
                     % (name, got[:16], want[:16]), state=journal.STOCK_RUNNING)
+
+        # RE-VERIFY THE HELPER, for the same reason the payload is re-hashed
+        # above. The payload was staged before a reboot and the reasoning was
+        # "between then and now the device ran a different OS" - that applies
+        # with more force to the privileged code than to the data.
+        for control_path in self.control.paths_of_kind("on-device"):
+            name = os.path.basename(control_path)
+            got = session.staged_sha256(name)
+            want = self.control.helper_sha256(control_path)
+            self._say("HELPER_RECHECK=%s sha256=%s" % (name, got))
+            if got != want:
+                raise InstallError(
+                    "the on-device helper %s hashes %s but control commit %s says %s. Refusing "
+                    "to execute a privileged helper whose bytes are not the reviewed ones."
+                    % (name, got[:16] or "<absent>", self.control.commit[:12], want[:16]),
+                    state=journal.STOCK_RUNNING)
 
         owner = "%s:%d" % (self.device_id, os.getpid())
         got_lock, holder = session.acquire_flash_lock(owner)
@@ -536,28 +564,64 @@ class Installer:
             raise InstallError(
                 "could not set the marker to stock (%s). The device was not rebooted." % why,
                 state=journal.SAFE_NEBULAOS)
-        self._advance(journal.ARMED_STOCK, "marker=kernel, read back, PLR tombstone fired")
-        self._say("POWER_CYCLE_DANGEROUS=YES")
-
-        # Last look before the point of no easy return.
-        idle = session.idle_state()
-        if not idle.is_idle():
-            self._disarm(session, "the printer stopped being idle after arming")
-            raise InstallError("the printer became busy after arming (%s); disarmed and stopped."
-                               % idle.why_not_idle(), state=journal.CLOSE_BACKWARD)
-
+        # ===================== THE ARMED WINDOW ==========================
+        #
+        # From here until the reboot is issued, the marker says stock and
+        # NebulaOS is still running. EVERY exit from this region must disarm,
+        # so the whole region is one guarded block rather than a sequence of
+        # individually-wrapped calls.
+        #
+        # An independent review demonstrated why that distinction matters. An
+        # earlier revision wrapped only the marker write, leaving two unguarded
+        # raises inside the window: the post-arm idle_state() (which raises on
+        # any non-zero rc or timeout, i.e. on a dropped SSH session) and the
+        # journal advance (ENOSPC, missing state dir). Both were reproduced
+        # against the simulator and both left ARMED_AND_NOT_DISARMED=True.
+        # Neither was an InstallError either, so the operator got a Python
+        # traceback instead of the "do NOT power cycle" text - in the one state
+        # where that text is the whole point.
         try:
+            self._advance(journal.ARMED_STOCK, "marker=kernel, read back, PLR tombstone fired")
+            self._say("POWER_CYCLE_DANGEROUS=YES")
+
+            # Last look before the point of no easy return.
+            idle = session.idle_state()
+            if not idle.is_idle():
+                raise InstallError(
+                    "the printer became busy after arming (%s)" % idle.why_not_idle(),
+                    state=journal.CLOSE_BACKWARD)
+
             session.reboot()
             self._advance(journal.REBOOTING_TO_STOCK, "software reboot issued")
-        except Exception as exc:
-            self._disarm(session, "the reboot could not be issued")
-            raise InstallError("could not issue the reboot (%s); disarmed and stopped." % exc,
-                               state=journal.CLOSE_BACKWARD)
+        except BaseException as exc:
+            # BaseException on purpose: a KeyboardInterrupt or a SystemExit here
+            # leaves a printer armed for stock just as surely as an IOError does.
+            self._say("ARMED_WINDOW_FAILURE=%s" % type(exc).__name__)
+            disarmed = self._disarm(session, "a failure inside the armed window: %s"
+                                    % str(exc)[:120])
+            try:
+                session.close()
+            except Exception:
+                pass
+            if isinstance(exc, InstallError) and disarmed:
+                raise InstallError(
+                    "%s. The marker was put back to NebulaOS and read back, so the device is no "
+                    "longer armed for stock." % exc, state=journal.CLOSE_BACKWARD)
+            raise InstallError(
+                "a failure inside the armed window (%s: %s). Disarm %s. %s"
+                % (type(exc).__name__, str(exc)[:160],
+                   "succeeded - the marker is back on NebulaOS" if disarmed
+                   else "FAILED - the marker may still select stock",
+                   "" if disarmed else
+                   "Do NOT power cycle: booting Creality's slot reflashes the MCU. Re-run "
+                   "install, which disarms on connect, or fix the marker by hand."),
+                state=journal.CLOSE_BACKWARD if disarmed else journal.FAILED_NEEDS_ATTENTION)
         finally:
             try:
                 session.close()
             except Exception:
                 pass
+        # ================== END OF THE ARMED WINDOW ======================
 
         stock_session, _ = self._wait_for_reboot(device.OS_STOCK, boot_before)
         self._advance(journal.STOCK_RUNNING, "rediscovered as stock, identity re-proven")
@@ -570,6 +634,17 @@ class Installer:
                 pass
 
     def _install_from_stock(self, session):
+        # Stage the control helpers HERE TOO.
+        #
+        # An independent review found that this path - "the device was already
+        # running stock when we connected" - never staged anything, so
+        # apply_write_plans executed whatever bytes happened to be sitting at
+        # /usr/data/nebulaos-hwagent/flash-spare-slot.sh. That is a shared,
+        # non-root-owned data partition: a prior control commit, a prior project,
+        # or anything else that can write there. The whole point of reading
+        # helpers from C's git objects was defeated on exactly the path that
+        # skipped the read.
+        self._stage_helpers(session)
         updater_acted = self._flash_on_stock(session)
         boot_before = session.boot_id()
         session.reboot()

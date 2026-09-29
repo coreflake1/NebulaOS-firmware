@@ -152,17 +152,36 @@ def require_v2(source_head, ximage_sha, ximage_size, rootfs_sha, rootfs_size,
     return BuildEvidence(found, fields, profile, source_head)
 
 
-def product_is_published(repo_root, source_head, remote="origin"):
+def product_is_published(repo_root, source_head, remote="origin", fetch=True):
     """-> (ok, detail). What lands on a printer must be fetchable by someone else.
 
-    Asked of the REMOTE, not of the local checkout: a commit that exists only
-    here is one nobody can review or reproduce.
+    Checked against REMOTE-TRACKING refs, and - unless `fetch` is disabled -
+    after refreshing them. An earlier revision claimed to ask the remote while
+    actually reading possibly-stale local refs, which would let a commit that
+    was only ever pushed-then-deleted, or never pushed at all on a fresh clone,
+    look published. ControlMirror.refresh() already fetches before judging C;
+    this is the same discipline for X.
     """
     try:
         url = subprocess.run(["git", "-C", repo_root, "remote", "get-url", remote],
                              capture_output=True, text=True, timeout=30)
         if url.returncode != 0:
             return False, "cannot read the %s remote" % remote
+        if fetch:
+            # Fail CLOSED. This answer gates a destructive install, and refs that
+            # could not be refreshed are exactly the stale view this check exists
+            # to rule out: a commit pushed and then force-removed, or never pushed
+            # from a fresh clone, would still look published. No network, no
+            # proof of publication, no install.
+            fetched = subprocess.run(["git", "-C", repo_root, "fetch", "--quiet", remote],
+                                     capture_output=True, text=True, timeout=120)
+            if fetched.returncode != 0:
+                return False, ("could not refresh the %s remote refs (%s); publication of %s "
+                               "cannot be established from possibly-stale refs"
+                               % (remote, (fetched.stderr or "").strip()[:120], source_head[:12]))
+            stale = ""
+        else:
+            stale = " (remote refs not refreshed)"
         proc = subprocess.run(["git", "-C", repo_root, "branch", "-r", "--contains", source_head],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
@@ -172,6 +191,6 @@ def product_is_published(repo_root, source_head, remote="origin"):
         if not branches:
             return False, ("commit %s is on no remote branch - an unpublished product commit is "
                            "one nobody else can fetch" % source_head[:12])
-        return True, "published on %s" % ", ".join(branches)
+        return True, "published on %s%s" % (", ".join(branches), stale)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, "could not establish publication: %s" % exc

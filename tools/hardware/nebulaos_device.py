@@ -241,6 +241,26 @@ class DeviceSession(abc.ABC):
 # The SSH implementation.
 # ---------------------------------------------------------------------------
 
+
+# The MCU guard (overlay etc/init.d/S50nebulaos-mcu-guard, write_state) records
+# its outcome for THIS boot in a tmpfs state file. That file, not a grep of a
+# persistent syslog, is the authority: it cannot carry a restore from an earlier
+# boot, and its MCU_RESTORE_RESULT field is exactly what the guard decided.
+#   not_attempted          -> 0 (no restore this boot)
+#   any other value        -> 1 (a restore was attempted: stock's updater acted)
+#   file missing/unreadable -> unknown (the guard's verdict cannot be read, which
+#                             callers must treat as a failed check, never a pass)
+MCU_GUARD_STATE = "/run/nebulaos-mcu-guard.state"
+
+
+def mcu_restore_probe_cmd(state_path=MCU_GUARD_STATE):
+    """-> shell text printing mcu_guard_restore=<0|1|unknown> and mcu_restore_result=<raw>."""
+    q = shlex.quote(state_path)
+    return ("r=$(sed -n 's/^MCU_RESTORE_RESULT=//p' %s 2>/dev/null | head -n 1); "
+            "case \"$r\" in not_attempted) n=0 ;; '') n=unknown ;; *) n=1 ;; esac; "
+            "printf 'mcu_guard_restore=%%s\\n' \"$n\"; "
+            "printf 'mcu_restore_result=%%s\\n' \"${r:-unknown}\"" % q)
+
 _STAGE_DIR = "/usr/data/nebulaos-hwagent"
 _LOCK_PATH = _STAGE_DIR + "/flash.lock"
 
@@ -485,7 +505,7 @@ class SshDeviceSession(DeviceSession):
 
     def mcu_state(self):
         return self._kv(
-            "printf 'mcu_guard_restore=%s\\n' \"$(grep -c 'MCU_RESTORE' /var/log/messages 2>/dev/null || echo 0)\"; "
+            mcu_restore_probe_cmd() + "; "
             "printf 'stock_updater_marker=%s\\n' \"$(ls /usr/data/.mcu_updated 2>/dev/null "
             "&& echo present || echo absent)\"; "
             "printf 'mcu_serial=%s\\n' \"$(ls /dev/serial/by-id/ 2>/dev/null | head -1)\"")
@@ -511,7 +531,10 @@ class SshDeviceSession(DeviceSession):
 
     def stage_file(self, local_path, name):
         self._run("mkdir -p %s" % _STAGE_DIR)
-        remote = "%s/%s" % (_STAGE_DIR, name)
+        # Quoted like every other remote path here. scp's destination is shell-
+        # expanded on the far side by pre-9.0 OpenSSH, and `name` being a literal
+        # today is a property of the callers, not of this function.
+        remote = "%s/%s" % (_STAGE_DIR, shlex.quote(name))
         self._scp(local_path, remote)
         return self.staged_sha256(name)
 

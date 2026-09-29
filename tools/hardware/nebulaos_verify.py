@@ -174,9 +174,11 @@ def observe_mcu_restore(session):
     """
     mcu = session.mcu_state()
     try:
-        count = int(mcu.get("mcu_guard_restore", "0"))
+        count = int(mcu.get("mcu_guard_restore", "unknown"))
     except ValueError:
-        count = 0
+        # The guard's per-boot verdict could not be read. That is not evidence
+        # of "no restore", so it is reported as unknown and fails PART1.
+        return "unknown"
     if count == 0:
         return "not_attempted"
     return "performed" if mcu.get("mcu_serial") else "performed_but_mcu_absent"
@@ -271,14 +273,16 @@ def part1_verify(session, expected_ximage_sha, expected_ximage_size,
     #
     # PART1_INSTALL_VERIFIED=YES on a printer whose MCU is running Creality's
     # firmware would be a false pass, so any restore at all fails the check.
-    restored = mcu.get("mcu_guard_restore", "0")
+    restored = mcu.get("mcu_guard_restore", "unknown")
     try:
         restored_n = int(restored)
     except ValueError:
-        restored_n = 0
+        restored_n = None          # unreadable verdict: fail closed, never pass
     result.add("the MCU guard performed no automatic restore", restored_n == 0,
-               "MCU_RESTORE evidence count: %s - a restore means stock's updater "
-               "overwrote the qualified MCU build" % restored)
+               "MCU guard restore this boot: %s (MCU_RESTORE_RESULT=%s) - a restore means "
+               "stock's updater overwrote the qualified MCU build; 'unknown' means the "
+               "guard's per-boot state could not be read, which is not a pass"
+               % (restored, mcu.get("mcu_restore_result", "unknown")))
 
     result.add("no stock MCU updater marker is present",
                mcu.get("stock_updater_marker") != "present",
