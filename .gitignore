@@ -11,6 +11,17 @@ __pycache__/
 # bloated .git substantially. The small config files alongside them
 # (buildroot.config, kernel.config, halley5-nebulaos-fragment.config,
 # halley5_v30.dts) stay tracked - human-readable, worth keeping in history.
+# Release artifact staging. scripts/package/package-release.sh writes the three
+# delivery formats here by default, per docs/RELEASE_ARTIFACTS.md. They are build
+# OUTPUT, not source: a ~100 MB .img and a ~230 MB .ingenic per release.
+#
+# Ignoring this directory is not cosmetic. tools/run-nebulaos-build.sh and
+# tools/run-nebulaos-hardware.sh both REFUSE to run from a dirty canonical
+# workspace, so an un-ignored release directory would block the next build and
+# every hardware operation until someone cleaned it up by hand - and would be one
+# `git add -A` away from committing a quarter-gigabyte of generated artifacts.
+artifacts/release/
+
 artifacts/buildroot-halley5-v30-image/rootfs.ext2
 artifacts/buildroot-halley5-v30-image/rootfs.squashfs
 artifacts/buildroot-halley5-v30-image/xImage
