@@ -148,6 +148,18 @@ def require_v2(source_head, ximage_sha, ximage_size, rootfs_sha, rootfs_size,
             "may have used ccache and reused incremental output, so its bytes are not the bytes a "
             "clean build of that source produces."
             % (profile, " or ".join(sorted(INSTALLABLE_PROFILES))))
+    # Checked again on the consuming side: the profile is only as good as the
+    # build it describes. The signer refuses these combinations too; an
+    # attestation minted by an older signer must not slip past here.
+    mode = fields.get("BUILD_MODE", "")
+    if mode not in ("candidate", "qualified"):
+        raise EvidenceError(
+            "the attestation states BUILD_PROFILE=%s but BUILD_MODE=%r. Only a candidate or "
+            "qualified build may reach a printer." % (profile, mode))
+    if fields.get("CCACHE", "") != "disabled":
+        raise EvidenceError(
+            "the attestation states BUILD_PROFILE=%s but CCACHE=%r. An installable build must "
+            "have ccache disabled." % (profile, fields.get("CCACHE", "")))
 
     return BuildEvidence(found, fields, profile, source_head)
 

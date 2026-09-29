@@ -145,6 +145,8 @@ class Installer:
         self.sleep = sleep
         self.now = now
         self.result = InstallResult()
+        # Fail closed until stock's own updater log has been read on stock.
+        self._stock_updater_acted = True
 
     # -- helpers -----------------------------------------------------------
     def _say(self, text):
@@ -235,6 +237,15 @@ class Installer:
         self.result.disarmed = ok
         if not ok:
             self._say("DISARM_FAILED=YES detail=%s" % why)
+        elif self.txn:
+            # Advisory record only: the physically re-read marker is the
+            # authority. A journal that cannot be written (the very failure some
+            # callers are recovering from) must not turn a verified disarm into
+            # an escaping exception.
+            try:
+                self.txn.mark_disarmed(reason)
+            except Exception as exc:
+                self._say("JOURNAL_DISARM_RECORD_FAILED=YES detail=%s" % str(exc)[:120])
         return ok
 
     def _wait_for_reboot(self, which_os, previous_boot_id, addresses=None):
@@ -342,11 +353,11 @@ class Installer:
         import tempfile
         for control_path in self.control.paths_of_kind("on-device"):
             name = os.path.basename(control_path)
-            tmp = os.path.join(tempfile.mkdtemp(prefix=".nebulaos-helper."), name)
-            self.control.write_helper(control_path, tmp)
-            got = session.stage_file(tmp, name)
+            with tempfile.TemporaryDirectory(prefix=".nebulaos-helper.") as tmpdir:
+                tmp = os.path.join(tmpdir, name)
+                self.control.write_helper(control_path, tmp)
+                got = session.stage_file(tmp, name)
             expected = self.control.helper_sha256(control_path)
-            os.unlink(tmp)
             if got != expected:
                 raise InstallError(
                     "helper %s arrived on the device as %s but the control commit says %s"
@@ -378,8 +389,14 @@ class Installer:
                 "expected to be running stock from /dev/mmcblk0p7 but root=%s" % root,
                 state=journal.STOCK_RUNNING)
 
+        # Stock's updater has already run by the time this session exists (it
+        # is a boot-time init script). Its own log, on stock's tmpfs, is the
+        # evidence; anything but a recorded handshake failure is treated as
+        # "the updater may have acted" - fail closed.
         mcu_before = session.mcu_state()
-        self._say("STOCK_MCU_UPDATER_MARKER=%s" % mcu_before.get("stock_updater_marker", "unknown"))
+        stock_update = mcu_before.get("stock_mcu_update", "unknown")
+        self._say("STOCK_MCU_UPDATE=%s" % stock_update)
+        self._stock_updater_acted = stock_update != "did_not_act"
 
         # Re-hash on the device. The payload was staged before a reboot; between
         # then and now the device ran a different OS.
@@ -458,9 +475,7 @@ class Installer:
                 "points at." % why, state=journal.FLASH_VERIFIED)
         self._advance(journal.ARMED_NEBULAOS, "marker set to kernel2 and read back")
 
-        mcu_after = session.mcu_state()
-        updater_acted = mcu_after.get("stock_updater_marker") == "present" \
-            and mcu_before.get("stock_updater_marker") != "present"
+        updater_acted = self._stock_updater_acted
         if updater_acted:
             self._say("STOCK_MCU_UPDATER_ACTED=YES")
         return updater_acted
@@ -560,10 +575,18 @@ class Installer:
                 % str(exc)[:160], state=journal.CLOSE_BACKWARD)
         if not ok:
             self._say("MARKER_WRITE_FAILED=YES - NOT rebooting")
-            self._disarm(session, "the stock marker write did not verify")
+            disarmed = self._disarm(session, "the stock marker write did not verify")
+            if disarmed:
+                raise InstallError(
+                    "could not set the marker to stock (%s). The device was not rebooted, and "
+                    "the marker was re-read as NebulaOS." % why, state=journal.SAFE_NEBULAOS)
+            # The write did not verify, but neither did the disarm: the marker
+            # state is unknown and may select stock. Never report that as safe.
             raise InstallError(
-                "could not set the marker to stock (%s). The device was not rebooted." % why,
-                state=journal.SAFE_NEBULAOS)
+                "could not set the marker to stock (%s), and the disarm did NOT verify either - "
+                "the marker may still select stock. Do NOT power cycle: booting Creality's slot "
+                "reflashes the MCU. Re-run install, which disarms on connect, or fix the marker "
+                "by hand." % why, state=journal.FAILED_NEEDS_ATTENTION)
         # ===================== THE ARMED WINDOW ==========================
         #
         # From here until the reboot is issued, the marker says stock and

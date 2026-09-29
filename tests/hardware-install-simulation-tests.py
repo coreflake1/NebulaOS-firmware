@@ -620,13 +620,18 @@ def case_mcu_restore_probe():
         for label, content, want in cases:
             got = run(content).get("mcu_guard_restore")
             check("probe: %s" % label, got == want, "got %r" % got)
+        check("probe: the guard verdict is read from the same per-boot file",
+              run("MCU_GUARD_RESULT=WARN\nMCU_RESTORE_RESULT=not_attempted\n").get("mcu_guard_result")
+              == "WARN")
+        check("probe: a missing state file yields guard verdict unknown",
+              run(None).get("mcu_guard_result") == "unknown")
 
         class Fake:
             def __init__(self, v):
                 self.v = v
             def mcu_state(self):
                 return {"mcu_guard_restore": self.v, "mcu_serial": "usb-x",
-                        "stock_updater_marker": "absent", "mcu_restore_result": "?"}
+                        "stock_mcu_update": "absent", "mcu_restore_result": "?"}
         check("observe: an unreadable verdict reports unknown, never not_attempted",
               verify.observe_mcu_restore(Fake("unknown")) == "unknown")
         check("observe: 0 reports not_attempted",
@@ -665,6 +670,111 @@ def case_publication_fails_closed():
         ok3, why3 = evidence.product_is_published(work, pub)
         check("an unreachable remote fails closed even for a previously-pushed commit",
               not ok3 and "cannot be established" in why3, why3)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_journal_keeps_danger_after_refusal():
+    """Regression for the review's F3 and F11."""
+    # F3: a refusal inside the stock window must not erase the danger.
+    fx, root = scenario("dangerjournal")
+    try:
+        os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "state")
+        txn = journal.Transaction.begin("printer-sim", fx.control_commit, SOURCE_HEAD,
+                                        fx.artifacts.ximage_sha, fx.artifacts.rootfs_sha)
+        fx.printer.corrupt_flash = True
+        result, err = run_install(fx, txn=txn)
+        check("F3: the corrupted flash is refused", err is not None)
+        txn.advance(journal.FAILED_NEEDS_ATTENTION, "refused (as op_install records it)")
+        again = journal.Transaction.open("printer-sim")
+        desc = again.describe() if again else ""
+        check("F3: after the refusal the journal still says a power cycle is dangerous",
+              again is not None and again.power_cycle_dangerous
+              and "TRANSACTION_POWER_CYCLE_DANGEROUS=YES" in desc, desc.replace("\n", " ")[:300])
+        check("F3: and that the device is armed for stock (marker on Creality's slot)",
+              "TRANSACTION_ARMED_FOR_STOCK=YES" in desc and marker_state(fx.printer) == marker.KERNEL,
+              "marker is %s" % marker_state(fx.printer))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # A VERIFIED disarm clears it: busy after arming -> disarm -> refusal.
+    fx, root = scenario("disarmclears")
+    try:
+        os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "state")
+        txn = journal.Transaction.begin("printer-sim", fx.control_commit, SOURCE_HEAD,
+                                        fx.artifacts.ximage_sha, fx.artifacts.rootfs_sha)
+        fx.printer.busy_after_marker_set = marker.KERNEL
+        result, err = run_install(fx, txn=txn)
+        txn.advance(journal.FAILED_NEEDS_ATTENTION, "refused")
+        again = journal.Transaction.open("printer-sim")
+        check("a verified disarm clears the danger record",
+              err is not None and again is not None and not again.power_cycle_dangerous
+              and marker_state(fx.printer) == marker.KERNEL2,
+              (again.describe().replace("\n", " ")[:200] if again else "no journal"))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    # F11: the stock write does not verify AND the disarm does not verify.
+    fx, root = scenario("garbledmarker")
+    try:
+        fx.printer.marker_write_garbled = True
+        result, err = run_install(fx)
+        check("F11: an unverifiable marker plus a failed disarm is a refusal", err is not None)
+        check("F11: it is NOT reported as SAFE_NEBULAOS",
+              err is not None and getattr(err, "state", None) == journal.FAILED_NEEDS_ATTENTION,
+              "state=%s" % getattr(err, "state", None))
+        check("F11: the refusal carries the do-not-power-cycle text",
+              err is not None and "Do NOT power cycle" in str(err), str(err)[:200])
+        check("F11: the device was not rebooted", fx.printer.boot_id == "boot-0001",
+              "boot_id is %s" % fx.printer.boot_id)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_mcu_guard_not_pass():
+    """F6: not_attempted with a WARN guard (it evaluated nothing) must fail PART1."""
+    fx, root = scenario("guardwarn")
+    try:
+        fx.printer.mcu_guard_result = "WARN"
+        result, err = run_install(fx)
+        check("a WARN MCU guard verdict makes PART1 fail",
+              err is None and result is not None and not result.ok,
+              str(err)[:200] if err else "result.ok=%s" % (result.ok if result else "?"))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_stock_update_log_probe():
+    """F5: the real probe text, run by /bin/sh against fixture logs."""
+    root = tempfile.mkdtemp(prefix="stocklog.")
+    try:
+        def run(content):
+            log = os.path.join(root, "mcu_update.log")
+            if content is None:
+                if os.path.exists(log):
+                    os.unlink(log)
+            else:
+                with open(log, "w") as fh:
+                    fh.write(content)
+            cmd = device.STOCK_MCU_UPDATE_PROBE.replace("/tmp/mcu_update.log", log)
+            out = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True).stdout
+            return out.strip().split("=", 1)[-1]
+        check("stock log: handshake fail -> did_not_act",
+              run("handshake /dev/ttyS1 fail, ret=1\n") == "did_not_act")
+        check("stock log: identify fail -> did_not_act", run("identify fail\n") == "did_not_act")
+        check("stock log: anything else -> acted_or_unknown (fail closed)",
+              run("mcu update ok\n") == "acted_or_unknown")
+        check("stock log: empty -> acted_or_unknown (fail closed)", run("") == "acted_or_unknown")
+        check("stock log: missing -> absent", run(None) == "absent")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+    fx, root = scenario("stocklogabsent")
+    try:
+        fx.printer.stock_mcu_update_log = None
+        result, err = run_install(fx)
+        check("F5: no stock updater log on stock is treated as 'may have acted' (not verified)",
+              result is not None and not result.ok, str(err)[:200] if err else "")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -1129,9 +1239,12 @@ SCENARIOS = [
     ("concurrent installer (device lock)", case_concurrent_installer),
     ("host lock", case_host_lock),
     ("mcu updater acted", case_mcu_updater_acted),
+    ("stock updater log (evidenced signal)", case_stock_update_log_probe),
     ("mcu guard restored", case_mcu_guard_restored),
     ("mcu restore probe (per-boot guard state)", case_mcu_restore_probe),
+    ("mcu guard verdict must be PASS", case_mcu_guard_not_pass),
     ("publication fails closed", case_publication_fails_closed),
+    ("journal keeps the danger after a refusal", case_journal_keeps_danger_after_refusal),
     ("new image will not boot", case_new_image_will_not_boot),
     ("armed window is exception-safe", case_armed_window_is_exception_safe),
     ("helper provenance on every path", case_helper_provenance_on_every_path),

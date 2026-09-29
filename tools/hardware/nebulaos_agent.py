@@ -13,15 +13,11 @@ or --command. Not because they are filtered - because no such operation exists
 here to name. The device is reached only through DeviceSession, whose vocabulary
 is closed, and the target is chosen only by enrolled device id.
 
-WHAT REPLACED "ALL REPOS MUST BE CLEAN"
+WHAT IS PROVEN BEYOND "ALL REPOS MUST BE CLEAN"
 
-The old hardware launcher refused any destructive operation unless all five
-canonical repositories were clean. That was a blunt instrument standing in for
-several different proofs, and it had a real cost: an unrelated edit in another
-session - someone writing a doc, an agent mid-refactor - could invalidate an
-open hardware transaction that had nothing to do with it.
-
-It is replaced by the proofs that were actually meant:
+The launcher still runs the full online identity gate, which still requires all
+five canonical repositories to be clean and published. On top of that blunt
+rule, the agent proves the specific properties a hardware operation depends on:
 
     control commit C is published, resolvable, and content-bound
     host control code matches C exactly
@@ -192,10 +188,16 @@ def prove_preconditions(device_id, source_head, artifacts, build_run, control_co
 
 def ssh_session_factory(profile):
     """The production seam. Builds an SSH session against an enrolled address."""
+    import atexit
+    import shutil
     import tempfile
 
     def factory(which_os, address):
-        known = os.path.join(tempfile.mkdtemp(prefix=".nebulaos-kh."), "known_hosts")
+        tmpdir = tempfile.mkdtemp(prefix=".nebulaos-kh.")
+        # The session keeps using known_hosts after this returns, so the
+        # directory is removed when the agent exits rather than here.
+        atexit.register(shutil.rmtree, tmpdir, True)
+        known = os.path.join(tmpdir, "known_hosts")
         profile.write_known_hosts(which_os, address, known)
         return device.SshDeviceSession(
             address=address, username=profile.username(which_os),
@@ -243,6 +245,19 @@ def op_inspect(args):
     return 3
 
 
+def _say_power_cycle_warning(txn):
+    """Printed on EVERY refusal while the journal says a power cycle is unsafe."""
+    try:
+        dangerous = txn is not None and txn.power_cycle_dangerous
+    except Exception:
+        dangerous = True          # cannot tell: warn rather than reassure
+    if dangerous:
+        say("TRANSACTION_POWER_CYCLE_DANGEROUS=YES")
+        say("# The marker may select Creality's slot. Do NOT power cycle: a boot into stock")
+        say("# lets its updater reflash the MCU. Re-run `install` (it disarms on connect) or")
+        say("# resolve the marker by hand, then run `status`.")
+
+
 def op_status(args):
     txn = journal.Transaction.open(args.device)
     if txn is None:
@@ -251,11 +266,12 @@ def op_status(args):
         return 0
     say("TRANSACTION_OPEN=YES")
     say(txn.describe())
-    if txn.state in journal.ARMED_FOR_STOCK_STATES:
+    if txn.power_cycle_dangerous:
         say()
-        say("# This device is ARMED FOR STOCK. Do not power cycle: a power cycle into")
-        say("# Creality's slot lets its updater reflash the MCU. Re-run `install` to")
-        say("# disarm, or resolve the marker by hand.")
+        say("# This device may be ARMED FOR STOCK (last stock-window state: %s). Do not"
+            % txn.danger_state)
+        say("# power cycle: a power cycle into Creality's slot lets its updater reflash the")
+        say("# MCU. Re-run `install` to disarm, or resolve the marker by hand.")
     return 0
 
 
@@ -315,6 +331,7 @@ def op_install(args):
             say("INSTALL=REFUSED")
             say("REASON: %s" % exc)
             txn.advance(journal.FAILED_NEEDS_ATTENTION, str(exc)[:200])
+            _say_power_cycle_warning(txn)
             return 3
         except BaseException as exc:
             # Anything the installer did not convert into an InstallError still
@@ -333,6 +350,7 @@ def op_install(args):
                             "unexpected %s" % type(exc).__name__)
             except Exception:
                 pass
+            _say_power_cycle_warning(txn)
             return 3
         say(result.render())
         return 0 if result.ok else 1
@@ -367,6 +385,12 @@ def main(argv):
         return 2
     except (profiles.ProfileError, control.ControlError, evidence.EvidenceError) as exc:
         sys.stderr.write("RUN_NEBULAOS_HARDWARE=REFUSED\nREASON: %s\n" % exc)
+        return 2
+    except (journal.LockError, journal.JournalError) as exc:
+        # A concurrent installer (host lock) or an unusable journal is a clean
+        # refusal, not a traceback. Nothing was done to the device.
+        sys.stderr.write("RUN_NEBULAOS_HARDWARE=REFUSED\nREASON: %s: %s\n"
+                         % (type(exc).__name__, exc))
         return 2
 
 

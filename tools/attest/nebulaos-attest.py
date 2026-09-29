@@ -336,6 +336,21 @@ def validate_v2(fields):
             "       A release build must have ccache disabled; refusing to attest otherwise."
             % fields["CCACHE"]
         )
+    # An INSTALLABLE profile (release or candidate) must come from a clean build:
+    # recorded mode candidate/qualified, ccache disabled. Enforced here in the
+    # signer, not only in a wrapper that reads an unauthenticated record, so an
+    # attestation claiming an installable profile for a dev build cannot exist.
+    if fields["BUILD_PROFILE"] in ("release", "candidate"):
+        if fields["BUILD_MODE"] not in ("candidate", "qualified"):
+            raise Refused(
+                "BUILD_PROFILE=%s with BUILD_MODE=%r.\n"
+                "       Only a candidate or qualified build may carry an installable profile."
+                % (fields["BUILD_PROFILE"], fields["BUILD_MODE"]))
+        if fields["CCACHE"] != "disabled":
+            raise Refused(
+                "BUILD_PROFILE=%s with CCACHE=%r.\n"
+                "       An installable build must have ccache disabled."
+                % (fields["BUILD_PROFILE"], fields["CCACHE"]))
 
 
 # --------------------------------------------------------------------------
@@ -481,6 +496,7 @@ def cmd_verify(args):
     print("SOURCE_HEAD=%s" % fields["SOURCE_HEAD"])
     print("BUILD_PROFILE=%s" % fields["BUILD_PROFILE"])
     print("BUILD_MODE=%s" % fields["BUILD_MODE"])
+    print("CCACHE=%s" % fields["CCACHE"])
     print("XIMAGE_SHA256=%s" % fields["XIMAGE_SHA256"])
     print("ROOTFS_SQUASHFS_SHA256=%s" % fields["ROOTFS_SQUASHFS_SHA256"])
     return 0

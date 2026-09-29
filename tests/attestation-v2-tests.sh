@@ -303,6 +303,25 @@ else
   bad "BUILD_PROFILE=release with CCACHE=enabled is refused at signing time" "rc=$rc"
 fi
 
+# An installable profile needs a clean build: enforced in the SIGNER, not only
+# in the attest-build-run wrapper (which reads an unauthenticated record).
+for prof in release candidate; do
+  out=$(mkfields | sed "s|^BUILD_PROFILE=.*|BUILD_PROFILE=$prof|; s|^BUILD_MODE=.*|BUILD_MODE=dev|" \
+        | attest sign 2>&1); rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'Only a candidate or qualified build'; then
+    ok "BUILD_PROFILE=$prof with BUILD_MODE=dev is refused at signing time"
+  else
+    bad "BUILD_PROFILE=$prof with BUILD_MODE=dev is refused at signing time" "rc=$rc out=$out"
+  fi
+done
+out=$(mkfields | sed 's|^BUILD_PROFILE=.*|BUILD_PROFILE=candidate|; s|^CCACHE=.*|CCACHE=enabled|' \
+      | attest sign 2>&1); rc=$?
+if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'ccache disabled'; then
+  ok "BUILD_PROFILE=candidate with CCACHE=enabled is refused at signing time"
+else
+  bad "BUILD_PROFILE=candidate with CCACHE=enabled is refused at signing time" "rc=$rc out=$out"
+fi
+
 # Duplicate keys must be refused, not silently resolved.
 out=$( { mkfields; echo "BUILD_PROFILE=dev"; } | attest sign 2>&1); rc=$?
 if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'appears more than once'; then

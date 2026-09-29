@@ -254,12 +254,31 @@ MCU_GUARD_STATE = "/run/nebulaos-mcu-guard.state"
 
 
 def mcu_restore_probe_cmd(state_path=MCU_GUARD_STATE):
-    """-> shell text printing mcu_guard_restore=<0|1|unknown> and mcu_restore_result=<raw>."""
+    """-> shell text printing mcu_guard_restore=<0|1|unknown>, mcu_restore_result=<raw>
+    and mcu_guard_result=<PASS|WARN|FAIL|unknown> (the guard's own verdict)."""
     q = shlex.quote(state_path)
     return ("r=$(sed -n 's/^MCU_RESTORE_RESULT=//p' %s 2>/dev/null | head -n 1); "
             "case \"$r\" in not_attempted) n=0 ;; '') n=unknown ;; *) n=1 ;; esac; "
             "printf 'mcu_guard_restore=%%s\\n' \"$n\"; "
-            "printf 'mcu_restore_result=%%s\\n' \"${r:-unknown}\"" % q)
+            "printf 'mcu_restore_result=%%s\\n' \"${r:-unknown}\"; "
+            "g=$(sed -n 's/^MCU_GUARD_RESULT=//p' %s 2>/dev/null | head -n 1); "
+            "printf 'mcu_guard_result=%%s\\n' \"${g:-unknown}\"" % (q, q))
+
+# Stock's own MCU updater (/etc/init.d/S13mcu_update -> mcu_util) runs at every
+# stock boot and logs to /tmp/mcu_update.log on STOCK's tmpfs. Against a chip
+# still running NebulaOS's firmware after a software reboot its handshake fails
+# ("identify fail" / "handshake /dev/ttyS1 fail") and it does nothing - observed
+# live (docs/HOW_TO_SWITCH_STOCK_AND_CUSTOM.md, PRINTER_MAINBOARD_PRECONNECTION_
+# CHECKLIST.md). Only meaningful on a stock session; classified fail-closed:
+#   did_not_act       the log shows the handshake/identify failure
+#   absent            no log (on NebulaOS this is expected; on stock it is not)
+#   acted_or_unknown  a log that does NOT show the failure: assume it acted
+STOCK_MCU_UPDATE_PROBE = (
+    "f=/tmp/mcu_update.log; "
+    "if [ ! -f \"$f\" ]; then u=absent; "
+    "elif grep -qiE 'identify fail|handshake .*fail' \"$f\"; then u=did_not_act; "
+    "else u=acted_or_unknown; fi; "
+    "printf 'stock_mcu_update=%s\\n' \"$u\"")
 
 _STAGE_DIR = "/usr/data/nebulaos-hwagent"
 _LOCK_PATH = _STAGE_DIR + "/flash.lock"
@@ -505,9 +524,7 @@ class SshDeviceSession(DeviceSession):
 
     def mcu_state(self):
         return self._kv(
-            mcu_restore_probe_cmd() + "; "
-            "printf 'stock_updater_marker=%s\\n' \"$(ls /usr/data/.mcu_updated 2>/dev/null "
-            "&& echo present || echo absent)\"; "
+            mcu_restore_probe_cmd() + "; " + STOCK_MCU_UPDATE_PROBE + "; "
             "printf 'mcu_serial=%s\\n' \"$(ls /dev/serial/by-id/ 2>/dev/null | head -1)\"")
 
     def stock_wayout_facts(self):

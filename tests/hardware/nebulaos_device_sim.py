@@ -98,7 +98,9 @@ class SimulatedPrinter:
                          "nginx": "running", "guppyscreen": "running"}
         self.mcu_serial = "usb-Klipper_stm32-if00"
         self.mcu_guard_restores = 0
-        self.stock_updater_marker = "absent"
+        # Stock's /tmp/mcu_update.log as the real S13mcu_update leaves it after a
+        # software reboot from NebulaOS: the handshake fails and it does nothing.
+        self.stock_mcu_update_log = "usart_rec_Process: select time out\nhandshake /dev/ttyS1 fail, ret=1\n"
 
         # Stock way-out facts
         self.stock_has_dropbear = True
@@ -108,6 +110,7 @@ class SimulatedPrinter:
 
         # --- fault injection ---------------------------------------------
         self.fail_marker_write = False           # writes silently do not land
+        self.marker_write_garbled = False        # writes land as neither marker
         self.marker_write_raises = False         # writes raise before landing
         self.marker_write_lands_then_raises = None  # state: bytes land, THEN it raises
         self.corrupt_flash = False               # flash writes land wrong
@@ -122,6 +125,7 @@ class SimulatedPrinter:
         self.busy_after_marker_set = None        # marker state that makes the printer busy
         self.stock_updater_acts_on_boot = False
         self.mcu_guard_restores_on_boot = False
+        self.mcu_guard_result = "PASS"            # the guard's own verdict
         self.identity_override = None            # pretend to be a different printer
         self.reboot_does_nothing = False         # marker set, device never reboots
 
@@ -153,7 +157,7 @@ class SimulatedPrinter:
         if state == marker.KERNEL:
             self.running_os = device.OS_STOCK
             if self.stock_updater_acts_on_boot:
-                self.stock_updater_marker = "present"
+                self.stock_mcu_update_log = "mcu firmware update ok\n"
                 self.log.append("stock MCU updater acted on boot")
         elif state == marker.KERNEL2:
             self.running_os = device.OS_NEBULAOS
@@ -239,6 +243,15 @@ class SimSession(device.DeviceSession):
         self._t()
         return self.printer.boot_id
 
+    def _stock_mcu_update(self):
+        """Mirrors STOCK_MCU_UPDATE_PROBE: the log exists only on stock's tmpfs."""
+        if self.printer.running_os != device.OS_STOCK or self.printer.stock_mcu_update_log is None:
+            return "absent"
+        log = self.printer.stock_mcu_update_log.lower()
+        if "identify fail" in log or ("handshake" in log and "fail" in log):
+            return "did_not_act"
+        return "acted_or_unknown"
+
     # -- marker ------------------------------------------------------------
     def read_marker_block(self):
         self._t()
@@ -259,6 +272,12 @@ class SimSession(device.DeviceSession):
             raise SimTransportError("connection lost after the marker write committed")
         if self.printer.fail_marker_write:
             self.printer.log.append("marker write to %s silently did not land" % state)
+            return True
+        if self.printer.marker_write_garbled:
+            # Lands, but as bytes that are neither kernel nor kernel2: read-back
+            # of ANY target fails, so the stock write AND the disarm both fail.
+            self.printer.partitions["ota"] = b"ota:kern\xff"
+            self.printer.log.append("marker write to %s landed garbled" % state)
             return True
         self.printer.partitions["ota"] = marker.canonical(state)
         self.printer.log.append("marker set to %s" % state)
@@ -289,7 +308,8 @@ class SimSession(device.DeviceSession):
         return {
             "mcu_serial": self.printer.mcu_serial,
             "mcu_guard_restore": str(self.printer.mcu_guard_restores),
-            "stock_updater_marker": self.printer.stock_updater_marker,
+            "mcu_guard_result": self.printer.mcu_guard_result,
+            "stock_mcu_update": self._stock_mcu_update(),
         }
 
     def stock_wayout_facts(self):

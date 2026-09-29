@@ -284,9 +284,18 @@ def part1_verify(session, expected_ximage_sha, expected_ximage_size,
                "guard's per-boot state could not be read, which is not a pass"
                % (restored, mcu.get("mcu_restore_result", "unknown")))
 
-    result.add("no stock MCU updater marker is present",
-               mcu.get("stock_updater_marker") != "present",
-               mcu.get("stock_updater_marker", "unknown"))
+    # A restore that did not happen is not the same as a guard that PASSED: the
+    # guard records not_attempted on paths where it evaluated nothing at all
+    # (helper missing, python missing, no output). Its own verdict must be PASS.
+    guard = mcu.get("mcu_guard_result", "unknown")
+    result.add("the MCU guard verdict for this boot is PASS", guard == "PASS",
+               "MCU_GUARD_RESULT=%s (WARN/FAIL/unknown mean the MCU identity was not proven)"
+               % guard)
+
+    # (No PART1 check on /usr/data/.mcu_updated: nothing in stock or NebulaOS
+    # produces that file, so it could never fail. Stock's updater is judged
+    # from its own log while stock runs, during install; its effect on the MCU
+    # is caught here by the MCU guard verdict, which must be PASS.)
 
     return result
 

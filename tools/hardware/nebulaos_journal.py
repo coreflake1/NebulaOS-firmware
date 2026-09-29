@@ -88,6 +88,18 @@ STOCK_WINDOW_STATES = frozenset({
 
 TERMINAL_STATES = frozenset({DONE, FAILED_NEEDS_ATTENTION})
 
+# States that PROVE the device is back on NebulaOS with the marker on NebulaOS.
+# Only these (or a read-back-verified disarm, mark_disarmed) clear the danger
+# record below. CLOSE_BACKWARD does NOT: it is entered before a disarm is tried.
+SAFE_PROVEN_STATES = frozenset({SAFE_NEBULAOS, NEBULAOS_RUNNING, DONE})
+
+# Sticky field. A refusal advances the journal to FAILED_NEEDS_ATTENTION, and
+# an earlier revision thereby ERASED the fact that the printer was armed for,
+# or running, stock - so `status` answered "safe to power cycle" in exactly the
+# state where that advice destroys the MCU. The last stock-window state is
+# remembered here until the device is proven safe again.
+DANGER_FIELD = "LAST_STOCK_WINDOW_STATE"
+
 
 class JournalError(Exception):
     pass
@@ -208,10 +220,35 @@ class Transaction:
         if new_state not in ALL_STATES:
             raise JournalError("unknown transaction state %r" % new_state)
         previous = self.state
+        if new_state in STOCK_WINDOW_STATES:
+            self.fields[DANGER_FIELD] = new_state
+        elif new_state in SAFE_PROVEN_STATES:
+            self.fields.pop(DANGER_FIELD, None)
         self.fields["STATE"] = new_state
         self.fields["UPDATED_AT"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         self._record("%s -> %s%s" % (previous, new_state, (": " + note) if note else ""))
         return self
+
+    def mark_disarmed(self, detail=""):
+        """The marker was physically re-read as NebulaOS while NebulaOS runs."""
+        self.fields.pop(DANGER_FIELD, None)
+        self._record("disarm verified%s" % ((": " + detail) if detail else ""))
+
+    @property
+    def danger_state(self):
+        """The state that decides power-cycle safety: the live state while it is
+        itself a stock-window state, else the remembered one (if any)."""
+        if self.state in STOCK_WINDOW_STATES:
+            return self.state
+        return self.fields.get(DANGER_FIELD, "")
+
+    @property
+    def power_cycle_dangerous(self):
+        return self.danger_state in STOCK_WINDOW_STATES
+
+    @property
+    def armed_for_stock(self):
+        return self.danger_state in STOCK_WINDOW_STATES
 
     def note(self, text):
         self._record("note: %s" % text)
@@ -253,10 +290,13 @@ class Transaction:
             "TRANSACTION_PRODUCT_HEAD=%s" % self.fields.get("PRODUCT_HEAD", ""),
             "TRANSACTION_XIMAGE_SHA256=%s" % self.fields.get("XIMAGE_SHA256", ""),
             "TRANSACTION_ROOTFS_SHA256=%s" % self.fields.get("ROOTFS_SHA256", ""),
-            "TRANSACTION_ARMED_FOR_STOCK=%s"
-            % ("YES" if self.state in ARMED_FOR_STOCK_STATES else "NO"),
+            # In every stock-window state the marker selects Creality's slot
+            # (it is only moved back to NebulaOS at ARMED_NEBULAOS), so a power
+            # cycle boots stock and its updater may reflash the MCU.
+            "TRANSACTION_ARMED_FOR_STOCK=%s" % ("YES" if self.armed_for_stock else "NO"),
             "TRANSACTION_POWER_CYCLE_DANGEROUS=%s"
-            % ("YES" if self.state in STOCK_WINDOW_STATES else "NO"),
+            % ("YES" if self.power_cycle_dangerous else "NO"),
+            "TRANSACTION_LAST_STOCK_WINDOW_STATE=%s" % (self.danger_state or "none"),
             "TRANSACTION_STARTED_AT=%s" % self.fields.get("STARTED_AT", ""),
             "TRANSACTION_UPDATED_AT=%s" % self.fields.get("UPDATED_AT", ""),
         ])
