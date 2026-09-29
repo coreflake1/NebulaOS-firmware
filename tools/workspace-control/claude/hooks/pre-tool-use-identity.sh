@@ -351,43 +351,63 @@ if sandbox_off:
         # the two are genuinely different, and a shared validator is exactly where
         # a future mistake would hide.
         #
-        # There is no target argument other than --host, and --host is constrained
-        # to a literal RFC1918 dotted quad. So ARBITRARY_TARGET_ALLOWED=NO holds at
-        # the hook, not merely because the launcher is well behaved: a hostname
-        # (which would mean DNS, and a name that resolves anywhere), a public
-        # address, a CIDR or a list never reaches the launcher at all.
+        # THERE IS NO TARGET ADDRESS ARGUMENT AT ALL any more. The target is an
+        # ENROLLED DEVICE ID, resolved against a human-created profile store the
+        # agent cannot write. That is strictly stronger than the old
+        # --host <RFC1918> constraint: an address is not an identity, DHCP moves
+        # leases, and the machine answering at a remembered IP may be a different
+        # one. Which addresses may be spoken to at all is now a property of the
+        # profile, not of anything an agent can type.
         #
         # Note what is NOT relaxed: rule 4 above still refuses ssh/scp/ping/nc/...
         # to this agent. The launcher is reachable because its command word is
         # run-nebulaos-hardware.sh, not because the device set was weakened.
         #
-        #   [--host <private-ipv4>] <subcommand> <40-hex sha> <64-hex sha256> <64-hex sha256>
+        #   --device <id> --control <40-hex C> inspect
+        #   --device <id> --control <40-hex C> status
+        #   --device <id> --control <40-hex C> verify  <40-hex X> <64-hex> <64-hex>
+        #   --device <id> --control <40-hex C> install <40-hex X> <64-hex> <64-hex>
+        #
+        # C is the control commit - the reviewed, published source of every
+        # privileged helper - and is stated explicitly so that installing an OLD
+        # product commit still uses CURRENT control machinery.
         a=list(args)
-        if len(a)>=2 and a[0]=="--host":
-            host=a[1]; a=a[2:]
-            q=host.split(".")
-            okh = len(q)==4 and all(x.isdigit() and len(x)<=3 and 0<=int(x)<=255 for x in q)
-            if okh:
-                o1,o2=int(q[0]),int(q[1])
-                okh = (o1==10) or (o1==192 and o2==168) or (o1==172 and 16<=o2<=31)
-            if not okh:
-                out("The --host option of the hardware launcher must be a literal RFC1918\n"
-                    "private IPv4 address (10/8, 172.16-31/12, 192.168/16) - never a hostname,\n"
-                    "a public address, a range or a list.\n\n"
-                    "Refused: "+host)
-        elif a and a[0].startswith("--"):
-            out("The hardware launcher accepts no option but --host. Refused: "+a[0])
-        HW_SUBCMDS=("inventory","preflight","flash","marker","reboot","verify")
-        ok_args = (len(a)==4 and a[0] in HW_SUBCMDS
+        dev=ctl=None
+        while len(a)>=2 and a[0] in ("--device","--control"):
+            if a[0]=="--device": dev=a[1]
+            else: ctl=a[1]
+            a=a[2:]
+        if a and a[0].startswith("--"):
+            out("The hardware launcher accepts only --device and --control.\n\n"
+                "Refused: "+a[0]+"\n\n"
+                "There is deliberately no --host, --password or --command. The target is an\n"
+                "enrolled device id and every device command is composed by reviewed control\n"
+                "code, so there is nothing for an agent to point somewhere else.")
+        if not dev or not all(c.isalnum() or c in "-_" for c in dev) or len(dev)>64:
+            out("--device must name an enrolled device id: letters, digits, '-' and '_',\n"
+                "at most 64 characters. It names a directory under the profile store, so\n"
+                "anything else is a path traversal.\n\n"
+                "Refused: "+repr(dev))
+        if not ctl or not is_sha(ctl):
+            out("--control must be a full 40-character lowercase hex control commit.\n\n"
+                "Refused: "+repr(ctl)+"\n\n"
+                "Privileged helper bytes are read from the git objects at that commit, never\n"
+                "from the working tree, so a hardware session states which reviewed control\n"
+                "generation it is running or it is not a controlled session.")
+        HW_READONLY=("inspect","status")
+        HW_KEYED=("verify","install")
+        ok_args = (len(a)==1 and a[0] in HW_READONLY) or \
+                  (len(a)==4 and a[0] in HW_KEYED
                    and is_sha(a[1]) and is_sha256(a[2]) and is_sha256(a[3]))
         if not ok_args:
-            out("The hardware qualification launcher accepts exactly:\n\n"
-                "  [--host <private-ipv4>] <subcommand> <40-hex firmware sha>\n"
-                "      <64-hex xImage sha256> <64-hex rootfs sha256>\n\n"
-                "  subcommand: "+" ".join(HW_SUBCMDS)+"\n\n"
-                "Refused - a hardware session states its target release and BOTH artifact\n"
-                "hashes up front, or it is not a qualification session. Motion, heating,\n"
-                "calibration and MCU flashing belong to Part 2 and have no subcommand here.")
+            out("The Hardware Agent launcher accepts exactly:\n\n"
+                "  --device <id> --control <40-hex C> inspect\n"
+                "  --device <id> --control <40-hex C> status\n"
+                "  --device <id> --control <40-hex C> verify  <40-hex X> <64-hex> <64-hex>\n"
+                "  --device <id> --control <40-hex C> install <40-hex X> <64-hex> <64-hex>\n\n"
+                "Refused - verify and install state their target release and BOTH artifact\n"
+                "hashes up front, or they are not controlled operations. Motion, heating,\n"
+                "calibration and MCU flashing belong to Part 2 and have no operation here.")
     ok,why=content_is_canonical(target)
     if not ok:
         out("Unsandboxed execution is bound to the launcher CONTENT, not to its path.\n\n"

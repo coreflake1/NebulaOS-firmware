@@ -25,6 +25,7 @@ ON_DEVICE=(
 HOST=(
   tools/attest/nebulaos-attest.py
   tools/emmc/nebulaos_layout.py
+  tools/hardware/nebulaos_agent.py
   tools/hardware/nebulaos_control.py
   tools/hardware/nebulaos_device.py
   tools/hardware/nebulaos_evidence.py

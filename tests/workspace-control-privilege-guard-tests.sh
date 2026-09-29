@@ -398,47 +398,75 @@ echo
 # escape happens first and is validated second.
 X64=ceb91ed298c206e04a74e8a95c16dd4f1c8ee05b664031ed45756efe80e89167
 R64=9a06217c1d3f56036f7cf9008e85faa2dcbb2ce2f0a48a5895d1fb8b5b85c397
-OK_ARGS="inventory $SHA $X64 $R64"
+CSHA=4d1f3a9c8b2e7f0a6c5d4e3b2a1908f7e6d5c4b3
+DEV="--device printer-01 --control $CSHA"
+OK_ARGS="$DEV inspect"
+OK_KEYED="$DEV verify $SHA $X64 $R64"
 
-REASON="hardware qualification launcher accepts exactly"
+REASON="Hardware Agent launcher accepts exactly"
 echo "[ hardware launcher argument grammar - must DENY ]"
-run_case hw DENY nebulaos-hardware 1 "no subcommand"            "$HWRUN $SHA $X64 $R64"
-run_case hw DENY nebulaos-hardware 1 "unknown subcommand"       "$HWRUN teleport $SHA $X64 $R64"
-run_case hw DENY nebulaos-hardware 1 "missing rootfs hash"      "$HWRUN inventory $SHA $X64"
-run_case hw DENY nebulaos-hardware 1 "extra trailing argument"  "$HWRUN inventory $SHA $X64 $R64 extra"
-run_case hw DENY nebulaos-hardware 1 "short firmware sha"       "$HWRUN inventory $BADSHA $X64 $R64"
-run_case hw DENY nebulaos-hardware 1 "non-hex firmware sha"     "$HWRUN inventory ${SHA%??}zz $X64 $R64"
-run_case hw DENY nebulaos-hardware 1 "truncated ximage sha256"  "$HWRUN inventory $SHA ${X64%??} $R64"
-run_case hw DENY nebulaos-hardware 1 "firmware sha where sha256 belongs" "$HWRUN inventory $SHA $SHA $R64"
+run_case hw DENY nebulaos-hardware 1 "no operation"             "$HWRUN $DEV"
+run_case hw DENY nebulaos-hardware 1 "unknown operation"        "$HWRUN $DEV teleport"
+run_case hw DENY nebulaos-hardware 1 "missing rootfs hash"      "$HWRUN $DEV verify $SHA $X64"
+run_case hw DENY nebulaos-hardware 1 "extra trailing argument"  "$HWRUN $DEV verify $SHA $X64 $R64 extra"
+run_case hw DENY nebulaos-hardware 1 "read-only op with arguments" "$HWRUN $DEV inspect $SHA"
+run_case hw DENY nebulaos-hardware 1 "short firmware sha"       "$HWRUN $DEV verify $BADSHA $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "non-hex firmware sha"     "$HWRUN $DEV verify ${SHA%??}zz $X64 $R64"
+run_case hw DENY nebulaos-hardware 1 "truncated ximage sha256"  "$HWRUN $DEV verify $SHA ${X64%??} $R64"
+run_case hw DENY nebulaos-hardware 1 "firmware sha where sha256 belongs" "$HWRUN $DEV verify $SHA $SHA $R64"
+echo
+
+# The four operations are semantic. Every implementation-level spelling the OLD
+# launcher accepted must now be refused - otherwise the surface was renamed
+# rather than removed. `flash`, `marker` and `reboot` in particular were real
+# subcommands that wrote partitions, moved the boot selector and rebooted the
+# printer; they are now steps inside `install`, reachable only through the
+# state machine that proves its preconditions first.
+echo "[ retired implementation-level subcommands - must DENY ]"
+for sub in inventory preflight flash marker reboot; do
+  run_case hw DENY nebulaos-hardware 1 "retired subcommand '$sub'" "$HWRUN $DEV $sub $SHA $X64 $R64"
+done
 echo
 
 # Part 2 is absent by construction, not by discouragement. If any of these ever
 # starts being ALLOWed, a motion/heat/MCU capability has been added to a Part 1
 # launcher and this suite is the thing that should notice.
-echo "[ Part 2 capabilities must not exist as subcommands - must DENY ]"
+echo "[ Part 2 capabilities must not exist as operations - must DENY ]"
 for sub in home move heat extrude calibrate print mcu-flash erase-mcu bed-mesh; do
-  run_case hw DENY nebulaos-hardware 1 "part-2 subcommand '$sub'" "$HWRUN $sub $SHA $X64 $R64"
+  run_case hw DENY nebulaos-hardware 1 "part-2 operation '$sub'" "$HWRUN $DEV $sub $SHA $X64 $R64"
 done
 echo
 
-REASON="must be a literal RFC1918"
-echo "[ target constraint - must DENY ]"
-run_case hw DENY nebulaos-hardware 1 "public IPv4 target"   "$HWRUN --host 8.8.8.8 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "hostname target"      "$HWRUN --host printer.local $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "CIDR range target"    "$HWRUN --host 192.168.0.0/24 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "octet out of range"   "$HWRUN --host 192.168.0.999 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "loopback is not RFC1918" "$HWRUN --host 127.0.0.1 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "link-local is not RFC1918" "$HWRUN --host 169.254.1.1 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "carrier-grade NAT is not RFC1918" "$HWRUN --host 100.64.0.1 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "172.15 is below the private block" "$HWRUN --host 172.15.0.1 $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "172.32 is above the private block" "$HWRUN --host 172.32.0.1 $OK_ARGS"
+# --host IS GONE. The old launcher took an address and validated it as RFC1918;
+# the new one takes an ENROLLED DEVICE ID and the set of addresses it may ever
+# speak to is a property of a human-created profile the agent cannot write.
+# That is strictly stronger than validating a typed address, so these cases now
+# assert that the option itself is refused rather than that a bad value is.
+REASON="accepts only --device and --control"
+echo "[ --host and friends no longer exist - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "--host at all"        "$HWRUN --host 192.168.0.98 inspect"
+run_case hw DENY nebulaos-hardware 1 "--host public IPv4"   "$HWRUN --host 8.8.8.8 inspect"
+run_case hw DENY nebulaos-hardware 1 "--host hostname"      "$HWRUN --host printer.local inspect"
+run_case hw DENY nebulaos-hardware 1 "--host alongside --device" "$HWRUN $DEV --host 192.168.0.98 inspect"
+run_case hw DENY nebulaos-hardware 1 "--password"           "$HWRUN $DEV --password hunter2 inspect"
+run_case hw DENY nebulaos-hardware 1 "--command"            "$HWRUN $DEV --command id inspect"
+run_case hw DENY nebulaos-hardware 1 "invented --force"     "$HWRUN $DEV --force inspect"
+run_case hw DENY nebulaos-hardware 1 "invented --no-verify" "$HWRUN $DEV --no-verify inspect"
+run_case hw DENY nebulaos-hardware 1 "invented --stock-fallback" "$HWRUN $DEV --stock-fallback inspect"
 echo
 
-REASON="accepts no option but --host"
-echo "[ no option but --host - must DENY ]"
-run_case hw DENY nebulaos-hardware 1 "invented --force"     "$HWRUN --force $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "invented --no-verify" "$HWRUN --no-verify $OK_ARGS"
-run_case hw DENY nebulaos-hardware 1 "invented --stock-fallback" "$HWRUN --stock-fallback $OK_ARGS"
+REASON="must name an enrolled device id"
+echo "[ device id is a name, not a path - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "device id traversal"  "$HWRUN --device ../evil --control $CSHA inspect"
+run_case hw DENY nebulaos-hardware 1 "device id with slash" "$HWRUN --device a/b --control $CSHA inspect"
+run_case hw DENY nebulaos-hardware 1 "no --device at all"   "$HWRUN --control $CSHA inspect"
+echo
+
+REASON="must be a full 40-character lowercase hex control commit"
+echo "[ the control commit must be stated exactly - must DENY ]"
+run_case hw DENY nebulaos-hardware 1 "short control commit"    "$HWRUN --device printer-01 --control abc inspect"
+run_case hw DENY nebulaos-hardware 1 "no --control at all"     "$HWRUN --device printer-01 inspect"
+run_case hw DENY nebulaos-hardware 1 "non-hex control commit"  "$HWRUN --device printer-01 --control ${CSHA%??}zz inspect"
 echo
 
 REASON=""
@@ -486,8 +514,10 @@ echo "[ the sanctioned hardware pair - must ALLOW ]"
 # Requires the launcher to be TRACKED at firmware HEAD: content binding compares
 # the installed bytes against the canonical blob in git. While the launcher is
 # uncommitted this case correctly DENIES, which is the binding working.
-run_case hw ALLOW nebulaos-hardware 1 "hardware agent, unsandboxed launcher, valid grammar" "$HWRUN $OK_ARGS"
-run_case hw ALLOW nebulaos-hardware 1 "hardware agent, explicit private host" "$HWRUN --host 192.168.0.98 $OK_ARGS"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, read-only operation" "$HWRUN $OK_ARGS"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, status" "$HWRUN $DEV status"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, keyed operation" "$HWRUN $OK_KEYED"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, install" "$HWRUN $DEV install $SHA $X64 $R64"
 echo
 
 echo "TESTS_PASS=$PASS"

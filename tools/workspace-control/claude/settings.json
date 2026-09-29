@@ -25,7 +25,24 @@
     "",
     "sandbox.autoAllowBashIfSandboxed defaults to TRUE in this build; it is pinned",
     "false on purpose. The sandbox is an OS filesystem boundary around the archive,",
-    "not a reason to auto-approve shell commands."
+    "not a reason to auto-approve shell commands.",
+    "",
+    "Hardware trust stores are denied to every agent, sandboxed or not:",
+    "  ~/.config/nebulaos-attest/      the attestation HMAC key. An agent that can",
+    "                                  read it can mint an attestation for any bytes,",
+    "                                  which makes every downstream check theatre.",
+    "  ~/.config/nebulaos-hardware/    enrolled device profiles: per-unit identity,",
+    "                                  pinned per-OS SSH host keys, credentials. An",
+    "                                  agent that can write these can enrol a printer",
+    "                                  nobody physically confirmed, or re-pin a host",
+    "                                  key that just changed - the exact TOFU failure",
+    "                                  strict host-key checking exists to prevent.",
+    "  ~/.local/state/nebulaos-hardware/mirror.git",
+    "                                  the protected source of privileged helper bytes.",
+    "                                  An agent that can write it can place its own",
+    "                                  code at a 'reviewed' control commit.",
+    "All three are human-created, out of band. The tooling reads them from code that",
+    "runs unsandboxed through an approved launcher, never from an agent's own tools."
   ],
   "autoMemoryEnabled": false,
   "permissions": {
@@ -34,7 +51,19 @@
       "Read(//home/tim/workspace/NebulaOS-archive-*/**)",
       "Edit(//home/tim/workspace/NebulaOS-archive-*)",
       "Edit(//home/tim/workspace/NebulaOS-archive-*/**)",
-      "Bash(cd:*NebulaOS-archive*)"
+      "Bash(cd:*NebulaOS-archive*)",
+      "Read(//home/tim/.config/nebulaos-attest)",
+      "Edit(//home/tim/.config/nebulaos-attest)",
+      "Read(//home/tim/.config/nebulaos-attest/**)",
+      "Edit(//home/tim/.config/nebulaos-attest/**)",
+      "Read(//home/tim/.config/nebulaos-hardware)",
+      "Edit(//home/tim/.config/nebulaos-hardware)",
+      "Read(//home/tim/.config/nebulaos-hardware/**)",
+      "Edit(//home/tim/.config/nebulaos-hardware/**)",
+      "Read(//home/tim/.local/state/nebulaos-hardware/mirror.git)",
+      "Edit(//home/tim/.local/state/nebulaos-hardware/mirror.git)",
+      "Read(//home/tim/.local/state/nebulaos-hardware/mirror.git/**)",
+      "Edit(//home/tim/.local/state/nebulaos-hardware/mirror.git/**)"
     ],
     "additionalDirectories": []
   },
@@ -45,11 +74,17 @@
       "disabled": false,
       "denyRead": [
         "/home/tim/workspace/NebulaOS-archive-2026-09-12",
-        "/home/tim/workspace/NebulaOS-archive-2026-09-12/**"
+        "/home/tim/workspace/NebulaOS-archive-2026-09-12/**",
+        "/home/tim/.config/nebulaos-attest",
+        "/home/tim/.config/nebulaos-hardware",
+        "/home/tim/.local/state/nebulaos-hardware/mirror.git"
       ],
       "denyWrite": [
         "/home/tim/workspace/NebulaOS-archive-2026-09-12",
-        "/home/tim/workspace/NebulaOS-archive-2026-09-12/**"
+        "/home/tim/workspace/NebulaOS-archive-2026-09-12/**",
+        "/home/tim/.config/nebulaos-attest",
+        "/home/tim/.config/nebulaos-hardware",
+        "/home/tim/.local/state/nebulaos-hardware/mirror.git"
       ]
     }
   },
