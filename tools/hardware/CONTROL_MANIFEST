@@ -1,0 +1,19 @@
+# NebulaOS privileged control manifest
+#
+# <sha256>  <kind>  <path>
+#
+# Regenerate with tools/hardware/regen-control-manifest.sh and commit the
+# result together with whatever privileged file changed. Read by
+# tools/hardware/nebulaos_control.py at control commit C.
+
+5c9479c10b70f9bc26309ab02a7b7bb0346cbff9802f514670a6d4b10655bfbb  on-device  scripts/flash-spare-slot.sh
+27a4b7897e9f520a48f98eb397e5d61ed978528565a543c16421ca64c8192815  host  tools/attest/nebulaos-attest.py
+f2e1c2a7cca56006ae760a0ebe000aacb20869f5ddc44c17c71ad967e11cf8cb  host  tools/emmc/nebulaos_layout.py
+920eeb114963d36bfad877fd45d17e4ef1a599ca33dca7a7eea7efcf6d0fc72f  host  tools/hardware/nebulaos_control.py
+48a559c183285cc7929327a342970a7f928b1fcd4adccf506a9edd86571ee1b7  host  tools/hardware/nebulaos_device.py
+dfa1159e035db272c5cfb91a428046107274521a88199c7820a71d05e223951a  host  tools/hardware/nebulaos_install.py
+c0833c3a6e22fa6aa3b3619cdc00af5baddb529e3308677e0c91d53960d2a34b  host  tools/hardware/nebulaos_journal.py
+1392fc6bd5a3d0b6a2426142e338e0d4c51b03238de23977f99340aab3121ea4  host  tools/hardware/nebulaos_marker.py
+3f884810a2f1167287c37ad313ad6dcd1ff2bb767267ba6b98a4c9f742e9adaa  host  tools/hardware/nebulaos_profile.py
+51b433bba1f75fa3c2246e1ab6921225a82381e58188d452ce3ec9705c2c459e  host  tools/hardware/nebulaos_target.py
+ddd9cb37a6f4f67c18483001c772ec35130dfcee4a2a48c41c35ba24380f9a1d  host  tools/hardware/nebulaos_verify.py

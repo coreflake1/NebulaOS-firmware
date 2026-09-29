@@ -1,0 +1,586 @@
+"""The semantic operations an installer may perform on a printer.
+
+WHY THIS IS AN INTERFACE AND NOT A PILE OF SSH CALLS
+
+Two reasons, and the second is the important one.
+
+First: every adversarial case this project needs to test - a wrong printer, a
+host-key mismatch, a lease that moved, Stock unreachable, a print running, a
+heater at temperature, a marker write that does not land, a crash while ARMED, a
+dropped connection mid-flash, a hash mismatch, a second installer - is a
+property of the DEVICE, not of SSH. Putting the device behind an interface means
+all of them can be exercised offline against a simulator, which is the only way
+any of them get tested before a real printer is at risk.
+
+Second, and structurally: this class defines a CLOSED VOCABULARY. There is no
+`run(command)` here, and no `read(device, offset, length)`. A caller can ask
+"what is the marker", "is the printer idle", "write this plan" - it cannot ask
+for an arbitrary command, an arbitrary block device or an arbitrary offset,
+because no method takes one. That is what makes "the agent has no dd, no raw
+offsets, no --command" a fact about the code rather than a promise about
+behaviour.
+
+Trusted internal code composes the real commands. It lives here, below the
+interface, where it can be reviewed once.
+
+THE SIMULATOR IS NOT IN THIS PACKAGE
+
+Production code under tools/hardware/ contains no reference to any simulator and
+no import path that could reach one. The simulator implements this same
+interface and lives under tests/, so a shipped installer cannot construct it
+even by accident - there is nothing to construct. Tests inject it.
+"""
+
+import abc
+import hashlib
+import os
+import shlex
+import subprocess
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nebulaos_marker as marker  # noqa: E402
+import nebulaos_target as targets  # noqa: E402
+
+OS_NEBULAOS = "nebulaos"
+OS_STOCK = "stock"
+OS_UNKNOWN = "unknown"
+
+
+class DeviceError(Exception):
+    """An operation that could not be completed or could not be trusted."""
+
+
+class Identity:
+    """What makes this printer THIS printer.
+
+    An IP address is not an identity - DHCP moves leases, and the machine
+    answering at a remembered address may be a different one. These are the
+    signals that do not move.
+    """
+
+    __slots__ = ("emmc_cid", "sn_mac_sha256", "machine_id", "partlabels")
+
+    def __init__(self, emmc_cid, sn_mac_sha256, machine_id, partlabels):
+        self.emmc_cid = emmc_cid
+        self.sn_mac_sha256 = sn_mac_sha256
+        self.machine_id = machine_id
+        self.partlabels = tuple(sorted(partlabels or ()))
+
+    def fingerprint(self):
+        """A single stable value, over the signals that are per-unit and physical.
+
+        Deliberately excludes machine_id: it lives in the rootfs, so it differs
+        between the stock slot and the NebulaOS slot on the SAME printer. Using
+        it here would make one physical device look like two.
+        """
+        blob = "|".join([
+            "cid=%s" % (self.emmc_cid or ""),
+            "sn_mac=%s" % (self.sn_mac_sha256 or ""),
+        ]).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    def is_complete(self):
+        return bool(self.emmc_cid) and bool(self.sn_mac_sha256)
+
+    def describe(self):
+        return "\n".join([
+            "DEVICE_EMMC_CID=%s" % (self.emmc_cid or "unknown"),
+            "DEVICE_SN_MAC_SHA256=%s" % (self.sn_mac_sha256 or "unknown"),
+            "DEVICE_MACHINE_ID=%s" % (self.machine_id or "unknown"),
+            "DEVICE_FINGERPRINT=%s" % self.fingerprint(),
+        ])
+
+
+class IdleState:
+    __slots__ = ("printing", "paused", "heater_targets", "klippy_state", "detail")
+
+    def __init__(self, printing, paused, heater_targets, klippy_state, detail=""):
+        self.printing = printing
+        self.paused = paused
+        self.heater_targets = dict(heater_targets or {})
+        self.klippy_state = klippy_state
+        self.detail = detail
+
+    def is_idle(self):
+        """Idle means not printing, not paused, and every heater target at zero.
+
+        A paused print counts as active: resuming into a slot switch loses the
+        job. A non-zero target counts as active even if the current temperature
+        is low, because a target is an intent to heat.
+        """
+        if self.printing or self.paused:
+            return False
+        return all(float(v) == 0.0 for v in self.heater_targets.values())
+
+    def why_not_idle(self):
+        reasons = []
+        if self.printing:
+            reasons.append("a print is running")
+        if self.paused:
+            reasons.append("a print is paused")
+        hot = {k: v for k, v in self.heater_targets.items() if float(v) != 0.0}
+        if hot:
+            reasons.append("heater target(s) not zero: %s"
+                           % ", ".join("%s=%s" % (k, v) for k, v in sorted(hot.items())))
+        return "; ".join(reasons) or "idle"
+
+    def describe(self):
+        return "\n".join([
+            "PRINTER_PRINTING=%s" % ("YES" if self.printing else "NO"),
+            "PRINTER_PAUSED=%s" % ("YES" if self.paused else "NO"),
+            "PRINTER_HEATER_TARGETS=%s"
+            % (",".join("%s=%s" % kv for kv in sorted(self.heater_targets.items())) or "none"),
+            "PRINTER_KLIPPY_STATE=%s" % (self.klippy_state or "unknown"),
+            "PRINTER_IDLE=%s" % ("YES" if self.is_idle() else "NO"),
+            "PRINTER_IDLE_DETAIL=%s" % self.why_not_idle(),
+        ])
+
+
+class DeviceSession(abc.ABC):
+    """The closed vocabulary. Implemented by SSH and, in tests, by a simulator."""
+
+    # --- identity and state ------------------------------------------------
+    @abc.abstractmethod
+    def probe_identity(self):
+        """-> Identity. Read-only."""
+
+    @abc.abstractmethod
+    def which_os(self):
+        """-> OS_NEBULAOS | OS_STOCK | OS_UNKNOWN, decided structurally."""
+
+    @abc.abstractmethod
+    def active_root(self):
+        """-> the resolved root= device, e.g. '/dev/mmcblk0p8'."""
+
+    @abc.abstractmethod
+    def boot_id(self):
+        """-> an opaque per-boot value. Changes across a reboot; that IS the proof."""
+
+    # --- the marker --------------------------------------------------------
+    @abc.abstractmethod
+    def read_marker_block(self):
+        """-> the raw 512 bytes of the marker partition."""
+
+    @abc.abstractmethod
+    def write_marker(self, state):
+        """Set the marker to `state` using the mechanism correct for the running OS.
+
+        On NebulaOS this MUST route through /etc/ota_marker.sh's
+        write_ota_marker(), because that helper fires the PLR tombstone when the
+        target is stock. Writing the bytes directly would skip it and leave a
+        stale journal that a later return to NebulaOS might try to resume.
+        """
+
+    # --- safety facts ------------------------------------------------------
+    @abc.abstractmethod
+    def idle_state(self):
+        """-> IdleState."""
+
+    @abc.abstractmethod
+    def service_health(self):
+        """-> dict of service name -> running bool, plus endpoint results."""
+
+    @abc.abstractmethod
+    def mcu_state(self):
+        """-> dict: identity, whether the Stock MCU updater appears to have acted,
+        and whether NebulaOS's MCU guard performed an automatic restore."""
+
+    @abc.abstractmethod
+    def stock_wayout_facts(self):
+        """-> dict of the read-only facts that decide whether Stock is usable."""
+
+    # --- payload and flashing ---------------------------------------------
+    @abc.abstractmethod
+    def free_space(self, path):
+        """-> free bytes at `path`."""
+
+    @abc.abstractmethod
+    def stage_file(self, local_path, name):
+        """Copy a local file into the staging area under `name`. -> sha256 ON THE DEVICE."""
+
+    @abc.abstractmethod
+    def staged_sha256(self, name):
+        """-> sha256 of an already-staged file, recomputed on the device."""
+
+    @abc.abstractmethod
+    def apply_write_plans(self, plans, manifest_name):
+        """Execute validated write plans. -> (ok, report).
+
+        Takes WritePlan objects, never paths or offsets.
+        """
+
+    @abc.abstractmethod
+    def region_sha256(self, target_name, length):
+        """-> sha256 of the first `length` bytes of a named target.
+
+        Length-bounded on purpose: a partition is larger than its payload, and
+        hashing the padding would be comparing the wrong thing.
+        """
+
+    # --- lifecycle ---------------------------------------------------------
+    @abc.abstractmethod
+    def reboot(self):
+        """Software reboot. Never a power cycle - this project cannot perform one,
+        and a power cycle into stock is what auto-flashes the MCU."""
+
+    @abc.abstractmethod
+    def acquire_flash_lock(self, owner):
+        """-> (ok, holder). A device-side lock so two installers cannot both write."""
+
+    @abc.abstractmethod
+    def release_flash_lock(self, owner):
+        """Release a lock this owner holds."""
+
+    @abc.abstractmethod
+    def close(self):
+        """Release transport resources."""
+
+
+# ---------------------------------------------------------------------------
+# The SSH implementation.
+# ---------------------------------------------------------------------------
+
+_STAGE_DIR = "/usr/data/nebulaos-hwagent"
+_LOCK_PATH = _STAGE_DIR + "/flash.lock"
+
+
+class SshDeviceSession(DeviceSession):
+    """Speaks to a real printer.
+
+    Construction requires an already-resolved address and an already-decided
+    credential: this class does not discover printers and does not choose
+    passwords. Both come from the enrolled device profile, so a caller cannot
+    point it somewhere by supplying a string.
+
+    Host key policy is STRICT. The enrolled profile supplies the expected host
+    key for the OS being addressed, it is written to a private known_hosts, and
+    StrictHostKeyChecking=yes means a changed key is a refusal rather than a
+    prompt. There is deliberately no accept-new anywhere: trust-on-first-use is
+    how a machine that moved onto a remembered lease gets flashed.
+    """
+
+    def __init__(self, address, username, password, known_hosts_path, connect_timeout=10):
+        self.address = address
+        self.username = username
+        self._password = password
+        self.known_hosts_path = known_hosts_path
+        self.connect_timeout = connect_timeout
+        self._askpass = None
+
+    # -- plumbing ----------------------------------------------------------
+    def _ensure_askpass(self):
+        """A private helper that prints the password.
+
+        The password never appears in argv, where every local user could read it
+        out of the process list. sshpass is not available in this environment and
+        setsid breaks stdout capture here, so SSH_ASKPASS is the mechanism -
+        the same one scripts/qa/display-live-capture.sh already uses.
+        """
+        if self._askpass:
+            return self._askpass
+        import tempfile
+        fd, path = tempfile.mkstemp(prefix=".nebulaos-askpass.")
+        os.fchmod(fd, 0o700)
+        with os.fdopen(fd, "w") as fh:
+            fh.write("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(self._password) + "\n")
+        self._askpass = path
+        return path
+
+    def _ssh_opts(self):
+        return [
+            "-o", "PreferredAuthentications=password",
+            "-o", "PubkeyAuthentication=no",
+            # STRICT. Not accept-new. See the class docstring.
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=%s" % self.known_hosts_path,
+            "-o", "ConnectTimeout=%d" % self.connect_timeout,
+            "-o", "BatchMode=no",
+        ]
+
+    def _run(self, script, timeout=120):
+        """Run a shell script composed BY THIS MODULE on the device.
+
+        Private by convention and by review: no method of DeviceSession exposes
+        it, so an agent has no route to it.
+        """
+        env = dict(os.environ)
+        env["SSH_ASKPASS"] = self._ensure_askpass()
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        argv = ["ssh"] + self._ssh_opts() + ["%s@%s" % (self.username, self.address), script]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            raise DeviceError("command timed out after %ds against %s" % (timeout, self.address))
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _scp(self, local_path, remote_path, timeout=900):
+        env = dict(os.environ)
+        env["SSH_ASKPASS"] = self._ensure_askpass()
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        argv = ["scp"] + self._ssh_opts() + [
+            local_path, "%s@%s:%s" % (self.username, self.address, remote_path)]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        except subprocess.TimeoutExpired:
+            raise DeviceError("transfer of %s timed out" % local_path)
+        if proc.returncode != 0:
+            raise DeviceError("transfer of %s failed: %s" % (local_path, proc.stderr.strip()[:300]))
+
+    def _kv(self, script, timeout=60):
+        rc, out, err = self._run(script, timeout=timeout)
+        if rc != 0:
+            raise DeviceError("probe failed (rc=%d): %s" % (rc, err.strip()[:300]))
+        result = {}
+        for line in out.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                result[k.strip()] = v.strip()
+        return result
+
+    # -- identity ----------------------------------------------------------
+    def probe_identity(self):
+        facts = self._kv(
+            "printf 'cid=%s\\n' \"$(cat /sys/block/mmcblk0/device/cid 2>/dev/null)\"; "
+            "printf 'snmac=%s\\n' \"$(dd if=/dev/mmcblk0p2 bs=1024 count=1 2>/dev/null "
+            "| sha256sum | cut -d' ' -f1)\"; "
+            "printf 'machine=%s\\n' \"$(cat /etc/machine-id 2>/dev/null)\"; "
+            "printf 'labels=%s\\n' \"$(ls /dev/disk/by-partlabel/ 2>/dev/null | tr '\\n' ',')\"")
+        return Identity(
+            emmc_cid=facts.get("cid") or None,
+            sn_mac_sha256=facts.get("snmac") or None,
+            machine_id=facts.get("machine") or None,
+            partlabels=[p for p in (facts.get("labels") or "").split(",") if p],
+        )
+
+    def which_os(self):
+        """Decided structurally, from files only one of the two images has.
+
+        Not from /etc/os-release or a hostname, both of which are strings a
+        misconfiguration could make lie.
+        """
+        rc, out, _ = self._run(
+            "if [ -f /etc/ota_marker.sh ] && [ -d /opt/nebulaos ]; then echo nebulaos; "
+            "elif [ -d /etc/ota_bin ]; then echo stock; else echo unknown; fi")
+        if rc != 0:
+            return OS_UNKNOWN
+        value = out.strip()
+        return value if value in (OS_NEBULAOS, OS_STOCK) else OS_UNKNOWN
+
+    def active_root(self):
+        rc, out, _ = self._run(
+            "cat /proc/cmdline | tr ' ' '\\n' | grep '^root=' | head -1 | cut -d= -f2-")
+        if rc != 0:
+            raise DeviceError("cannot read /proc/cmdline")
+        value = out.strip()
+        if value.startswith("PARTUUID=") or value.startswith("LABEL="):
+            rc2, out2, _ = self._run(
+                "readlink -f /dev/disk/by-%s/%s 2>/dev/null"
+                % ("partuuid" if value.startswith("PARTUUID=") else "label",
+                   value.split("=", 1)[1]))
+            if rc2 == 0 and out2.strip():
+                return out2.strip()
+        return value
+
+    def boot_id(self):
+        rc, out, _ = self._run("cat /proc/sys/kernel/random/boot_id 2>/dev/null")
+        return out.strip() if rc == 0 else ""
+
+    # -- marker ------------------------------------------------------------
+    def read_marker_block(self):
+        target = targets.resolve("ota")
+        rc, out, err = self._run(
+            "dd if=%s bs=512 count=1 2>/dev/null | od -An -tx1 -v" % target.device)
+        if rc != 0:
+            raise DeviceError("cannot read the marker partition: %s" % err.strip()[:200])
+        hexbytes = out.split()
+        if not hexbytes:
+            raise DeviceError("marker read returned nothing")
+        return bytes(int(h, 16) for h in hexbytes)
+
+    def write_marker(self, state):
+        if state not in (marker.KERNEL, marker.KERNEL2):
+            raise DeviceError("refusing to write marker state %r" % state)
+        running = self.which_os()
+        if running == OS_NEBULAOS:
+            # Through the on-device helper, so the PLR tombstone fires when the
+            # target is stock. That is the whole reason not to write the bytes
+            # directly from here: the helper is the only thing that tombstones
+            # the NebulaOS PLR journal on a switch away from NebulaOS.
+            #
+            # Its exit status is MEANINGLESS and is not checked. Both of its dd
+            # calls are `2>/dev/null` with unchecked status, and the function
+            # returns whatever its trailing sync/if block returned, so
+            # write_ota_marker cannot report failure. The read-back in
+            # _set_marker_verified is the only evidence that this landed.
+            self._run(". /etc/ota_marker.sh; write_ota_marker %s" % shlex.quote(state))
+        elif running == OS_STOCK:
+            # Stock's own helper is a TOGGLE with no argument, so it cannot be
+            # asked for a specific slot. Write the canonical bytes instead.
+            #
+            # The bytes are produced by nebulaos_marker.canonical() and shipped
+            # base64-encoded, so the 512-byte layout is never re-derived in
+            # shell. An earlier revision computed canonical(state), threw it
+            # away, and rebuilt the same format with `printf '%s\n\n'` plus a
+            # seek/count zero-fill - a second implementation of the one thing
+            # nebulaos_marker exists to own, and one that would drift silently.
+            import base64
+            payload = base64.b64encode(marker.canonical(state)).decode("ascii")
+            self._run(
+                "printf '%%s' %s | base64 -d | dd of=%s bs=512 count=1 conv=fsync 2>/dev/null; sync"
+                % (shlex.quote(payload), targets.resolve("ota").device))
+            # No rc check here, deliberately. The dd is silenced and a remote
+            # shell's exit status reflects the last command, so it is not
+            # evidence either way. The read-back in the caller is the only
+            # evidence that this landed - see _set_marker_verified.
+        else:
+            raise DeviceError("refusing to write the marker from an unidentified OS")
+        # Drop caches so the read-back comes from the device, not the page cache.
+        self._run("sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; true")
+        return True
+
+    # -- safety facts ------------------------------------------------------
+    def idle_state(self):
+        rc, out, _ = self._run(
+            "curl -s --max-time 5 http://127.0.0.1:7125/printer/objects/query"
+            "?print_stats\\&extruder\\&heater_bed 2>/dev/null")
+        printing = paused = False
+        heaters = {}
+        klippy = "unknown"
+        if rc == 0 and out.strip():
+            import json
+            try:
+                data = json.loads(out).get("result", {}).get("status", {})
+                state = (data.get("print_stats") or {}).get("state", "")
+                printing = state == "printing"
+                paused = state == "paused"
+                for name in ("extruder", "heater_bed"):
+                    obj = data.get(name) or {}
+                    if "target" in obj:
+                        heaters[name] = obj["target"]
+            except (ValueError, AttributeError):
+                pass
+        info = self._kv("printf 'k=%s\\n' \"$(curl -s --max-time 5 "
+                        "http://127.0.0.1:7125/server/info 2>/dev/null "
+                        "| sed -n 's/.*\"klippy_state\": *\"\\([a-z]*\\)\".*/\\1/p')\"")
+        klippy = info.get("k") or "unknown"
+        if not heaters:
+            # No answer is not evidence of zero. Report it as unknown-and-unsafe
+            # by putting a sentinel target in, so is_idle() is False.
+            heaters = {"unreadable": 1}
+        return IdleState(printing, paused, heaters, klippy,
+                         detail="moonraker query" if rc == 0 else "moonraker unreachable")
+
+    def service_health(self):
+        facts = self._kv(
+            "for s in klipper moonraker guppyscreen nginx; do "
+            "  if pgrep -f \"$s\" >/dev/null 2>&1; then printf '%s=running\\n' \"$s\"; "
+            "  else printf '%s=stopped\\n' \"$s\"; fi; done; "
+            "printf 'moonraker_http=%s\\n' \"$(curl -s -o /dev/null -w '%{http_code}' "
+            "--max-time 5 http://127.0.0.1:7125/server/info 2>/dev/null)\"; "
+            "printf 'web_http=%s\\n' \"$(curl -s -o /dev/null -w '%{http_code}' "
+            "--max-time 5 http://127.0.0.1/ 2>/dev/null)\"")
+        return facts
+
+    def mcu_state(self):
+        return self._kv(
+            "printf 'mcu_guard_restore=%s\\n' \"$(grep -c 'MCU_RESTORE' /var/log/messages 2>/dev/null || echo 0)\"; "
+            "printf 'stock_updater_marker=%s\\n' \"$(ls /usr/data/.mcu_updated 2>/dev/null "
+            "&& echo present || echo absent)\"; "
+            "printf 'mcu_serial=%s\\n' \"$(ls /dev/serial/by-id/ 2>/dev/null | head -1)\"")
+
+    def stock_wayout_facts(self):
+        return self._kv(
+            "printf 'dropbear=%s\\n' \"$(ls /etc/init.d/ 2>/dev/null | grep -ci dropbear)\"; "
+            "printf 'wpa_conf=%s\\n' \"$([ -f /usr/data/wpa_supplicant.conf ] "
+            "|| [ -f /etc/wpa_supplicant.conf ] && echo present || echo absent)\"; "
+            "printf 'stock_rootfs=%s\\n' \"$([ -b /dev/mmcblk0p7 ] && echo present || echo absent)\"; "
+            "printf 'stock_kernel=%s\\n' \"$([ -b /dev/mmcblk0p5 ] && echo present || echo absent)\"; "
+            "printf 'shadow=%s\\n' \"$(dd if=/dev/mmcblk0p7 bs=1M count=8 2>/dev/null "
+            "| strings | grep -c '^root:' )\"; "
+            "printf 'free_kib=%s\\n' \"$(df -k /usr/data | awk 'NR==2{print $4}')\"")
+
+    # -- payload -----------------------------------------------------------
+    def free_space(self, path):
+        facts = self._kv("printf 'free=%%s\\n' \"$(df -k %s | awk 'NR==2{print $4}')\"" % shlex.quote(path))
+        try:
+            return int(facts.get("free", "0")) * 1024
+        except ValueError:
+            return 0
+
+    def stage_file(self, local_path, name):
+        self._run("mkdir -p %s" % _STAGE_DIR)
+        remote = "%s/%s" % (_STAGE_DIR, name)
+        self._scp(local_path, remote)
+        return self.staged_sha256(name)
+
+    def staged_sha256(self, name):
+        facts = self._kv("printf 'sha=%%s\\n' \"$(sha256sum %s/%s 2>/dev/null | cut -d' ' -f1)\""
+                         % (_STAGE_DIR, shlex.quote(name)))
+        return facts.get("sha", "")
+
+    def apply_write_plans(self, plans, manifest_name):
+        """Delegate to scripts/flash-spare-slot.sh, which owns slot-2 writes.
+
+        Not reimplemented here. That script carries the live-target collision
+        refusal, the partlabel and major/minor checks, the capacity checks and
+        the post-write read-back, and it has its own offline test suite. A second
+        implementation would be a second thing to keep correct.
+
+        The plans are still validated here first, so the write that reaches it
+        has been through the target/policy layer.
+        """
+        for plan in plans:
+            if plan.target.name not in ("kernel2", "rootfs2"):
+                raise DeviceError(
+                    "the on-device flash helper is specialised for slot 2; %s needs the "
+                    "generic backend, which this session does not expose"
+                    % plan.target.name)
+        rc, out, err = self._run(
+            "sh %s/flash-spare-slot.sh %s/xImage %s/rootfs.squashfs %s/%s"
+            % (_STAGE_DIR, _STAGE_DIR, _STAGE_DIR, _STAGE_DIR, shlex.quote(manifest_name)),
+            timeout=1800)
+        return rc == 0, out + err
+
+    def region_sha256(self, target_name, length):
+        target = targets.resolve(target_name)
+        if length <= 0 or length > target.size:
+            raise DeviceError("region length %d is outside %s (capacity %d)"
+                              % (length, target_name, target.size))
+        facts = self._kv(
+            "printf 'sha=%%s\\n' \"$(dd if=%s bs=1M count=%d 2>/dev/null | head -c %d "
+            "| sha256sum | cut -d' ' -f1)\""
+            % (target.device, (length + 1048575) // 1048576, length), timeout=600)
+        return facts.get("sha", "")
+
+    # -- lifecycle ---------------------------------------------------------
+    def reboot(self):
+        self._run("sync; (sleep 1; reboot) >/dev/null 2>&1 &")
+        return True
+
+    def acquire_flash_lock(self, owner):
+        rc, out, _ = self._run(
+            "mkdir -p %s; if mkdir %s.d 2>/dev/null; then printf '%%s' %s > %s; echo ACQUIRED; "
+            "else printf 'HELD=%%s\\n' \"$(cat %s 2>/dev/null)\"; fi"
+            % (_STAGE_DIR, _LOCK_PATH, shlex.quote(owner), _LOCK_PATH, _LOCK_PATH))
+        if "ACQUIRED" in out:
+            return True, owner
+        holder = ""
+        for line in out.splitlines():
+            if line.startswith("HELD="):
+                holder = line.split("=", 1)[1]
+        return False, holder
+
+    def release_flash_lock(self, owner):
+        self._run("if [ \"$(cat %s 2>/dev/null)\" = %s ]; then rm -rf %s.d %s; fi"
+                  % (_LOCK_PATH, shlex.quote(owner), _LOCK_PATH, _LOCK_PATH))
+        return True
+
+    def close(self):
+        if self._askpass:
+            try:
+                os.unlink(self._askpass)
+            except OSError:
+                pass
+            self._askpass = None
