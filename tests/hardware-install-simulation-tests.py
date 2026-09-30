@@ -996,6 +996,47 @@ def case_scp_uses_legacy_protocol():
           argv[:2] == ["scp", "-O"], str(argv[:3]))
 
 
+def case_service_probe_without_pgrep():
+    """Found on the first real DEV_INSTALL: the image has no pgrep.
+
+    Runs the exact service_health() shell text with a fake BusyBox-style `ps`
+    on PATH and no pgrep at all.
+    """
+    root = tempfile.mkdtemp(prefix="svcprobe.")
+    try:
+        bin_dir = os.path.join(root, "bin"); os.makedirs(bin_dir)
+        def facts(ps_lines):
+            with open(os.path.join(bin_dir, "ps"), "w") as fh:
+                fh.write("#!/bin/sh\ncat <<'EOF'\n  PID USER       VSZ STAT COMMAND\n%s\nEOF\n" % ps_lines)
+            os.chmod(os.path.join(bin_dir, "ps"), 0o755)
+            with open(os.path.join(bin_dir, "curl"), "w") as fh:
+                fh.write("#!/bin/sh\nprintf 000\n")
+            os.chmod(os.path.join(bin_dir, "curl"), 0o755)
+            captured = {}
+            class _S(device.SshDeviceSession):
+                def __init__(self):
+                    pass
+                def _kv(self, cmd):
+                    captured["cmd"] = cmd
+                    return {}
+            _S().service_health()
+            out = subprocess.run(["sh", "-c", captured["cmd"]], capture_output=True, text=True,
+                                 env=dict(os.environ, PATH=bin_dir + ":/usr/bin:/bin")).stdout
+            return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+        up = facts("  812 root      9M S    nginx: master process /usr/sbin/nginx\n"
+                   " 1203 root     60M S    /usr/data/nebulaos/envs/klipper/bin/python klippy/klippy.py")
+        check("service probe: nginx running is seen without pgrep", up.get("nginx") == "running", str(up))
+        check("service probe: klippy running is seen", up.get("klipper") == "running", str(up))
+        check("service probe: absent services read stopped",
+              up.get("moonraker") == "stopped" and up.get("guppyscreen") == "stopped", str(up))
+        none = facts("    1 root      1M S    init")
+        check("service probe: does not match its own command line",
+              all(none.get(k) == "stopped" for k in ("klipper", "moonraker", "guppyscreen", "nginx")),
+              str(none))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def case_new_image_will_not_boot():
     fx, root = scenario("noboot")
     try:
@@ -1433,6 +1474,7 @@ def case_no_raw_surface():
 SCENARIOS = [
     ("capability vs policy", case_capability_vs_policy),
     ("scp uses the legacy protocol", case_scp_uses_legacy_protocol),
+    ("service probe works without pgrep", case_service_probe_without_pgrep),
     ("DEV_INSTALL end to end (no attestation)", case_dev_install_end_to_end),
     ("closed vocabulary", case_no_raw_surface),
     ("control provenance", case_control_provenance),

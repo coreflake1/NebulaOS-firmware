@@ -516,9 +516,16 @@ class SshDeviceSession(DeviceSession):
 
     def service_health(self):
         facts = self._kv(
-            "for s in klipper moonraker guppyscreen nginx; do "
-            "  if pgrep -f \"$s\" >/dev/null 2>&1; then printf '%s=running\\n' \"$s\"; "
-            "  else printf '%s=stopped\\n' \"$s\"; fi; done; "
+            # BusyBox `ps w` (NebulaOS's BusyBox has no pgrep - found on the first
+            # real DEV_INSTALL of the Buildroot 2025 image, where every service
+            # read "stopped" while nginx was serving HTTP 200). The bracketed
+            # patterns cannot match this probe's own command line.
+            "P=$(ps w 2>/dev/null); "
+            "for pair in 'klipper:[k]lippy' 'moonraker:[m]oonraker' "
+            "'guppyscreen:[g]uppyscreen' 'nginx:[n]ginx'; do "
+            "  n=${pair%%:*}; pat=${pair#*:}; "
+            "  if printf '%s\\n' \"$P\" | grep -q \"$pat\"; then printf '%s=running\\n' \"$n\"; "
+            "  else printf '%s=stopped\\n' \"$n\"; fi; done; "
             "printf 'moonraker_http=%s\\n' \"$(curl -s -o /dev/null -w '%{http_code}' "
             "--max-time 5 http://127.0.0.1:7125/server/info 2>/dev/null)\"; "
             "printf 'web_http=%s\\n' \"$(curl -s -o /dev/null -w '%{http_code}' "
@@ -528,7 +535,13 @@ class SshDeviceSession(DeviceSession):
     def mcu_state(self):
         return self._kv(
             mcu_restore_probe_cmd() + "; " + STOCK_MCU_UPDATE_PROBE + "; "
-            "printf 'mcu_serial=%s\\n' \"$(ls /dev/serial/by-id/ 2>/dev/null | head -1)\"")
+            # The KE's MCU is on a UART (/dev/ttyS1, machine.cfg [mcu] serial), so
+            # /dev/serial/by-id (USB only) never lists it. Presence is what Klipper
+            # itself reports: the MCU's firmware version via Moonraker.
+            "printf 'mcu_uart=%s\\n' \"$([ -c /dev/ttyS1 ] && echo present || echo absent)\"; "
+            "printf 'mcu_serial=%s\\n' \"$(curl -s --max-time 5 "
+            "'http://127.0.0.1:7125/printer/objects/query?mcu' 2>/dev/null "
+            "| sed -n 's/.*\"mcu_version\": *\"\\([^\"]*\\)\".*/\\1/p')\"")
 
     def stock_wayout_facts(self):
         # Facts about STOCK are read from stock's own root filesystem, not from

@@ -318,10 +318,12 @@ def op_verify(args):
     artifacts, _ = locate_artifacts(args.source_head, args.ximage_sha, args.rootfs_sha)
 
     factory = ssh_session_factory(profile)
+    tried = []
     for address in profiles.candidate_addresses(profile, device.OS_NEBULAOS):
         try:
             session = factory(device.OS_NEBULAOS, address)
-        except Exception:
+        except Exception as exc:                  # noqa: BLE001 - try the next address
+            tried.append("%s: %s" % (address, str(exc)[:120]))
             continue
         try:
             result = verifylib.part1_verify(
@@ -331,9 +333,16 @@ def op_verify(args):
             mcu = verifylib.observe_mcu_restore(session)
             say(verifylib.render_part1(result, args.source_head, mcu_restore_result=mcu))
             return 0 if result.ok() else 1
+        except device.DeviceError as exc:
+            # Unreachable or dropped mid-probe (the first real run hit "No route
+            # to host" on a Wi-Fi that was still waking): try the next enrolled
+            # address, and end in a clean refusal rather than a traceback.
+            tried.append("%s: %s" % (address, str(exc)[:120]))
+            continue
         finally:
             session.close()
-    raise AgentRefusal("could not reach the enrolled printer as NebulaOS at any enrolled address")
+    raise AgentRefusal("could not reach the enrolled printer as NebulaOS at any enrolled address. "
+                       "Tried: %s" % (" | ".join(tried) or "none"))
 
 
 def _mode_summary(mode, control_commit, source_head):

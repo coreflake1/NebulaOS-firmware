@@ -265,7 +265,8 @@ def part1_verify(session, expected_ximage_sha, expected_ximage_size,
     # --- MCU --------------------------------------------------------------
     mcu = session.mcu_state()
     result.add("the MCU is present", bool(mcu.get("mcu_serial")),
-               "serial: %s" % (mcu.get("mcu_serial") or "none"))
+               "Klipper reports mcu_version=%s (UART /dev/ttyS1 %s)"
+               % (mcu.get("mcu_serial") or "none", mcu.get("mcu_uart", "unknown")))
 
     # THE MCU COST OF THIS INSTALL.
     #
