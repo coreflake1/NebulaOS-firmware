@@ -69,7 +69,15 @@ mkdir -p -m 0700 "$HOME_DIR" "$HOME_DIR/devices" "$PDIR" || die "cannot create $
 chmod 0700 "$HOME_DIR" "$HOME_DIR/devices" "$PDIR"
 
 echo "== reading the host key at $ADDRESS =="
-HOSTKEY=$(ssh-keyscan -t ed25519 -T 10 "$ADDRESS" 2>/dev/null | grep -v '^#' | head -1 | cut -d' ' -f2-)
+# Strongest key type the device actually serves. Stock's older dropbear has no
+# ed25519 host key, so an ed25519-only scan found nothing on stock. The pinned
+# value keeps its type prefix ("<type> <base64>") and is written verbatim into a
+# one-line known_hosts, so any type works with StrictHostKeyChecking=yes.
+HOSTKEY=""
+for KT in ed25519 ecdsa rsa; do
+  HOSTKEY=$(ssh-keyscan -t "$KT" -T 10 "$ADDRESS" 2>/dev/null | grep -v '^#' | head -1 | cut -d' ' -f2-)
+  [ -n "$HOSTKEY" ] && break
+done
 [ -n "$HOSTKEY" ] || die "no SSH host key at $ADDRESS - is the printer up and running $WHICH?"
 echo "   $HOSTKEY"
 echo
