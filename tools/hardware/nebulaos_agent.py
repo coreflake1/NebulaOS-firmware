@@ -120,6 +120,23 @@ def locate_artifacts(source_head, ximage_sha, rootfs_sha):
 # preconditions
 # ---------------------------------------------------------------------------
 
+def resolve_control_dev(control_commit):
+    """DEV_INSTALL: CONTROL_HEAD from the local repository's commit objects.
+
+    Helper bytes still come from a commit (never the working tree), and the
+    executing host modules must still equal that commit - but there is no
+    protected mirror and no publication requirement. CONTROL_HEAD may be any
+    local commit; changing it never touches PRODUCT_HEAD's artifacts.
+    """
+    source = control.LocalControlSource(FW_ROOT)
+    if not source.commit_exists(control_commit):
+        raise AgentRefusal("CONTROL_HEAD %s is not a commit in %s" % (control_commit, FW_ROOT))
+    try:
+        return control.ControlSet.load(source, control_commit, require_published=False)
+    except control.ControlError as exc:
+        raise AgentRefusal(str(exc))
+
+
 def resolve_control(control_commit, refresh=True):
     """Resolve control commit C from the protected mirror."""
     import subprocess
@@ -149,9 +166,14 @@ def prove_preconditions(device_id, source_head, artifacts, build_run, control_co
 
     profile = profiles.DeviceProfile.load(device_id)
     say(profile.describe())
+    mode = profile.install_mode()
+    say("INSTALL_MODE=%s" % mode.upper())
     say()
 
-    control_set = resolve_control(control_commit)
+    if mode == "dev":
+        control_set = resolve_control_dev(control_commit)
+    else:
+        control_set = resolve_control(control_commit)
     say(control_set.describe())
 
     # Host control code must BE control commit C. On-device helpers are read
@@ -170,6 +192,21 @@ def prove_preconditions(device_id, source_head, artifacts, build_run, control_co
 
     if not destructive:
         return profile, control_set, None
+
+    if mode == "dev":
+        # DEV_INSTALL: the product is proven by its own build record and build
+        # manifest agreeing with the bytes. No HMAC attestation, no publication
+        # gate (reported for the record only), no rebuild when CONTROL_HEAD moves.
+        try:
+            published, why = evidence.product_is_published(FW_ROOT, source_head)
+        except Exception as exc:                      # noqa: BLE001 - informational
+            published, why = False, "not checked (%s)" % type(exc).__name__
+        say("PRODUCT_PUBLISHED=%s (%s; informational in DEV_INSTALL)"
+            % ("YES" if published else "NO", why))
+        ev = evidence.require_dev_product(source_head, build_run, artifacts)
+        say(ev.describe())
+        say()
+        return profile, control_set, ev
 
     published, why = evidence.product_is_published(FW_ROOT, source_head)
     if not published:
@@ -299,11 +336,27 @@ def op_verify(args):
     raise AgentRefusal("could not reach the enrolled printer as NebulaOS at any enrolled address")
 
 
+def _mode_summary(mode, control_commit, source_head):
+    say("INSTALL_MODE=%s" % mode.upper())
+    say("DEV_INSTALL=%s" % ("YES" if mode == "dev" else "NO"))
+    say("RELEASE_INSTALL=%s" % ("YES" if mode == "release" else "NO"))
+    if mode == "dev":
+        say("RELEASE_QUALIFIED=NO")
+    say("HARDWARE_QUALIFIED=NO")
+    say("PRODUCT_HEAD=%s" % source_head)
+    say("CONTROL_HEAD=%s" % control_commit)
+
+
 def op_install(args):
     artifacts, build_run = locate_artifacts(args.source_head, args.ximage_sha, args.rootfs_sha)
     profile, control_set, ev = prove_preconditions(
         args.device, args.source_head, artifacts, build_run, args.control_commit,
         destructive=True)
+    mode = profile.install_mode()
+    say("=== %s ===" % ("DEV_INSTALL (development printer; NOT a release qualification)"
+                        if mode == "dev" else "RELEASE_INSTALL"))
+    _mode_summary(mode, control_set.commit, args.source_head)
+    say()
 
     with journal.HostLock(args.device):
         txn = journal.Transaction.open(args.device)
@@ -353,6 +406,8 @@ def op_install(args):
             _say_power_cycle_warning(txn)
             return 3
         say(result.render())
+        say()
+        _mode_summary(mode, control_set.commit, args.source_head)
         return 0 if result.ok else 1
 
 

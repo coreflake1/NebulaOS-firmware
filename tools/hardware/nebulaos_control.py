@@ -174,6 +174,36 @@ class ControlMirror:
         return proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
 
 
+class LocalControlSource:
+    """DEV_INSTALL's control source: CONTROL_HEAD's git objects in the local repo.
+
+    Same interface as ControlMirror, so ControlSet reads helper bytes from
+    commit objects (never the working tree) either way. It is NOT the protected
+    mirror and asserts no publication: that is exactly what RELEASE_INSTALL adds.
+    """
+
+    def __init__(self, repo_root):
+        self.path = repo_root
+        self.origin = "local:" + repo_root
+
+    def exists(self):
+        return os.path.isdir(os.path.join(self.path, ".git")) or \
+            os.path.isfile(os.path.join(self.path, ".git"))
+
+    def commit_exists(self, commit):
+        proc = _git(["-C", self.path, "cat-file", "-e", "%s^{commit}" % commit], check=False)
+        return proc.returncode == 0
+
+    def is_published(self, commit):
+        return False, "publication is not asserted for a DEV_INSTALL control source"
+
+    def read_blob(self, commit, path):
+        proc = _git(["-C", self.path, "cat-file", "blob", "%s:%s" % (commit, path)], check=False)
+        if proc.returncode != 0:
+            raise ControlError("no blob at %s:%s in the local repository" % (commit[:12], path))
+        return proc.stdout
+
+
 class ControlSet:
     """The privileged helpers at one control commit, verified against their pins."""
 

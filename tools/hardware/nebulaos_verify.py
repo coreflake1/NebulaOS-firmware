@@ -93,6 +93,11 @@ def stock_wayout_proof(session, profile, payload_bytes_needed):
                facts.get("stock_rootfs") == "present",
                "slot 1 rootfs must be present to boot into")
 
+    # Everything below is read from slot 1's own rootfs, mounted read-only.
+    result.add("the stock rootfs (p7) could be mounted read-only for inspection",
+               facts.get("stock_mount") == "mounted",
+               "a stock rootfs that cannot be inspected cannot be proven usable")
+
     # A stock rootfs with no root entry in its shadow file is one we cannot log
     # into, which makes it useless as a way out even though it boots.
     try:
@@ -101,19 +106,22 @@ def stock_wayout_proof(session, profile, payload_bytes_needed):
         shadow_hits = 0
     result.add("the stock rootfs carries a root account",
                shadow_hits > 0,
-               "found %d root entries in the first 8 MiB of slot 1" % shadow_hits)
+               "root entries in stock's /etc/shadow: %d" % shadow_hits)
 
     try:
-        dropbear = int(facts.get("dropbear", "0"))
+        ssh_init = int(facts.get("stock_ssh_init", "0"))
     except ValueError:
-        dropbear = 0
+        ssh_init = 0
+    ssh_bin = facts.get("stock_ssh_binary") == "1"
     result.add("stock has an SSH daemon to come back on",
-               dropbear > 0,
-               "dropbear init scripts found: %d" % dropbear)
+               ssh_init > 0 and ssh_bin,
+               "in stock's rootfs: %d SSH init script(s), daemon binary %s"
+               % (ssh_init, "present" if ssh_bin else "ABSENT"))
 
     result.add("stock has a Wi-Fi configuration to rejoin the network with",
                facts.get("wpa_conf") == "present",
-               "without it stock boots with no network and cannot be reached")
+               "/usr/data/wpa_supplicant.conf (the file stock's wpa_supplicant runs with) "
+               "must hold an ssid; without it stock boots with no network and cannot be reached")
 
     # The enrolled profile must already know how to talk to stock. Discovering
     # that after the reboot is discovering it too late.

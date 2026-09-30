@@ -528,14 +528,33 @@ class SshDeviceSession(DeviceSession):
             "printf 'mcu_serial=%s\\n' \"$(ls /dev/serial/by-id/ 2>/dev/null | head -1)\"")
 
     def stock_wayout_facts(self):
+        # Facts about STOCK are read from stock's own root filesystem, not from
+        # the running NebulaOS system: /etc here is NebulaOS's, which ships its
+        # own dropbear script, so an earlier revision's "stock has an SSH
+        # daemon" check could never fail. Slot 1's rootfs (p7) is a squashfs; it
+        # is mounted READ-ONLY in a private temporary directory and unmounted
+        # before this returns. A mount that fails yields zeros - fail closed.
+        # Wi-Fi: stock's wpa_supplicant runs with /usr/data/wpa_supplicant.conf
+        # on the shared data partition (its /proc/<pid>/cmdline, FIRMWARE.md);
+        # stock's /etc/wpa_supplicant.conf is an unused template.
         return self._kv(
-            "printf 'dropbear=%s\\n' \"$(ls /etc/init.d/ 2>/dev/null | grep -ci dropbear)\"; "
-            "printf 'wpa_conf=%s\\n' \"$([ -f /usr/data/wpa_supplicant.conf ] "
-            "|| [ -f /etc/wpa_supplicant.conf ] && echo present || echo absent)\"; "
+            "m=$(mktemp -d /tmp/.nebulaos-stockro.XXXXXX); "
+            "if [ -n \"$m\" ] && mount -t squashfs -o ro /dev/mmcblk0p7 \"$m\" 2>/dev/null; then "
+            "ok=mounted; "
+            "i=$(ls \"$m/etc/init.d\" 2>/dev/null | grep -ciE 'dropbear|sshd'); "
+            "b=0; for x in usr/sbin/dropbear usr/bin/dropbear sbin/dropbear usr/sbin/sshd; do "
+            "[ -x \"$m/$x\" ] && b=1; done; "
+            "s=$(grep -c '^root:' \"$m/etc/shadow\" 2>/dev/null); "
+            "umount \"$m\"; else ok=failed; i=0; b=0; s=0; fi; "
+            "[ -n \"$m\" ] && rmdir \"$m\" 2>/dev/null; "
+            "printf 'stock_mount=%s\\n' \"$ok\"; "
+            "printf 'stock_ssh_init=%s\\n' \"${i:-0}\"; "
+            "printf 'stock_ssh_binary=%s\\n' \"$b\"; "
+            "printf 'shadow=%s\\n' \"${s:-0}\"; "
+            "printf 'wpa_conf=%s\\n' \"$([ -s /usr/data/wpa_supplicant.conf ] "
+            "&& grep -q 'ssid=' /usr/data/wpa_supplicant.conf && echo present || echo absent)\"; "
             "printf 'stock_rootfs=%s\\n' \"$([ -b /dev/mmcblk0p7 ] && echo present || echo absent)\"; "
             "printf 'stock_kernel=%s\\n' \"$([ -b /dev/mmcblk0p5 ] && echo present || echo absent)\"; "
-            "printf 'shadow=%s\\n' \"$(dd if=/dev/mmcblk0p7 bs=1M count=8 2>/dev/null "
-            "| strings | grep -c '^root:' )\"; "
             "printf 'free_kib=%s\\n' \"$(df -k /usr/data | awk 'NR==2{print $4}')\"")
 
     # -- payload -----------------------------------------------------------

@@ -779,6 +779,199 @@ def case_stock_update_log_probe():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_stock_wayout_reads_stock():
+    """F4: the real way-out probe inspects STOCK's rootfs, not the running system.
+
+    Runs the exact shell text with fake mount/umount on PATH that populate the
+    mount point from a fixture stock tree, so the probe's own logic is tested.
+    """
+    root = tempfile.mkdtemp(prefix="wayout.")
+    try:
+        bin_dir = os.path.join(root, "bin"); os.makedirs(bin_dir)
+        def tree(with_ssh):
+            t = os.path.join(root, "stock-%s" % with_ssh)
+            os.makedirs(os.path.join(t, "etc", "init.d"), exist_ok=True)
+            os.makedirs(os.path.join(t, "usr", "sbin"), exist_ok=True)
+            with open(os.path.join(t, "etc", "shadow"), "w") as fh:
+                fh.write("root:$1$x$y:1:0:99999:7:::\n")
+            if with_ssh:
+                open(os.path.join(t, "etc", "init.d", "S50dropbear"), "w").close()
+                d = os.path.join(t, "usr", "sbin", "dropbear")
+                open(d, "w").close(); os.chmod(d, 0o755)
+            return t
+        def facts(fixture, mount_ok=True):
+            with open(os.path.join(bin_dir, "mount"), "w") as fh:
+                fh.write("#!/bin/sh\n" + ("for a; do d=$a; done; cp -R %s/. \"$d\"\n" % fixture
+                                            if mount_ok else "exit 32\n"))
+            with open(os.path.join(bin_dir, "umount"), "w") as fh:
+                fh.write("#!/bin/sh\nrm -rf \"$1\"/* \"$1\"/.[!.]* 2>/dev/null; exit 0\n")
+            for n in ("mount", "umount"):
+                os.chmod(os.path.join(bin_dir, n), 0o755)
+            before = set(os.listdir("/tmp"))
+            out = subprocess.run(
+                ["sh", "-c", _wayout_cmd()], capture_output=True, text=True,
+                env=dict(os.environ, PATH=bin_dir + ":" + os.environ.get("PATH", ""))).stdout
+            leaked = [n for n in set(os.listdir("/tmp")) - before if n.startswith(".nebulaos-stockro")]
+            return dict(l.split("=", 1) for l in out.splitlines() if "=" in l), leaked
+        good, leaked = facts(tree(True))
+        check("way-out: stock rootfs mounted read-only and inspected", good.get("stock_mount") == "mounted")
+        check("way-out: SSH init script and daemon found IN STOCK's rootfs",
+              good.get("stock_ssh_init") == "1" and good.get("stock_ssh_binary") == "1", str(good))
+        check("way-out: root account found in stock's shadow", good.get("shadow") == "1")
+        check("way-out: the temporary mount point is removed", not leaked, str(leaked))
+        nossh, _ = facts(tree(False))
+        check("way-out: a stock rootfs without an SSH daemon is reported as such",
+              nossh.get("stock_ssh_init") == "0" and nossh.get("stock_ssh_binary") == "0", str(nossh))
+        bad, leaked = facts(tree(True), mount_ok=False)
+        check("way-out: a mount failure fails closed (zeros, not 'present')",
+              bad.get("stock_mount") == "failed" and bad.get("stock_ssh_init") == "0"
+              and bad.get("shadow") == "0" and not leaked, str(bad))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _wayout_cmd():
+    """The exact command text SshDeviceSession.stock_wayout_facts sends."""
+    captured = {}
+    class _S(device.SshDeviceSession):
+        def __init__(self):
+            pass
+        def _kv(self, cmd):
+            captured["cmd"] = cmd
+            return {}
+    _S().stock_wayout_facts()
+    return captured["cmd"]
+
+
+def case_dev_install_end_to_end():
+    """DEV_INSTALL through the real agent op_install, with NO attestation key.
+
+    Proves: the dev path needs only the build record + manifest agreeing with
+    the bytes; it writes kernel2/rootfs2 only; stock is untouched; it reports
+    DEV_INSTALL=YES / RELEASE_QUALIFIED=NO / HARDWARE_QUALIFIED=NO; a changed
+    CONTROL_HEAD does not require a new PRODUCT_HEAD; and the release path is
+    not weakened (a release-mode profile gets no dev shortcut).
+    """
+    import argparse
+    import contextlib
+    import io
+    import nebulaos_agent as agent
+
+    saved = (agent.FW_ROOT, agent.BUILD_BASE, agent.ssh_session_factory, agent.install.Installer)
+    os.environ.pop("NEBULAOS_ATTEST_KEY", None)
+    fx, root = scenario("devinstall")
+    try:
+        os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "jstate")
+        # The build workspace, laid out exactly as the build launcher leaves it.
+        base = os.path.join(root, "builds")
+        run = os.path.join(base, SOURCE_HEAD, "run-1")
+        art = os.path.join(run, "artifacts", "buildroot-halley5-v30-image")
+        os.makedirs(art)
+        a = fx.artifacts
+        shutil.copyfile(fx.ximage_path, os.path.join(art, "xImage"))
+        shutil.copyfile(fx.rootfs_path, os.path.join(art, "rootfs.squashfs"))
+        def write_evidence(manifest_x=None, record_head=None):
+            with open(os.path.join(art, "build-manifest.txt"), "w") as fh:
+                fh.write("git_commit_main=%s\nxImage_sha256=%s\nxImage_size=%d\n"
+                         "rootfs_squashfs_sha256=%s\nrootfs_squashfs_size=%d\n"
+                         % (SOURCE_HEAD, manifest_x or a.ximage_sha, a.ximage_size,
+                            a.rootfs_sha, a.rootfs_size))
+            with open(os.path.join(run, ".nebulaos-build-verified"), "w") as fh:
+                fh.write("BUILD_VERIFIED=YES\nSOURCE_HEAD=%s\nBUILD_MODE=candidate\n"
+                         "XIMAGE_SHA256=%s\nROOTFS_SQUASHFS_SHA256=%s\n"
+                         % (record_head or SOURCE_HEAD, a.ximage_sha, a.rootfs_sha))
+        conf = os.path.join(os.environ[profiles.ENV_HOME], "devices", "printer-sim", "profile.conf")
+        base_conf = open(conf).read()
+        def set_mode(mode):
+            with open(conf, "w") as fh:
+                fh.write(base_conf + ("INSTALL_MODE=%s\n" % mode if mode else ""))
+            os.chmod(conf, 0o600)
+
+        agent.FW_ROOT = fx.control_work          # CONTROL_HEAD lives in a local repo
+        agent.BUILD_BASE = base
+        agent.ssh_session_factory = lambda profile: sim.make_session_factory(fx.printer, profile)
+        real_installer = saved[3]
+        agent.install.Installer = lambda *ar, **kw: real_installer(
+            *ar, **dict(kw, sleep=lambda _s: None, now=_FakeClock()))
+
+        def run_op(control_commit):
+            ns = argparse.Namespace(device="printer-sim", control_commit=control_commit,
+                                    source_head=SOURCE_HEAD, ximage_sha=a.ximage_sha,
+                                    rootfs_sha=a.rootfs_sha, op="install")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    rc = agent.op_install(ns)
+                except (agent.AgentRefusal, evidence.EvidenceError, profiles.ProfileError,
+                        control.ControlError) as exc:
+                    print("REFUSED: %s" % exc)
+                    rc = 2
+            return rc, buf.getvalue()
+
+        stock_before = (fx.printer.partitions.get("kernel"), fx.printer.partitions.get("rootfs"))
+
+        # -- negative: product evidence disagreeing with the bytes -------------
+        set_mode("dev")
+        write_evidence(manifest_x="0" * 64)
+        rc, out = run_op(fx.control_commit)
+        check("DEV: a manifest that disagrees with the bytes is refused",
+              rc != 0 and "manifest's xImage hash" in out, out[-300:])
+        check("DEV: nothing was written after that refusal",
+              not fx.printer.partitions.get("kernel2"), "kernel2 written")
+        write_evidence(record_head="f" * 40)
+        rc, out = run_op(fx.control_commit)
+        check("DEV: a build record naming another commit is refused",
+              rc != 0 and "names PRODUCT_HEAD" in out, out[-300:])
+
+        # -- negative: an invalid mode value ------------------------------------
+        write_evidence()
+        set_mode("yolo")
+        rc, out = run_op(fx.control_commit)
+        check("an invalid INSTALL_MODE is refused", rc != 0 and "INSTALL_MODE" in out, out[-200:])
+
+        # -- the release path is not weakened -----------------------------------
+        set_mode(None)
+        rc, out = run_op(fx.control_commit)
+        check("RELEASE (no INSTALL_MODE) does not take the dev shortcut: refused here",
+              rc != 0 and not fx.printer.partitions.get("kernel2"), out[-300:])
+
+        # -- the happy path, no attestation key anywhere ------------------------
+        set_mode("dev")
+        rc, out = run_op(fx.control_commit)
+        check("DEV_INSTALL succeeds with no attestation key", rc == 0, out[-600:])
+        for line in ("DEV_INSTALL=YES", "RELEASE_QUALIFIED=NO", "HARDWARE_QUALIFIED=NO",
+                     "PRODUCT_HEAD=%s" % SOURCE_HEAD, "CONTROL_HEAD=%s" % fx.control_commit,
+                     "PRODUCT_EVIDENCE=DEV"):
+            check("DEV report says %s" % line.split("=")[0] + "=" + line.split("=")[1][:12],
+                  line in out)
+        check("DEV wrote NebulaOS kernel2 exactly",
+              hashlib.sha256(fx.printer.partitions.get("kernel2") or b"").hexdigest() == a.ximage_sha)
+        check("DEV wrote NebulaOS rootfs2 exactly",
+              hashlib.sha256(fx.printer.partitions.get("rootfs2") or b"").hexdigest() == a.rootfs_sha)
+        check("stock kernel and rootfs are untouched (Stock fallback preserved)",
+              (fx.printer.partitions.get("kernel"), fx.printer.partitions.get("rootfs")) == stock_before)
+        check("the device ends on NebulaOS with the marker on kernel2",
+              fx.printer.running_os == device.OS_NEBULAOS and marker_state(fx.printer) == marker.KERNEL2)
+
+        # -- a NEW control commit, SAME product: no rebuild needed ---------------
+        env = dict(os.environ, GIT_AUTHOR_NAME="sim", GIT_AUTHOR_EMAIL="sim@example",
+                   GIT_COMMITTER_NAME="sim", GIT_COMMITTER_EMAIL="sim@example")
+        with open(os.path.join(fx.control_work, "NOTES"), "w") as fh:
+            fh.write("an unrelated host-tooling change\n")
+        subprocess.run(["git", "add", "-A"], cwd=fx.control_work, check=True, env=env)
+        subprocess.run(["git", "commit", "-qm", "tooling change"], cwd=fx.control_work,
+                       check=True, env=env)
+        c2 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=fx.control_work,
+                            capture_output=True, text=True).stdout.strip()
+        rc, out = run_op(c2)
+        check("a changed CONTROL_HEAD installs the SAME product without a rebuild",
+              rc == 0 and ("CONTROL_HEAD=%s" % c2) in out and ("PRODUCT_HEAD=%s" % SOURCE_HEAD) in out,
+              out[-400:])
+    finally:
+        agent.FW_ROOT, agent.BUILD_BASE, agent.ssh_session_factory, agent.install.Installer = saved
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def case_new_image_will_not_boot():
     fx, root = scenario("noboot")
     try:
@@ -1215,6 +1408,7 @@ def case_no_raw_surface():
 
 SCENARIOS = [
     ("capability vs policy", case_capability_vs_policy),
+    ("DEV_INSTALL end to end (no attestation)", case_dev_install_end_to_end),
     ("closed vocabulary", case_no_raw_surface),
     ("control provenance", case_control_provenance),
     ("attestation v2 required", case_attestation_required),
@@ -1225,6 +1419,7 @@ SCENARIOS = [
     ("ip change (un-enrolled)", case_ip_change),
     ("ip change (enrolled)", case_ip_change_enrolled),
     ("stock unavailable", case_stock_unavailable),
+    ("stock way-out reads stock itself", case_stock_wayout_reads_stock),
     ("printer busy", case_printer_busy),
     ("heater active", case_heater_active),
     ("paused print", case_paused_print),

@@ -315,7 +315,9 @@ class SimSession(device.DeviceSession):
     def stock_wayout_facts(self):
         self._t()
         return {
-            "dropbear": "1" if self.printer.stock_has_dropbear else "0",
+            "stock_mount": "mounted",
+            "stock_ssh_init": "1" if self.printer.stock_has_dropbear else "0",
+            "stock_ssh_binary": "1" if self.printer.stock_has_dropbear else "0",
             "wpa_conf": "present" if self.printer.stock_has_wifi_conf else "absent",
             "stock_rootfs": "present" if self.printer.partitions.get("rootfs") else "absent",
             "stock_kernel": "present" if self.printer.partitions.get("kernel") else "absent",

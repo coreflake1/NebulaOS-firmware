@@ -236,6 +236,19 @@ class DeviceProfile:
             "rootfs_sha256": self.fields.get("LAST_KNOWN_GOOD_ROOTFS_SHA256", ""),
         }
 
+    def install_mode(self):
+        """INSTALL_MODE from the HUMAN-OWNED profile: 'dev' or 'release'.
+
+        Absent means release - the stronger path. An agent cannot select dev:
+        the profile store is denied to agents, so only the human who enrolled
+        this printer as the development printer can mark it so.
+        """
+        mode = (self.fields.get("INSTALL_MODE") or "release").strip().lower()
+        if mode not in ("dev", "release"):
+            raise ProfileError("INSTALL_MODE=%r in the device profile; expected dev or release"
+                               % self.fields.get("INSTALL_MODE"))
+        return mode
+
     def describe(self):
         lines = [
             "DEVICE_ID=%s" % self.device_id,

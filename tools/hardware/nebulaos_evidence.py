@@ -164,6 +164,89 @@ def require_v2(source_head, ximage_sha, ximage_size, rootfs_sha, rootfs_size,
     return BuildEvidence(found, fields, profile, source_head)
 
 
+class DevProductEvidence:
+    """What DEV_INSTALL proves about the product instead of an HMAC attestation."""
+
+    def __init__(self, source_head, build_run, record, manifest, checks):
+        self.source_head = source_head
+        self.build_run = build_run
+        self.record = record
+        self.manifest = manifest
+        self.checks = checks          # [(name, ok, detail)]
+
+    def describe(self):
+        lines = ["PRODUCT_EVIDENCE=DEV (build record + build manifest; no HMAC attestation)",
+                 "PRODUCT_HEAD=%s" % self.source_head,
+                 "PRODUCT_BUILD_RUN=%s" % self.build_run,
+                 "PRODUCT_BUILD_MODE=%s" % self.record.get("BUILD_MODE", "unknown")]
+        for name, ok, detail in self.checks:
+            lines.append("  %s  %s%s" % ("PASS" if ok else "FAIL", name,
+                                         ("  -- " + detail) if detail else ""))
+        return "\n".join(lines)
+
+
+def _read_kv_file(path):
+    out = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            out.setdefault(key.strip(), value.strip())
+    return out
+
+
+def require_dev_product(source_head, build_run, artifacts):
+    """DEV_INSTALL product proof: three independent agreements on the SAME bytes.
+
+    1. the bytes on disk hash to what the operator stated (done by the caller);
+    2. the build's own record (.nebulaos-build-verified) says BUILD_VERIFIED=YES,
+       names this exact PRODUCT_HEAD and records these exact hashes;
+    3. the build manifest inside the artifacts names this exact commit and
+       records these exact hashes.
+    Anything missing or disagreeing refuses. No attestation key is involved.
+    """
+    record_path = os.path.join(build_run, ".nebulaos-build-verified")
+    manifest_path = artifacts.manifest_path
+    if not os.path.isfile(record_path):
+        raise EvidenceError("no build record at %s - refusing to install a build that never "
+                            "reported success" % record_path)
+    if not os.path.isfile(manifest_path):
+        raise EvidenceError("no build manifest at %s" % manifest_path)
+    record = _read_kv_file(record_path)
+    manifest = _read_kv_file(manifest_path)
+    x, r = artifacts.ximage_sha, artifacts.rootfs_sha
+    checks = [
+        ("the build record says BUILD_VERIFIED=YES", record.get("BUILD_VERIFIED") == "YES",
+         record.get("BUILD_VERIFIED", "absent")),
+        ("the build record names PRODUCT_HEAD", record.get("SOURCE_HEAD") == source_head,
+         record.get("SOURCE_HEAD", "absent")),
+        ("the build record's xImage hash equals the bytes", record.get("XIMAGE_SHA256") == x,
+         record.get("XIMAGE_SHA256", "absent")[:16]),
+        ("the build record's rootfs hash equals the bytes",
+         record.get("ROOTFS_SQUASHFS_SHA256") == r,
+         record.get("ROOTFS_SQUASHFS_SHA256", "absent")[:16]),
+        ("the build manifest names PRODUCT_HEAD", manifest.get("git_commit_main") == source_head,
+         manifest.get("git_commit_main", "absent")),
+        ("the build manifest's xImage hash equals the bytes", manifest.get("xImage_sha256") == x,
+         manifest.get("xImage_sha256", "absent")[:16]),
+        ("the build manifest's rootfs hash equals the bytes",
+         manifest.get("rootfs_squashfs_sha256") == r,
+         manifest.get("rootfs_squashfs_sha256", "absent")[:16]),
+    ]
+    for key, size in (("xImage_size", artifacts.ximage_size),
+                      ("rootfs_squashfs_size", artifacts.rootfs_size)):
+        if key in manifest:
+            checks.append(("the build manifest's %s equals the bytes" % key,
+                           manifest.get(key) == str(size), manifest.get(key)))
+    ev = DevProductEvidence(source_head, build_run, record, manifest, checks)
+    failed = [name for name, ok, _ in checks if not ok]
+    if failed:
+        raise EvidenceError("the DEV product proof failed:\n%s" % ev.describe())
+    return ev
+
+
 def product_is_published(repo_root, source_head, remote="origin", fetch=True):
     """-> (ok, detail). What lands on a printer must be fetchable by someone else.
 

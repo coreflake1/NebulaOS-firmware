@@ -82,6 +82,30 @@ serial (`26096911004C14;FCEE11004C14;F005;NEBULA V1.0.0.1` on the reference
 unit — the address stock's `wlan0` actually uses). Every other partition can be
 restored from an image; this one cannot.
 
+## Two install modes: DEV_INSTALL and RELEASE_INSTALL
+
+The mode is a property of the **enrolled printer**, not of the request:
+`INSTALL_MODE=dev` in `~/.config/nebulaos-hardware/devices/<id>/profile.conf`
+(human-owned, denied to agents). Absent means `release`. An agent cannot switch a
+printer into dev mode.
+
+| | DEV_INSTALL (development printer) | RELEASE_INSTALL |
+|---|---|---|
+| Product proof | build record + build manifest + bytes agree on PRODUCT_HEAD and both hashes | HMAC v2 attestation (human key), release/candidate profile |
+| Control code | CONTROL_HEAD's git objects in the local repo; executing host modules must equal it | control commit C from the protected mirror, published |
+| Product publication | reported, not required | required |
+| Identity, strict host key, idle, heaters, stock way-out, software reboot, p6/p8-only write, read-back SHA-256, select NebulaOS, reboot, PART1 | **required** | required |
+| Report | `DEV_INSTALL=YES RELEASE_QUALIFIED=NO HARDWARE_QUALIFIED=NO` | `RELEASE_INSTALL=YES HARDWARE_QUALIFIED=NO` |
+
+PRODUCT_HEAD (the commit that produced xImage/rootfs) and CONTROL_HEAD (the host
+tooling doing the install) are separate identities. Changing Hardware Agent code
+moves CONTROL_HEAD only; the product artifacts stay valid and are not rebuilt.
+
+The launcher path is unchanged: it still runs the full online identity gate, so
+at flash time every canonical repository must be clean and pushed. That is
+stricter than DEV_INSTALL needs; relaxing it is a privilege-layer change and is
+deliberately not part of this path.
+
 ## What `install` proves before it commits
 
 Setting the marker to `ota:kernel` while NebulaOS runs is the point of no easy
