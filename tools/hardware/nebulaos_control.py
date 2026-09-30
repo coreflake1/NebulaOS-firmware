@@ -298,10 +298,15 @@ class ControlSet:
     def describe(self):
         lines = [
             "CONTROL_COMMIT=%s" % self.commit,
-            "CONTROL_COMMIT_PUBLISHED=%s" % self.published_on,
+            "CONTROL_COMMIT_PUBLISHED=%s" % (
+                "not asserted (DEV_INSTALL)" if isinstance(self.mirror, LocalControlSource)
+                else self.published_on),
             "CONTROL_MANIFEST_SHA256=%s" % self.manifest_sha256,
             "CONTROL_HELPER_COUNT=%d" % len(self.helpers),
-            "CONTROL_HELPER_SOURCE=git objects in the protected mirror (never the working tree)",
+            "CONTROL_HELPER_SOURCE=%s" % (
+                "git objects of CONTROL_HEAD in the local repository (DEV_INSTALL; never the "
+                "working tree)" if isinstance(self.mirror, LocalControlSource)
+                else "git objects in the protected mirror (never the working tree)"),
         ]
         for path in sorted(self.helpers):
             lines.append("CONTROL_HELPER=%s sha256=%s" % (path, self.helper_sha256(path)))

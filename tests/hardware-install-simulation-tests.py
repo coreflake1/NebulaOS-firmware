@@ -972,6 +972,30 @@ def case_dev_install_end_to_end():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def case_scp_uses_legacy_protocol():
+    """Found on the first real DEV_INSTALL: the printer has no sftp-server."""
+    captured = {}
+    real_run = subprocess.run
+    class _S(device.SshDeviceSession):
+        def __init__(self):
+            self.username, self.address = "root", "192.0.2.1"
+        def _ssh_opts(self):
+            return ["-o", "BatchMode=no"]
+        def _ensure_askpass(self):
+            return "/bin/false"
+    def fake_run(argv, **kw):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    subprocess.run = fake_run
+    try:
+        _S()._scp("/tmp/x", "/usr/data/nebulaos-hwagent/xImage")
+    finally:
+        subprocess.run = real_run
+    argv = captured.get("argv", [])
+    check("scp is invoked with -O (legacy protocol; dropbear has no sftp-server)",
+          argv[:2] == ["scp", "-O"], str(argv[:3]))
+
+
 def case_new_image_will_not_boot():
     fx, root = scenario("noboot")
     try:
@@ -1408,6 +1432,7 @@ def case_no_raw_surface():
 
 SCENARIOS = [
     ("capability vs policy", case_capability_vs_policy),
+    ("scp uses the legacy protocol", case_scp_uses_legacy_protocol),
     ("DEV_INSTALL end to end (no attestation)", case_dev_install_end_to_end),
     ("closed vocabulary", case_no_raw_surface),
     ("control provenance", case_control_provenance),

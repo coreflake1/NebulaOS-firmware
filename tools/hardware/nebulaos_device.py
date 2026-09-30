@@ -358,7 +358,10 @@ class SshDeviceSession(DeviceSession):
         env = dict(os.environ)
         env["SSH_ASKPASS"] = self._ensure_askpass()
         env["SSH_ASKPASS_REQUIRE"] = "force"
-        argv = ["scp"] + self._ssh_opts() + [
+        # -O: the legacy SCP protocol. OpenSSH >= 9.0 defaults to SFTP, and the
+        # printer's dropbear (stock and NebulaOS) has no sftp-server - found on
+        # the first real DEV_INSTALL run: "sh: /usr/libexec/sftp-server: not found".
+        argv = ["scp", "-O"] + self._ssh_opts() + [
             local_path, "%s@%s:%s" % (self.username, self.address, remote_path)]
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
