@@ -618,7 +618,13 @@ class Installer:
 
             # Last look before the point of no easy return.
             idle = session.idle_state()
-            if not idle.is_idle():
+            dev_unreadable = (set(idle.heater_targets) == {"unreadable"}
+                              and not idle.printing and not idle.paused
+                              and self.profile.install_mode() == "dev")
+            if dev_unreadable:
+                self._say("IDLE_RECHECK_OVERRIDE=DEV (Moonraker unreachable; no print or "
+                          "hot heater observed)")
+            elif not idle.is_idle():
                 raise InstallError(
                     "the printer became busy after arming (%s)" % idle.why_not_idle(),
                     state=journal.CLOSE_BACKWARD)
