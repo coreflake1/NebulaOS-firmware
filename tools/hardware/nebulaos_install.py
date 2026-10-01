@@ -309,7 +309,16 @@ class Installer:
 
         idle = verify.idle_proof(session)
         self._say(idle.render())
-        if not idle.ok():
+        state = session.idle_state()
+        # A dev printer whose Moonraker is broken can never prove idle, and the
+        # broken image is usually why it is being reflashed. Unreadable is not
+        # hot: proceed in dev mode unless a print or a real non-zero target is seen.
+        unreadable_only = (set(state.heater_targets) == {"unreadable"}
+                           and not state.printing and not state.paused)
+        if not idle.ok() and unreadable_only and self.profile.install_mode() == "dev":
+            self._say("IDLE_PROOF_OVERRIDE=DEV (Moonraker unreachable; no print or hot "
+                      "heater observed)")
+        elif not idle.ok():
             raise InstallError(
                 "the printer is not idle: %s. A slot switch during a job loses the job, and a hot "
                 "heater with no firmware to manage it is worse."
