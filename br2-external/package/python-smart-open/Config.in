@@ -1,0 +1,7 @@
+config BR2_PACKAGE_PYTHON_SMART_OPEN
+	bool "python-smart-open"
+	select BR2_PACKAGE_PYTHON_WRAPT # runtime
+	help
+	  Runtime dependency of python-streaming-form-data 1.19.1, which declares smart-open>=7.0.5 and imports it at module load (streaming_form_data/targets.py). Without it Moonraker dies at import.
+
+	  https://pypi.org/project/smart-open/

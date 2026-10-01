@@ -357,13 +357,17 @@ try_venv_seed() {
 
 setup_moonraker_env() {
 	envdir=/usr/data/nebulaos/envs/moonraker
-	moonraker_smoke="import tornado, numpy, streaming_form_data"
+	# streaming_form_data.targets, not the bare package: that is the module
+	# Moonraker imports, and the one that imports smart_open. The bare
+	# `import streaming_form_data` passed on an image missing smart_open while
+	# Moonraker died at import.
+	moonraker_smoke="import tornado, numpy, streaming_form_data.targets"
 	recover_torn_venv "$envdir" "$moonraker_smoke"
 	if venv_is_usable "$envdir" "$moonraker_smoke"; then
 		log "moonraker venv already present and matches this image's python ($envdir) - skipping"
 		return 0
 	fi
-	if try_venv_seed "moonraker-venv-seed.tar.gz" "$envdir" "import tornado, numpy, streaming_form_data"; then
+	if try_venv_seed "moonraker-venv-seed.tar.gz" "$envdir" "import tornado, numpy, streaming_form_data.targets"; then
 		log "moonraker venv seeded from prebuilt archive and verified successfully"
 		return 0
 	fi
@@ -374,7 +378,7 @@ setup_moonraker_env() {
 		rm -rf "$envdir.partial"
 		return 1
 	fi
-	if ! "$envdir.partial/bin/python3" -c "import tornado, numpy, streaming_form_data" 2>"$(seed_log moonraker-venv-error)"; then
+	if ! "$envdir.partial/bin/python3" -c "import tornado, numpy, streaming_form_data.targets" 2>"$(seed_log moonraker-venv-error)"; then
 		log "ERROR: moonraker venv failed its own import smoke test - see $(seed_log moonraker-venv-error) - rejecting"
 		rm -rf "$envdir.partial"
 		return 1
@@ -483,7 +487,7 @@ start() {
 	# namespace is a state this device can genuinely be in.
 	if [ -e "$APPS/klipper/.git" ] && [ -e "$APPS/nebulaos-klipper-extensions/.git" ] \
 		&& [ -e "$APPS/moonraker/.git" ] && [ -e "$APPS/mainsail/index.html" ] \
-		&& venv_is_usable /usr/data/nebulaos/envs/moonraker "import tornado, numpy, streaming_form_data" \
+		&& venv_is_usable /usr/data/nebulaos/envs/moonraker "import tornado, numpy, streaming_form_data.targets" \
 		&& venv_is_usable /usr/data/nebulaos/envs/klipper "import greenlet, cffi, jinja2, serial, can"; then
 		log "all components already seeded - nothing to do"
 		return 0

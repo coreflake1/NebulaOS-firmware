@@ -21,6 +21,14 @@ PYTHON_STREAMING_FORM_DATA_LICENSE_FILES = LICENSE.txt
 # pyproject.toml uses setuptools.build_meta and requires only setuptools. The
 # sdist ships a pre-generated _parser.c, so Cython is NOT needed at build time -
 # only a C compiler, which the cross toolchain provides.
-# No dependency beyond what SETUP_TYPE=setuptools adds automatically.
+# No BUILD dependency beyond what SETUP_TYPE=setuptools adds automatically.
+#
+# RUNTIME: pyproject.toml declares `dependencies = ["smart-open>=7.0.5"]`, and
+# targets.py does `import smart_open` at module load, so the whole module -
+# and Moonraker with it - fails to import without it. Config.in selects
+# python-smart-open. This comment used to say "no dependency", and the first
+# Buildroot 2025.02.18 image shipped without smart_open: Moonraker died at
+# import on the printer. 06-verify.sh's metadata closure gate now catches a
+# declared runtime dependency that is not in the image.
 
 $(eval $(python-package))

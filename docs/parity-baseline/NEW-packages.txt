@@ -151,6 +151,7 @@ python-requests-oauthlib               2.0.0            ISC
 python-serial                          3.5              BSD-3-Clause
 python-setuptools                      80.9.0           MIT
 python-six                             1.17.0           MIT
+python-smart-open                      7.5.0            MIT
 python-streaming-form-data             1.19.1           MIT
 python-tornado                         6.4.2            Apache-2.0
 python-typing-extensions               4.12.2           Python-2.0

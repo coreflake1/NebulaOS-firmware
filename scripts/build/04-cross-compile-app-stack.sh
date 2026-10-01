@@ -517,6 +517,11 @@ fi
 #                                        python-streaming-form-data, python-wheel-target,
 #                                        python-zipp
 #
+# Since added: br2-external python-smart-open. Every streaming-form-data release
+# from 1.16.0 on declares smart-open as a runtime dependency (1.19.1:
+# smart-open>=7.0.5) and imports it at module load. The migration did not
+# package it, and the first Buildroot 2025.02.18 image shipped without it.
+#
 # streaming-form-data's _parser extension is built by its Buildroot package
 # from the pre-generated _parser.c in its sdist, so Buildroot names the .so
 # using the target interpreter's real EXT_SUFFIX. Nothing in this pipeline

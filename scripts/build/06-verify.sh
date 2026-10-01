@@ -697,6 +697,45 @@ else
 	fi
 fi
 check /usr/lib/$TARGET_PY/site-packages/streaming_form_data
+check_required /usr/lib/$TARGET_PY/site-packages/smart_open "streaming_form_data imports it at module load; without it Moonraker dies at import"
+
+# --- Python distribution metadata closure ----------------------------------
+#
+# Every installed distribution's declared runtime requirements must be
+# installed too. Buildroot packages a distribution without its Requires-Dist,
+# so nothing else in the build notices a missing one - and an import test is
+# not possible here, because the image is MIPS.
+#
+# This gate exists because that happened. streaming-form-data 1.19.1 declares
+# smart-open>=7.0.5 and imports it at module load. The first Buildroot
+# 2025.02.18 image shipped without smart_open; the ELF and ABI-tag gates above
+# passed, because the missing piece was a pure-Python module that simply was
+# not there. Moonraker died at import on the printer, and its own pip recovery
+# could not fix it. The metadata said exactly what was needed.
+#
+# Only the METADATA files are extracted. Requirements behind an `extra` are
+# optional and are not checked. Release-blocking.
+#
+# Run with Buildroot's own host python (the output/host/bin/dtc pattern
+# above), which always has `packaging`: host-python-setuptools-scm depends on
+# host-python-packaging. The build machine's python3 is only a fallback.
+echo "=== Python distribution metadata closure ==="
+CLOSURE_PY="$REPO_ROOT/vendor/buildroot-x2000/output/host/bin/python3"
+[ -x "$CLOSURE_PY" ] || CLOSURE_PY=python3
+CLOSURE_SITE="/usr/lib/$TARGET_PY/site-packages"
+CLOSURE_DIR="$(mktemp -d)"
+for d in $(debugfs -R "ls -p $CLOSURE_SITE" ${IMAGES}/rootfs.ext2 2>/dev/null \
+		| awk -F/ '$6 ~ /\.dist-info$/ {print $6}'); do
+	mkdir -p "$CLOSURE_DIR/$d"
+	debugfs -R "dump $CLOSURE_SITE/$d/METADATA $CLOSURE_DIR/$d/METADATA" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1 || true
+done
+if CLOSURE_OUT=$("$CLOSURE_PY" "$SCRIPT_DIR/lib/check-python-dist-closure.py" "$CLOSURE_DIR" "${TARGET_PY#python}" 2>&1); then
+	echo "$CLOSURE_OUT"
+else
+	echo "$CLOSURE_OUT" | sed 's/^UNMET \(.*\)$/MISS \1   <== REQUIRED/'
+	MISS_REQUIRED=$((MISS_REQUIRED + 1))
+fi
+rm -rf "$CLOSURE_DIR"
 check /usr/sbin/nginx
 check /usr/share/mainsail/index.html
 check /etc/init.d/S55klipper
