@@ -307,10 +307,6 @@ if is_hw and agent!=HW_AGENT:
     if not is_main:
         out("The hardware launcher may only be invoked by the "+HW_AGENT+" agent or the\n"
             "main agent. Caller: "+(agent or repr(d.get("agent_type")))+".")
-    if hw_op(args)=="install":
-        out("The main agent may not run the install operation of the hardware launcher.\n\n"
-            "Flashing a printer is delegated to the "+HW_AGENT+" subagent, so an install\n"
-            "nobody asked for stays mechanically impossible for the main agent.")
 
 if is_build and agent!=BUILD_AGENT:
     out("The approved build launcher may only be invoked by the "+BUILD_AGENT+" agent.\n"
