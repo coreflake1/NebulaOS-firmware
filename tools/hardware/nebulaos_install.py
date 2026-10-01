@@ -152,6 +152,19 @@ class Installer:
     def _say(self, text):
         self.result.say(text)
 
+    def _stale_own_lock(self, holder):
+        """A device lock held by this device id whose host pid no longer exists."""
+        dev, _, pid = (holder or "").rpartition(":")
+        if dev != self.device_id or not pid.isdigit() or int(pid) == os.getpid():
+            return False
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        return False
+
     def _advance(self, state, note=""):
         self.result.state = state
         if self.txn:
@@ -436,6 +449,13 @@ class Installer:
 
         owner = "%s:%d" % (self.device_id, os.getpid())
         got_lock, holder = session.acquire_flash_lock(owner)
+        if not got_lock and self._stale_own_lock(holder):
+            # An earlier installer of THIS device on this host died (e.g. a dropped
+            # SSH session) without releasing the device-side lock. The host-side
+            # transaction lock already guarantees we are the only installer here.
+            self._say("FLASH_LOCK_RECLAIMED=%s (holder process no longer running)" % holder)
+            session.release_flash_lock(holder)
+            got_lock, holder = session.acquire_flash_lock(owner)
         if not got_lock:
             raise InstallError(
                 "the device-side flash lock is held by %s. Two installers writing one printer is "
