@@ -150,8 +150,23 @@ source is wrong, not that the project is in that state.
 
 ## 11. Printer safety
 
-Host-workspace work never touches the printer. No SSH, flashing, reboots, OTA marker changes, MCU
-serial operation, motion, or heaters unless the user explicitly asks for a hardware task.
+Host-workspace work never touches the printer unless the user explicitly asks for a hardware
+task. When they do, the only route is the Hardware Agent launcher, against an enrolled device:
+
+```
+tools/run-nebulaos-hardware.sh --device <id> --control <40-hex C> <operation>
+```
+
+| operation | kind | who |
+|---|---|---|
+| `inspect`, `status`, `diagnose`, `verify` | read-only | main agent, `nebulaos-hardware` |
+| `restart <klipper\|moonraker\|guppyscreen\|webcam\|nginx>` | repair; needs a published C | main agent, `nebulaos-hardware` |
+| `install` | flash | `nebulaos-hardware` only |
+
+Enforced by the PreToolUse hook, not by this text. Never hand-written SSH, flashing, reboots,
+OTA marker changes, MCU serial operation, motion, or heaters. Motion, heating, calibration
+and MCU flashing are not operations at all. Device enrollment and the credential store are
+human-only.
 
 ## 12. The workspace control layer
 

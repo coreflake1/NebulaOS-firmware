@@ -27,7 +27,9 @@ set -uo pipefail
 export GIT_OPTIONAL_LOCKS=0
 
 ROOT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd -P)
-HOOK=$ROOT/.claude/hooks/pre-tool-use-identity.sh
+# NEBULA_TEST_HOOK tests a canonical hook before a human installs it with
+# sync-workspace-control.sh --apply; by default the INSTALLED hook is tested.
+HOOK=${NEBULA_TEST_HOOK:-$ROOT/.claude/hooks/pre-tool-use-identity.sh}
 CANON=$ROOT/NebulaOS-firmware/tools/workspace-control/claude/hooks/pre-tool-use-identity.sh
 
 CANONDIR=$ROOT/NebulaOS-firmware/tools/workspace-control/scripts
@@ -204,7 +206,6 @@ run_case build DENY ""                0 "main agent, build launcher (sandboxed)"
 run_case build DENY nebula-architect  0 "architect, build launcher"               "$BUILDER $SHA"
 run_case build DENY nebula-verifier   0 "verifier, build launcher"                "$BUILDER $SHA"
 run_case build DENY nebulaos-hardware 0 "hardware agent, build launcher"          "$BUILDER $SHA"
-run_case hw    DENY ""                0 "main agent, hardware launcher"           "$HWRUN --status"
 run_case hw    DENY nebulaos-build    0 "build agent, hardware launcher"          "$HWRUN --status"
 run_case hw    DENY nebula-verifier   1 "verifier, hardware launcher unsandboxed" "$HWRUN --status"
 echo
@@ -273,7 +274,7 @@ echo
 # Its constraints were prose only. Prose is not enforcement - that is this
 # layer's whole thesis - so they now have the same mechanical backing the
 # reviewers' read-only policy has.
-REASON="created but NOT enabled"
+REASON="reaches a printer only through its launcher"
 echo "[ hardware agent device contact - must DENY ]"
 run_case hw DENY nebulaos-hardware 0 "hardware agent, ssh"                "ssh nebula-printer uname -a"
 run_case hw DENY nebulaos-hardware 0 "hardware agent, ping"               "ping -c1 nebula-printer"
@@ -416,7 +417,7 @@ run_case hw DENY nebulaos-hardware 1 "truncated ximage sha256"  "$HWRUN $DEV ver
 run_case hw DENY nebulaos-hardware 1 "firmware sha where sha256 belongs" "$HWRUN $DEV verify $SHA $SHA $R64"
 echo
 
-# The four operations are semantic. Every implementation-level spelling the OLD
+# The operations are semantic. Every implementation-level spelling the OLD
 # launcher accepted must now be refused - otherwise the surface was renamed
 # rather than removed. `flash`, `marker` and `reboot` in particular were real
 # subcommands that wrote partitions, moved the boot selector and rebooted the
@@ -510,6 +511,33 @@ fi
 echo
 
 REASON=""
+echo "[ restart grammar - must DENY ]"
+R="Hardware Agent launcher accepts exactly"
+run_case hw DENY nebulaos-hardware 1 "restart without a service"     "$HWRUN $DEV restart" "$R"
+run_case hw DENY nebulaos-hardware 1 "restart an unlisted service"   "$HWRUN $DEV restart sshd" "$R"
+run_case hw DENY nebulaos-hardware 1 "restart a path"                "$HWRUN $DEV restart /etc/init.d/S56moonraker" "$R"
+run_case hw DENY nebulaos-hardware 1 "restart with an extra argument" "$HWRUN $DEV restart moonraker now" "$R"
+run_case hw DENY nebulaos-hardware 1 "diagnose with an argument"     "$HWRUN $DEV diagnose all" "$R"
+run_case hw DENY ""                1 "main agent, restart an unlisted service" "$HWRUN $DEV restart sshd" "$R"
+echo
+
+# The main agent may run the hardware launcher - every operation but install,
+# so a flash nobody asked for stays mechanically impossible for it. The main
+# agent is a payload with NO agent_type key; anything present is not it.
+echo "[ main agent and the hardware launcher: install and impostors - must DENY ]"
+R="may not run the install operation"
+run_case hw DENY "" 1 "main agent, install unsandboxed"  "$HWRUN $DEV install $SHA $X64 $R64" "$R"
+run_case hw DENY "" 0 "main agent, install sandboxed"    "$HWRUN $DEV install $SHA $X64 $R64" "$R"
+run_case hw DENY "" 1 "main agent, install with --control first" \
+  "$HWRUN --control $CSHA --device printer-01 install $SHA $X64 $R64" "$R"
+run_typed hw DENY 'null'  'true' "null agent_type is not the main agent"  "$HWRUN $DEV diagnose" "may only be invoked by the"
+run_typed hw DENY '""'    'true' "empty agent_type is not the main agent" "$HWRUN $DEV diagnose" "may only be invoked by the"
+run_typed hw DENY '"   "' 'true' "blank agent_type is not the main agent" "$HWRUN $DEV diagnose" "may only be invoked by the"
+run_typed hw DENY '123'   'true' "numeric agent_type is not the main agent" "$HWRUN $DEV diagnose" "may only be invoked by the"
+run_case hw DENY nebula-architect 1 "architect, diagnose" "$HWRUN $DEV diagnose" "may only be invoked by the"
+run_case hw DENY "" 1 "main agent, diagnose chained" "$HWRUN $DEV diagnose; id" "lone invocation"
+echo
+
 echo "[ the sanctioned hardware pair - must ALLOW ]"
 # Requires the launcher to be TRACKED at firmware HEAD: content binding compares
 # the installed bytes against the canonical blob in git. While the launcher is
@@ -518,6 +546,14 @@ run_case hw ALLOW nebulaos-hardware 1 "hardware agent, read-only operation" "$HW
 run_case hw ALLOW nebulaos-hardware 1 "hardware agent, status" "$HWRUN $DEV status"
 run_case hw ALLOW nebulaos-hardware 1 "hardware agent, keyed operation" "$HWRUN $OK_KEYED"
 run_case hw ALLOW nebulaos-hardware 1 "hardware agent, install" "$HWRUN $DEV install $SHA $X64 $R64"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, diagnose" "$HWRUN $DEV diagnose"
+run_case hw ALLOW nebulaos-hardware 1 "hardware agent, restart moonraker" "$HWRUN $DEV restart moonraker"
+run_case hw ALLOW "" 1 "main agent, diagnose" "$HWRUN $DEV diagnose"
+run_case hw ALLOW "" 1 "main agent, inspect" "$HWRUN $OK_ARGS"
+run_case hw ALLOW "" 1 "main agent, verify" "$HWRUN $OK_KEYED"
+for svc in klipper moonraker guppyscreen webcam nginx; do
+  run_case hw ALLOW "" 1 "main agent, restart $svc" "$HWRUN $DEV restart $svc"
+done
 echo
 
 echo "TESTS_PASS=$PASS"

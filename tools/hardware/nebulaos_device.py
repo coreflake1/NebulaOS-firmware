@@ -218,6 +218,17 @@ class DeviceSession(abc.ABC):
         hashing the padding would be comparing the wrong thing.
         """
 
+    # --- diagnosis and repair ----------------------------------------------
+    @abc.abstractmethod
+    def diagnose(self):
+        """-> text. A fixed, bounded, read-only report composed by this module."""
+
+    @abc.abstractmethod
+    def restart_service(self, name):
+        """Restart one service named in RESTARTABLE_SERVICES, with the update
+        supervisor's semantics. -> dict with restart_result=DONE|REFUSED|FAILED
+        and restart_reason. Takes a service NAME, never a script or a path."""
+
     # --- lifecycle ---------------------------------------------------------
     @abc.abstractmethod
     def reboot(self):
@@ -279,6 +290,94 @@ STOCK_MCU_UPDATE_PROBE = (
     "elif grep -qiE 'identify fail|handshake .*fail' \"$f\"; then u=did_not_act; "
     "else u=acted_or_unknown; fi; "
     "printf 'stock_mcu_update=%s\\n' \"$u\"")
+
+# The services `restart` may name: service -> (init script, pidfile). Closed on
+# purpose - an agent names a service, never a script. Paths are the overlay's
+# own (etc/init.d/S55klipper, S56moonraker, S58guppyscreen, S50webcam) and
+# Buildroot's nginx package (S50nginx).
+RESTARTABLE_SERVICES = {
+    "klipper": ("/etc/init.d/S55klipper", "/var/run/klippy.pid"),
+    "moonraker": ("/etc/init.d/S56moonraker", "/var/run/moonraker.pid"),
+    "guppyscreen": ("/etc/init.d/S58guppyscreen", "/var/run/guppyscreen.pid"),
+    "webcam": ("/etc/init.d/S50webcam", "/var/run/ustreamer-supervisor.pid"),
+    "nginx": ("/etc/init.d/S50nginx", "/run/nginx.pid"),
+}
+
+# Restarting Klippy ends a print and drops heater control, so it needs a
+# PROVEN idle printer: an unreadable print state refuses. The others do not
+# control the machine, so for them only a readable printing/paused state refuses.
+PRINT_CRITICAL_SERVICES = frozenset({"klipper"})
+
+# Read-only. Every section is bounded, and the whole report is capped, so a
+# runaway log cannot flood the operator's terminal.
+DIAGNOSE_SCRIPT = (
+    "sec(){ printf '\\n===== %s =====\\n' \"$1\"; }; "
+    "t(){ [ -f \"$1\" ] && { echo \"--- $1\"; tail -n 80 \"$1\"; }; }; "
+    "{ "
+    "sec system; uname -a; uptime; cat /proc/cmdline; "
+    "sec memory; free; "
+    "sec disk; df -h; "
+    "sec marker; dd if=/dev/mmcblk0p1 bs=512 count=1 2>/dev/null | tr -d '\\000' | head -c 64; echo; "
+    "sec processes; ps w; "
+    "sec mcu-guard; cat /run/nebulaos-mcu-guard.state 2>&1; "
+    "sec update-supervisor; ls -l /usr/data/nebulaos/updates/locks 2>&1; "
+    "for f in /usr/data/nebulaos/updates/*/state.json; do [ -f \"$f\" ] && { echo \"--- $f\"; cat \"$f\"; }; done; "
+    "sec moonraker-http; "
+    "curl -s --max-time 5 http://127.0.0.1:7125/server/info 2>&1; echo; "
+    "curl -s --max-time 5 'http://127.0.0.1:7125/printer/objects/query?print_stats&webhooks' 2>&1; echo; "
+    "sec logs; "
+    "for d in /opt/printer_data/logs /usr/data/printer_data/logs; do "
+    "t \"$d/moonraker.log\"; t \"$d/klippy.log\"; done; "
+    "t /var/log/messages; "
+    "sec dmesg; dmesg 2>&1 | tail -n 80; "
+    "sec moonraker-venv; ls /usr/data/nebulaos/envs/moonraker/lib/python3*/site-packages 2>&1 | head -n 80; "
+    "} 2>&1 | head -c 262144")
+
+
+def restart_script(name):
+    """-> shell text restarting one known service, or raise DeviceError.
+
+    Mirrors the update supervisor (etc/nebulaos-update-supervisor.sh):
+    safe_stop_start - stop, wait up to 20s for the old process to exit, start,
+    because the init scripts' own `restart` races BusyBox start-stop-daemon -
+    and its print-idle gate. It also refuses while the supervisor holds any
+    update lock or has a component in `validating`: a restart in the middle of a
+    validation reads as a failed update and can roll back into factory-fallback.
+    """
+    if name not in RESTARTABLE_SERVICES:
+        raise DeviceError("unknown service %r; restartable: %s"
+                          % (name, ", ".join(sorted(RESTARTABLE_SERVICES))))
+    init, pidfile = RESTARTABLE_SERVICES[name]
+    critical = "1" if name in PRINT_CRITICAL_SERVICES else "0"
+    return (
+        "init=%s; pid=%s; critical=%s; R=/usr/data/nebulaos; "
+        "refuse(){ printf 'restart_result=REFUSED\\nrestart_reason=%%s\\n' \"$1\"; exit 0; }; "
+        "[ -x \"$init\" ] || refuse \"no init script $init on this image\"; "
+        "for l in \"$R\"/updates/locks/*.lock; do "
+        "[ -e \"$l\" ] && refuse \"update supervisor lock held: ${l##*/}\"; done; "
+        "for s in \"$R\"/updates/*/state.json; do "
+        "[ -f \"$s\" ] && grep -qE '\"state\": *\"validating\"' \"$s\" "
+        "&& refuse \"update supervisor is validating: $s\"; done; "
+        "st=$(wget -q -O - -T 5 'http://127.0.0.1:7125/printer/objects/query?print_stats=state' 2>/dev/null); "
+        "printf '%%s' \"$st\" | grep -qE '\"state\": *\"(printing|paused)\"' "
+        "&& refuse 'a print is active or paused'; "
+        "if [ \"$critical\" = 1 ]; then printf '%%s' \"$st\" | grep -qE '\"state\": *\"' "
+        "|| refuse 'print state unreadable (is Moonraker down?); restarting klipper needs a proven idle printer'; fi; "
+        "old=$(cat \"$pid\" 2>/dev/null); "
+        "\"$init\" stop >/dev/null 2>&1; "
+        "n=0; while [ -n \"$old\" ] && [ -d \"/proc/$old\" ]; do "
+        "n=$((n+1)); [ \"$n\" -ge 20 ] && break; sleep 1; done; "
+        "\"$init\" start >/dev/null 2>&1; sleep 3; "
+        "new=$(cat \"$pid\" 2>/dev/null); "
+        "printf 'restart_old_pid=%%s\\nrestart_new_pid=%%s\\n' \"$old\" \"$new\"; "
+        # A process that outlived the wait makes start-stop-daemon refuse to
+        # start ("already running"): the pid is unchanged, nothing restarted.
+        "if [ -n \"$old\" ] && [ \"$new\" = \"$old\" ]; then "
+        "printf 'restart_result=FAILED\\nrestart_reason=old process %%s did not exit; not restarted\\n' \"$old\"; "
+        "elif [ -n \"$new\" ] && [ -d \"/proc/$new\" ]; then printf 'restart_result=DONE\\n'; "
+        "else printf 'restart_result=FAILED\\nrestart_reason=not running after start (pidfile %%s)\\n' \"$pid\"; fi"
+        % (shlex.quote(init), shlex.quote(pidfile), critical))
+
 
 _STAGE_DIR = "/usr/data/nebulaos-hwagent"
 _LOCK_PATH = _STAGE_DIR + "/flash.lock"
@@ -531,6 +630,16 @@ class SshDeviceSession(DeviceSession):
             "printf 'web_http=%s\\n' \"$(curl -s -o /dev/null -w '%{http_code}' "
             "--max-time 5 http://127.0.0.1/ 2>/dev/null)\"")
         return facts
+
+    def diagnose(self):
+        rc, out, err = self._run(DIAGNOSE_SCRIPT, timeout=90)
+        if rc != 0 and not out:
+            raise DeviceError("diagnose failed (rc=%d): %s" % (rc, err.strip()[:300]))
+        return out
+
+    def restart_service(self, name):
+        # Up to 20s for the old process, 3s settle, plus the probes.
+        return self._kv(restart_script(name), timeout=90)
 
     def mcu_state(self):
         return self._kv(

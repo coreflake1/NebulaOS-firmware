@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""The Hardware Agent's four operations, and the proofs each one requires.
+"""The Hardware Agent's operations, and the proofs each one requires.
 
 THE PUBLIC INTERFACE IS SEMANTIC
 
     inspect   read-only: what is this printer, what is it running, what is on it
     status    read-only: is a transaction open, and what state is it in
     verify    read-only: does this printer currently run this exact build
+    diagnose  read-only: a fixed, bounded report - processes, logs, MCU guard,
+              update-supervisor state, Moonraker endpoints
+    restart   repair: restart ONE named service with the update supervisor's
+              semantics (see nebulaos_device.restart_script)
     install   the developer install, NebulaOS -> Stock -> flash -> NebulaOS
 
 There is no ssh, scp, dd, marker, reboot, flash, raw usbboot, --host, --password
@@ -345,6 +349,130 @@ def op_verify(args):
                        "Tried: %s" % (" | ".join(tried) or "none"))
 
 
+def _connect_matching(profile, oses):
+    """-> (session, os, address) for the first reachable address whose identity
+    matches the enrolled profile. A printer that answers but is not THIS printer
+    is never reported on, let alone repaired."""
+    factory = ssh_session_factory(profile)
+    tried = []
+    for which in oses:
+        for address in profiles.candidate_addresses(profile, which):
+            try:
+                session = factory(which, address)
+                ok, why = profile.identity_matches(session.probe_identity())
+            except Exception as exc:              # noqa: BLE001 - try the next address
+                tried.append("%s@%s: %s" % (which, address, str(exc)[:120]))
+                continue
+            if not ok:
+                session.close()
+                tried.append("%s@%s: identity does not match the profile (%s)" % (which, address, why))
+                continue
+            return session, which, address
+    raise AgentRefusal("could not reach the enrolled printer at any enrolled address. Tried: %s"
+                       % (" | ".join(tried) or "none"))
+
+
+def op_diagnose(args):
+    profile, _, _ = prove_preconditions(
+        args.device, None, None, None, args.control_commit, destructive=False)
+    session, which, address = _connect_matching(profile, (device.OS_NEBULAOS, device.OS_STOCK))
+    try:
+        say("DIAGNOSE_TARGET=%s@%s" % (which, address))
+        say("DEVICE_IDENTITY_MATCHES_PROFILE=YES")
+        say(session.diagnose())
+        return 0
+    finally:
+        session.close()
+
+
+def control_is_published(control_commit):
+    """The seam tests replace. Repairs require a PUBLISHED control commit."""
+    return evidence.product_is_published(FW_ROOT, control_commit)
+
+
+def _repair_log(device_id, control_commit, op, arg, result, reason):
+    path = os.path.join(journal.state_home(), "repairs")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    import time
+    with open(os.path.join(path, "%s.log" % device_id), "a", encoding="utf-8") as fh:
+        fh.write("%s DEVICE=%s CONTROL=%s OP=%s ARG=%s RESULT=%s REASON=%s\n" % (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), device_id, control_commit,
+            op, arg, result, (reason or "").replace("\n", " ")[:200]))
+
+
+def op_restart(args):
+    """Restart one named service on NebulaOS. A repair, so it proves more than
+    the read-only operations: the control commit that composes the device
+    command must be PUBLISHED whatever the install mode - otherwise whoever can
+    run this launcher could commit a change and execute it with nobody else
+    ever able to see it.
+
+    Every attempt is logged, refusals included: a repair log that only records
+    what reached the device cannot show what was tried."""
+    try:
+        return _restart(args)
+    except AgentRefusal as exc:
+        _repair_log(args.device, args.control_commit, "restart", args.service,
+                    "REFUSED", str(exc))
+        raise
+    except BaseException as exc:
+        _repair_log(args.device, args.control_commit, "restart", args.service,
+                    "FAILED", "%s: %s" % (type(exc).__name__, exc))
+        raise
+
+
+def _restart(args):
+    if args.service not in device.RESTARTABLE_SERVICES:
+        raise AgentRefusal("unknown service '%s'. Restartable: %s"
+                           % (args.service, ", ".join(sorted(device.RESTARTABLE_SERVICES))))
+    profile, control_set, _ = prove_preconditions(
+        args.device, None, None, None, args.control_commit, destructive=False)
+    published, why = control_is_published(control_set.commit)
+    if not published:
+        raise AgentRefusal("repairs require a published control commit: %s" % why)
+    say("CONTROL_PUBLISHED=YES (%s)" % why)
+
+    with journal.HostLock(args.device):
+        txn = journal.Transaction.open(args.device)
+        if txn is not None and txn.state not in journal.TERMINAL_STATES:
+            raise AgentRefusal("an install transaction is open (state %s). Run `status`, and "
+                               "finish or resolve it before repairing anything." % txn.state)
+
+        session, which, address = _connect_matching(profile, (device.OS_NEBULAOS,))
+        owner = "restart-%s-%d" % (args.service, os.getpid())
+        try:
+            if session.which_os() != device.OS_NEBULAOS:
+                raise AgentRefusal("the printer is not running NebulaOS; restart is NebulaOS-only")
+            if args.service in device.PRINT_CRITICAL_SERVICES:
+                idle = session.idle_state()
+                say(idle.describe())
+                if not idle.is_idle():
+                    raise AgentRefusal("restarting %s needs a proven idle printer: %s"
+                                       % (args.service, idle.why_not_idle()))
+            got, holder = session.acquire_flash_lock(owner)
+            if not got:
+                raise AgentRefusal("the device-side hardware-agent lock is held by %s" % holder)
+            try:
+                result = session.restart_service(args.service)
+            finally:
+                session.release_flash_lock(owner)
+        finally:
+            session.close()
+
+    outcome = result.get("restart_result", "UNKNOWN")
+    reason = result.get("restart_reason", "")
+    _repair_log(args.device, control_set.commit, "restart", args.service, outcome, reason)
+    say("RESTART_TARGET=%s@%s" % (which, address))
+    say("RESTART_SERVICE=%s" % args.service)
+    for key in ("restart_old_pid", "restart_new_pid"):
+        if key in result:
+            say("%s=%s" % (key.upper(), result[key]))
+    say("RESTART_RESULT=%s" % outcome)
+    if reason:
+        say("RESTART_REASON=%s" % reason)
+    return 0 if outcome == "DONE" else 1
+
+
 def _mode_summary(mode, control_commit, source_head):
     say("INSTALL_MODE=%s" % mode.upper())
     say("DEV_INSTALL=%s" % ("YES" if mode == "dev" else "NO"))
@@ -433,6 +561,8 @@ def main(argv):
 
     sub.add_parser("inspect")
     sub.add_parser("status")
+    sub.add_parser("diagnose")
+    sub.add_parser("restart").add_argument("service")
     for name in ("verify", "install"):
         p = sub.add_parser(name)
         p.add_argument("source_head")
@@ -440,8 +570,8 @@ def main(argv):
         p.add_argument("rootfs_sha")
 
     args = parser.parse_args(argv)
-    handler = {"inspect": op_inspect, "status": op_status,
-               "verify": op_verify, "install": op_install}[args.op]
+    handler = {"inspect": op_inspect, "status": op_status, "diagnose": op_diagnose,
+               "restart": op_restart, "verify": op_verify, "install": op_install}[args.op]
     try:
         return handler(args)
     except AgentRefusal as exc:

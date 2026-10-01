@@ -127,6 +127,10 @@ class SimulatedPrinter:
         self.mcu_guard_restores_on_boot = False
         self.mcu_guard_result = "PASS"            # the guard's own verdict
         self.identity_override = None            # pretend to be a different printer
+        self.supervisor_lock = None              # e.g. "klipper.lock": update supervisor busy
+        self.supervisor_validating = False       # a component is in state=validating
+        self.print_state_readable = True         # False: Moonraker down, print state unknown
+        self.restarts = []                       # services restarted, in order
         self.reboot_does_nothing = False         # marker set, device never reboots
 
         self._ops = 0
@@ -311,6 +315,35 @@ class SimSession(device.DeviceSession):
             "mcu_guard_result": self.printer.mcu_guard_result,
             "stock_mcu_update": self._stock_mcu_update(),
         }
+
+    # -- diagnosis and repair ---------------------------------------------
+    def diagnose(self):
+        self._t()
+        return "===== processes =====\n" + "\n".join(
+            "%s %s" % kv for kv in sorted(self.printer.services.items())) + "\n"
+
+    def restart_service(self, name):
+        # The same decisions, in the same order, as device.restart_script().
+        self._t()
+        if name not in device.RESTARTABLE_SERVICES:
+            raise device.DeviceError("unknown service %r" % name)
+        p = self.printer
+        def refuse(why):
+            return {"restart_result": "REFUSED", "restart_reason": why}
+        if self.which_os() != device.OS_NEBULAOS:
+            return refuse("no init script on this image")
+        if p.supervisor_lock:
+            return refuse("update supervisor lock held: %s" % p.supervisor_lock)
+        if p.supervisor_validating:
+            return refuse("update supervisor is validating")
+        if p.print_state_readable and (p.printing or p.paused):
+            return refuse("a print is active or paused")
+        if name in device.PRINT_CRITICAL_SERVICES and not p.print_state_readable:
+            return refuse("print state unreadable")
+        p.services[name] = "running"
+        p.restarts.append(name)
+        p.log.append("restarted %s" % name)
+        return {"restart_result": "DONE"}
 
     def stock_wayout_facts(self):
         self._t()

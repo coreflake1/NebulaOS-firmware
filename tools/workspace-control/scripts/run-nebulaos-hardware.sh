@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
-# NebulaOS Hardware Agent launcher - the ONLY command the hardware agent may run
-# outside Claude's sandbox, and its only route to a printer.
+# NebulaOS Hardware Agent launcher - the ONLY route from an agent to a printer,
+# and the only command an agent may run outside Claude's sandbox to get there.
 #
 # WHY THIS EXISTS
 #
 # The PreToolUse hook refuses ssh/scp/sftp/ping/nc/socat/... to the hardware
 # agent outright, with no target-bound exception, and that refusal STAYS. The
-# agent reaches hardware only by invoking this file, whose command word is
-# `run-nebulaos-hardware.sh` and therefore does not match the refused set. All
-# device contact is encapsulated below, where it can be constrained and reviewed,
-# rather than spelled out ad hoc in agent-authored shell.
+# main agent has no network inside the sandbox and no access to the credential
+# store. Both reach hardware only by invoking this file. All device contact is
+# encapsulated below, where it can be constrained and reviewed, rather than
+# spelled out ad hoc in agent-authored shell.
+#
+# WHO MAY RUN IT (enforced by the PreToolUse hook, not by this file)
+#
+#   nebulaos-hardware   every operation
+#   main agent          every operation EXCEPT install - so a flash nobody asked
+#                       for stays mechanically impossible, not merely against policy
+#   anyone else         nothing
 #
 # Like the build launcher, the escape is bound to this file by REAL PATH **and by
 # CONTENT**: the installed copy's bytes must equal the tracked canonical blob at
@@ -22,6 +29,8 @@
 #
 #   run-nebulaos-hardware.sh --device <id> --control <C> inspect
 #   run-nebulaos-hardware.sh --device <id> --control <C> status
+#   run-nebulaos-hardware.sh --device <id> --control <C> diagnose
+#   run-nebulaos-hardware.sh --device <id> --control <C> restart <service>
 #   run-nebulaos-hardware.sh --device <id> --control <C> verify  <X> <ximage-sha256> <rootfs-sha256>
 #   run-nebulaos-hardware.sh --device <id> --control <C> install <X> <ximage-sha256> <rootfs-sha256>
 #
@@ -45,6 +54,16 @@
 # model, the live-target collision refusal, the capacity checks and the
 # post-write read-back, and it has its own offline test suite. This file is a
 # gate and a courier.
+#
+# REPAIRS
+#
+# `restart` is the only repair: one service from a closed list (klipper,
+# moonraker, guppyscreen, webcam, nginx), with the on-device update supervisor's
+# stop/wait/start and print-idle semantics, refused while that supervisor holds a
+# lock or is validating. It requires a PUBLISHED control commit whatever the
+# install mode. There is deliberately no package install: the Moonraker venv lives
+# in persistent /usr/data, so a repair there would outlive the next install and
+# hide a broken image. Product defects are fixed in the product and reinstalled.
 #
 # PART 1 SCOPE ONLY
 #
@@ -105,15 +124,21 @@ is_hex "$CONTROL" 40 || die "--control must be a full 40-character lowercase hex
 
 OP=${1:-}
 case "$OP" in
-  inspect|status)
+  inspect|status|diagnose)
     [ "$#" -eq 1 ] || die "'$OP' takes no further arguments" ;;
+  restart)
+    [ "$#" -eq 2 ] || die "'restart' requires exactly one service name"
+    case "$2" in
+      klipper|moonraker|guppyscreen|webcam|nginx) ;;
+      *) die "unknown service '$2'. Restartable: klipper moonraker guppyscreen webcam nginx" ;;
+    esac ;;
   verify|install)
     [ "$#" -eq 4 ] || die "'$OP' requires <source-head> <ximage-sha256> <rootfs-sha256>"
     is_hex "$2" 40 || die "source-head must be a full 40-character lowercase hex SHA"
     is_hex "$3" 64 || die "ximage-sha256 must be 64 lowercase hex characters"
     is_hex "$4" 64 || die "rootfs-sha256 must be 64 lowercase hex characters" ;;
-  *) die "unknown operation '${OP:-}'. The Hardware Agent has exactly four:
-       inspect  status  verify  install
+  *) die "unknown operation '${OP:-}'. The Hardware Agent has exactly six:
+       inspect  status  diagnose  restart  verify  install
        Motion, heating, extrusion, calibration and MCU flashing are Part 2 and have no
        operation here." ;;
 esac

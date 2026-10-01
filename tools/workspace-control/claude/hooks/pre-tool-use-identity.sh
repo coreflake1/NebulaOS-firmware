@@ -82,9 +82,24 @@ esac
 # Enforced here rather than in agent frontmatter because scoped Bash grants
 # are not enforced in this build - see the note under read-only reviewers.
 #
-# EXACTLY ONE caller/file pair may run unsandboxed:
+# Exactly these caller/file pairs may run unsandboxed, each running one file:
 #
-#   nebulaos-build   tools/run-nebulaos-build.sh <40-hex sha>
+#   nebulaos-build     tools/run-nebulaos-build.sh <40-hex sha>
+#   nebulaos-hardware  tools/run-nebulaos-hardware.sh <semantic operation>
+#   main agent         tools/run-nebulaos-hardware.sh <any operation but install>
+#
+# The main agent is the session's own principal: a payload with NO agent_type
+# key. A present-but-blank, null, padded or non-string agent_type is not the
+# main agent and not any other principal. The main agent may diagnose, verify
+# and restart a service, but not install: a flash nobody asked for stays
+# mechanically impossible for it, not merely against policy.
+#
+# What makes that mechanical is the UNSANDBOXED check, where the whole command
+# must be one lone launcher invocation. The sandboxed check of rule 3 is an
+# early, explanatory refusal only: it reads the plain command, and wrappers or
+# globs can get past it. That does not matter, because a sandboxed launcher
+# cannot reach a printer - no network, and the credential store is denied by
+# settings.json denyRead.
 #
 # The control-layer sync is deliberately NOT such a pair. An earlier revision
 # granted the main agent an unsandboxed sync, to resolve what looked like a
@@ -117,12 +132,13 @@ esac
 #   2. dangerouslyDisableSandbox is refused unless the request is the pair
 #      above, with verified content, no chaining, no wrapper and no extra
 #      arguments.
-#   3. each launcher is refused to every caller but its own agent, sandboxed or
-#      not.
-#   4. the hardware agent is refused device-contact commands outright, so its
-#      stated constraints have the same mechanical backing the reviewers have.
-#      Its launcher path is reserved and bound to it alone, and no such file
-#      exists.
+#   3. each launcher is refused to every caller but its own principals,
+#      sandboxed or not: the build launcher to nebulaos-build; the hardware
+#      launcher to nebulaos-hardware, and to the main agent for every operation
+#      except install.
+#   4. the hardware agent is refused device-contact commands outright. It
+#      reaches a printer only through its launcher, whose command word is not
+#      in the refused set.
 #
 # Fail-closed SCOPE: if the interpreter cannot run, the request is refused when
 # it asked for privilege, OR named a launcher path, OR names an engine. Rules
@@ -150,6 +166,9 @@ if not isinstance(d,dict): sys.exit(3)
 # main agent. A non-string is not a principal at all.
 agent=d.get("agent_type")
 if not isinstance(agent,str): agent=""
+# The main agent is a payload with NO agent_type key at all. Present-but-blank,
+# null or non-string is not the main agent (see the header).
+is_main = "agent_type" not in d
 ti=d.get("tool_input") or {}
 if not isinstance(ti,dict): ti={}
 tool=d.get("tool_name")
@@ -247,10 +266,10 @@ if agent==HW_AGENT:
     for base in CW:
         if base in DEVICE:
             out("The "+HW_AGENT+" agent is refused the "+base+" command.\n\n"
-                "This agent is created but NOT enabled: it has no bound target, no credentials\n"
-                "and no launcher. Its no-device-contact constraint is mechanical, not advisory,\n"
-                "so it cannot reach a printer before a mission binds one.\n\n"
-                "If you were asked to qualify hardware, report HARDWARE_QUALIFIED=NOT_ATTEMPTED.")
+                "It reaches a printer only through its launcher, which composes every device\n"
+                "command in reviewed control code against an enrolled device profile:\n\n"
+                "  tools/run-nebulaos-hardware.sh --device <id> --control <40-hex C> <operation>\n\n"
+                "Operations: inspect status diagnose restart verify install.")
 
 # one plain command: no chaining, redirection, substitution or expansion
 bad=set(";&|<>(){}$\n\r"); bad.add(chr(96))
@@ -276,10 +295,22 @@ if t2:
 is_build = bool(target) and target in BUILD
 is_hw    = bool(target) and target in HW
 
-# --- 3. launchers are bound to their own agent, sandboxed or not -----------
+# The hardware operation, read past --device/--control. Rule 3 needs it before
+# the full grammar check below: the main agent grant excludes install.
+def hw_op(a):
+    a=list(a)
+    while len(a)>=2 and a[0] in ("--device","--control"): a=a[2:]
+    return a[0] if a else ""
+
+# --- 3. launchers are bound to their own principals, sandboxed or not ------
 if is_hw and agent!=HW_AGENT:
-    out("The hardware qualification launcher may only be invoked by the "+HW_AGENT+" agent.\n"
-        "Caller: "+(agent or "main agent")+".")
+    if not is_main:
+        out("The hardware launcher may only be invoked by the "+HW_AGENT+" agent or the\n"
+            "main agent. Caller: "+(agent or repr(d.get("agent_type")))+".")
+    if hw_op(args)=="install":
+        out("The main agent may not run the install operation of the hardware launcher.\n\n"
+            "Flashing a printer is delegated to the "+HW_AGENT+" subagent, so an install\n"
+            "nobody asked for stays mechanically impossible for the main agent.")
 
 if is_build and agent!=BUILD_AGENT:
     out("The approved build launcher may only be invoked by the "+BUILD_AGENT+" agent.\n"
@@ -308,14 +339,15 @@ def content_is_canonical(path):
 
 # --- 2. the sandbox escape -------------------------------------------------
 if sandbox_off:
-    if not ((agent==BUILD_AGENT and is_build) or (agent==HW_AGENT and is_hw)):
+    if not ((agent==BUILD_AGENT and is_build) or (agent==HW_AGENT and is_hw)
+            or (is_main and is_hw)):
         out("Unsandboxed execution is refused for "+(agent or "the main agent")+" running this\n"
             "command.\n\n"
-            "Leaving the sandbox restores this user full host privilege, so it is granted to\n"
-            "exactly two caller/file pairs, each running exactly one file:\n\n"
+            "Leaving the sandbox restores this user full host privilege, so it is granted only\n"
+            "to these caller/file pairs, each running exactly one file:\n\n"
             "  nebulaos-build      tools/run-nebulaos-build.sh <40-hex sha>\n"
-            "  nebulaos-hardware   tools/run-nebulaos-hardware.sh [--host <private-ipv4>]\n"
-            "                      <subcommand> <40-hex sha> <64-hex sha256> <64-hex sha256>\n\n"
+            "  nebulaos-hardware   tools/run-nebulaos-hardware.sh --device <id> --control <C> <op>\n"
+            "  main agent          the same hardware launcher, any op except install\n\n"
             "The control-layer sync is NOT in that set. Installing the authority layer\n"
             "requires a human running it out of band - that is the control, not a defect.\n\n"
             "Resolved to: "+str(target))
@@ -365,6 +397,8 @@ if sandbox_off:
         #
         #   --device <id> --control <40-hex C> inspect
         #   --device <id> --control <40-hex C> status
+        #   --device <id> --control <40-hex C> diagnose
+        #   --device <id> --control <40-hex C> restart <service>
         #   --device <id> --control <40-hex C> verify  <40-hex X> <64-hex> <64-hex>
         #   --device <id> --control <40-hex C> install <40-hex X> <64-hex> <64-hex>
         #
@@ -394,15 +428,19 @@ if sandbox_off:
                 "Privileged helper bytes are read from the git objects at that commit, never\n"
                 "from the working tree, so a hardware session states which reviewed control\n"
                 "generation it is running or it is not a controlled session.")
-        HW_READONLY=("inspect","status")
+        HW_READONLY=("inspect","status","diagnose")
         HW_KEYED=("verify","install")
+        HW_SERVICES=("klipper","moonraker","guppyscreen","webcam","nginx")
         ok_args = (len(a)==1 and a[0] in HW_READONLY) or \
+                  (len(a)==2 and a[0]=="restart" and a[1] in HW_SERVICES) or \
                   (len(a)==4 and a[0] in HW_KEYED
                    and is_sha(a[1]) and is_sha256(a[2]) and is_sha256(a[3]))
         if not ok_args:
             out("The Hardware Agent launcher accepts exactly:\n\n"
                 "  --device <id> --control <40-hex C> inspect\n"
                 "  --device <id> --control <40-hex C> status\n"
+                "  --device <id> --control <40-hex C> diagnose\n"
+                "  --device <id> --control <40-hex C> restart klipper|moonraker|guppyscreen|webcam|nginx\n"
                 "  --device <id> --control <40-hex C> verify  <40-hex X> <64-hex> <64-hex>\n"
                 "  --device <id> --control <40-hex C> install <40-hex X> <64-hex> <64-hex>\n\n"
                 "Refused - verify and install state their target release and BOTH artifact\n"

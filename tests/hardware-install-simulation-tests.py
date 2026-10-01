@@ -1453,6 +1453,215 @@ def case_capability_vs_policy():
         ok("an oversized payload is refused", str(exc)[:100])
 
 
+def case_diagnose_and_restart():
+    """diagnose is read-only; restart is a guarded repair through the real agent ops.
+
+    Proves: restart needs a PUBLISHED control commit even in DEV mode; refuses
+    an unknown service, an open install transaction, Stock, a busy printer,
+    the update supervisor's lock or validation, and klipper without proven
+    idle; and a successful restart is recorded in the host repair log.
+    """
+    import argparse
+    import contextlib
+    import io
+    import nebulaos_agent as agent
+
+    saved = (agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published)
+    fx, root = scenario("repair")
+    try:
+        os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "jstate")
+        conf = os.path.join(os.environ[profiles.ENV_HOME], "devices", "printer-sim", "profile.conf")
+        with open(conf, "a") as fh:
+            fh.write("INSTALL_MODE=dev\n")
+        os.chmod(conf, 0o600)
+        agent.FW_ROOT = fx.control_work
+        agent.ssh_session_factory = lambda profile: sim.make_session_factory(fx.printer, profile)
+        published = {"ok": True}
+        agent.control_is_published = lambda c: (published["ok"], "sim")
+
+        def run(op, service=None):
+            ns = argparse.Namespace(device="printer-sim", control_commit=fx.control_commit,
+                                    op=op, service=service)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    rc = {"diagnose": agent.op_diagnose, "restart": agent.op_restart}[op](ns)
+                except (agent.AgentRefusal, profiles.ProfileError, control.ControlError) as exc:
+                    print("REFUSED: %s" % exc)
+                    rc = 2
+            return rc, buf.getvalue()
+
+        p = fx.printer
+        before = dict(p.partitions)
+        rc, out = run("diagnose")
+        check("diagnose reports on the enrolled printer", rc == 0 and "===== processes" in out, out[-300:])
+        check("diagnose writes nothing", p.partitions == before and not p.restarts)
+
+        rc, out = run("restart", "sshd")
+        check("restart refuses an unknown service", rc == 2 and "unknown service" in out, out[-200:])
+
+        published["ok"] = False
+        rc, out = run("restart", "moonraker")
+        check("restart refuses an UNPUBLISHED control commit, even in DEV mode",
+              rc == 2 and "published control commit" in out and not p.restarts, out[-200:])
+        published["ok"] = True
+
+        txn = journal.Transaction.begin("printer-sim", fx.control_commit, SOURCE_HEAD, "a" * 64, "b" * 64)
+        rc, out = run("restart", "moonraker")
+        check("restart refuses while an install transaction is open",
+              rc == 2 and "transaction is open" in out and not p.restarts, out[-200:])
+        txn.advance(journal.DONE, "sim")
+
+        p.supervisor_lock = "klipper.lock"
+        rc, out = run("restart", "moonraker")
+        check("restart refuses while the update supervisor holds a lock",
+              rc == 1 and "RESTART_RESULT=REFUSED" in out and not p.restarts, out[-200:])
+        p.supervisor_lock = None
+        p.supervisor_validating = True
+        rc, out = run("restart", "moonraker")
+        check("restart refuses while the update supervisor is validating",
+              rc == 1 and "validating" in out and not p.restarts, out[-200:])
+        p.supervisor_validating = False
+
+        p.printing = True
+        rc, out = run("restart", "moonraker")
+        check("restart refuses during a print", rc != 0 and not p.restarts, out[-200:])
+        p.printing = False
+
+        p.heater_targets["extruder"] = 210
+        rc, out = run("restart", "klipper")
+        check("klipper restart refuses with a heater target set",
+              rc == 2 and "proven idle" in out and not p.restarts, out[-200:])
+        p.heater_targets["extruder"] = 0
+
+        p.print_state_readable = False
+        rc, out = run("restart", "klipper")
+        check("klipper restart refuses when the print state is unreadable",
+              rc == 1 and "unreadable" in out and not p.restarts, out[-200:])
+        rc, out = run("restart", "moonraker")
+        check("moonraker restart proceeds when only the print state is unreadable",
+              rc == 0 and p.restarts == ["moonraker"], out[-300:])
+        p.print_state_readable = True
+
+        rc, out = run("restart", "klipper")
+        check("klipper restart proceeds on a proven idle printer",
+              rc == 0 and "RESTART_RESULT=DONE" in out and p.restarts[-1] == "klipper", out[-300:])
+        check("the device-side lock is released afterwards", p.flash_lock_holder is None)
+        log = open(os.path.join(root, "jstate", "repairs", "printer-sim.log")).read()
+        # 10 attempts so far: 4 refused on the host, 4 refused on the device, 2 done.
+        check("every restart attempt is in the host repair log, refusals included",
+              log.count("OP=restart") == 10 and log.count("RESULT=REFUSED") == 8
+              and "ARG=sshd RESULT=REFUSED" in log and "ARG=klipper RESULT=DONE" in log, log[-400:])
+
+        p.running_os = device.OS_STOCK
+        rc, out = run("restart", "moonraker")
+        check("restart never runs against Stock", rc == 2 and p.restarts[-1] == "klipper", out[-200:])
+    finally:
+        agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published = saved
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def case_restart_script_in_a_real_shell():
+    """The composed restart script, run by /bin/sh against a fixture tree with
+    a stub wget - so the refusals are proven in shell, not only in the model."""
+    root = tempfile.mkdtemp(prefix="nebulaos-restart.", dir=os.environ.get("TMPDIR") or None)
+    try:
+        nroot = os.path.join(root, "nebulaos")
+        os.makedirs(os.path.join(nroot, "updates", "locks"))
+        os.makedirs(os.path.join(nroot, "updates", "moonraker"))
+        bindir = os.path.join(root, "bin")
+        os.makedirs(bindir)
+        pidfile = os.path.join(root, "svc.pid")
+        init = os.path.join(root, "S56moonraker")
+        with open(init, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in\n"
+                     "start) sleep 30 >/dev/null 2>&1 & echo $! > %s ;;\n"
+                     "stop) [ -f %s ] && kill $(cat %s) 2>/dev/null; rm -f %s ;;\nesac\n"
+                     % ((shlex_quote(pidfile),) * 4))
+        os.chmod(init, 0o755)
+        state = os.path.join(root, "print_state")
+        with open(os.path.join(bindir, "wget"), "w") as fh:
+            fh.write("#!/bin/sh\ncat %s 2>/dev/null\n" % shlex_quote(state))
+        os.chmod(os.path.join(bindir, "wget"), 0o755)
+
+        def run(name, print_json):
+            with open(state, "w") as fh:
+                fh.write(print_json)
+            script = device.restart_script(name)
+            real_init, real_pid = device.RESTARTABLE_SERVICES[name]
+            script = (script.replace(shlex_quote(real_init), shlex_quote(init))
+                      .replace(shlex_quote(real_pid), shlex_quote(pidfile))
+                      .replace("R=/usr/data/nebulaos", "R=" + shlex_quote(nroot)))
+            env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""))
+            out = subprocess.run(["sh", "-c", script], capture_output=True, text=True,
+                                 env=env, timeout=60).stdout
+            return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+
+        idle = '{"result":{"status":{"print_stats":{"state":"standby"}}}}'
+        r = run("moonraker", '{"result": {"status": {"print_stats": {"state": "printing"}}}}')
+        check("shell: refuses during a print (spaced JSON)", r.get("restart_result") == "REFUSED", str(r))
+        lock = os.path.join(nroot, "updates", "locks", "moonraker.lock")
+        open(lock, "w").close()
+        r = run("moonraker", idle)
+        check("shell: refuses while a supervisor lock exists",
+              r.get("restart_result") == "REFUSED" and "moonraker.lock" in r.get("restart_reason", ""), str(r))
+        os.remove(lock)
+        st = os.path.join(nroot, "updates", "moonraker", "state.json")
+        with open(st, "w") as fh:
+            fh.write('{\n  "state": "validating",\n}\n')
+        r = run("moonraker", idle)
+        check("shell: refuses while a component is validating",
+              r.get("restart_result") == "REFUSED" and "validating" in r.get("restart_reason", ""), str(r))
+        os.remove(st)
+        r = run("klipper", "")
+        check("shell: klipper refuses when the print state is unreadable",
+              r.get("restart_result") == "REFUSED" and "unreadable" in r.get("restart_reason", ""), str(r))
+        r = run("moonraker", "")
+        check("shell: moonraker restarts when only the print state is unreadable",
+              r.get("restart_result") == "DONE" and r.get("restart_new_pid"), str(r))
+        old = r.get("restart_new_pid")
+        r = run("moonraker", idle)
+        check("shell: a second restart replaces the process",
+              r.get("restart_result") == "DONE" and r.get("restart_old_pid") == old
+              and r.get("restart_new_pid") not in ("", old), str(r))
+        # An old process that will not exit: start-stop-daemon would refuse to
+        # start, so the pid stays the same - that is FAILED, never DONE.
+        stubborn = os.path.join(root, "S-stubborn")
+        with open(stubborn, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$1\" in\nstop) : ;;\nstart) : ;;\nesac\n")
+        os.chmod(stubborn, 0o755)
+        real_init_q = shlex_quote(device.RESTARTABLE_SERVICES["moonraker"][0])
+        script = (device.restart_script("moonraker").replace(real_init_q, shlex_quote(stubborn))
+                  .replace(shlex_quote(device.RESTARTABLE_SERVICES["moonraker"][1]), shlex_quote(pidfile))
+                  .replace("R=/usr/data/nebulaos", "R=" + shlex_quote(nroot))
+                  .replace("[ \"$n\" -ge 20 ]", "[ \"$n\" -ge 1 ]"))
+        with open(state, "w") as fh:
+            fh.write(idle)
+        env = dict(os.environ, PATH=bindir + ":" + os.environ.get("PATH", ""))
+        out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env,
+                             timeout=60).stdout
+        check("shell: an unchanged pid after start is FAILED, not DONE",
+              "restart_result=FAILED" in out and "did not exit" in out, out)
+        subprocess.run(["sh", init, "stop"], capture_output=True)
+        check("shell: an unknown service never becomes a script",
+              _raises(lambda: device.restart_script("sshd; reboot")))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(s)
+
+
+def _raises(fn):
+    try:
+        fn()
+    except device.DeviceError:
+        return True
+    return False
+
+
 def case_no_raw_surface():
     """The closed vocabulary, asserted rather than asserted-in-prose."""
     forbidden = ("run", "exec", "shell", "dd", "read_offset", "write_offset", "raw")
@@ -1477,6 +1686,8 @@ SCENARIOS = [
     ("service probe works without pgrep", case_service_probe_without_pgrep),
     ("DEV_INSTALL end to end (no attestation)", case_dev_install_end_to_end),
     ("closed vocabulary", case_no_raw_surface),
+    ("diagnose and restart (repairs)", case_diagnose_and_restart),
+    ("restart script in a real shell", case_restart_script_in_a_real_shell),
     ("control provenance", case_control_provenance),
     ("attestation v2 required", case_attestation_required),
     ("happy path", case_happy_path),

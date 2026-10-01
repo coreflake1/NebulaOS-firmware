@@ -29,8 +29,9 @@ Read this before doing anything else in this workspace.
 8. **Host Klipper is official upstream `Klipper3d/klipper` and must remain pristine.**
    The firmware build owns its exact dependency checkout; there is no top-level Klipper clone.
 
-Additional hard rules: never operate the printer (no SSH, flashing, reboots, OTA markers,
-MCU serial, motion, or heaters) unless the user explicitly asks for a hardware task.
+Additional hard rules: never operate the printer unless the user explicitly asks for a
+hardware task, and then only through `tools/run-nebulaos-hardware.sh` (see WORKSPACE_RULES
+§11). Never by hand-written SSH, flashing, reboots, OTA markers, MCU serial, motion, or heaters.
 
 ---
 
@@ -54,7 +55,9 @@ do not treat them as current, and do not "correct" the source to match them.
 
 ## Agent-use policy
 
-One main programmer, two independent specialist reviewers. Do not spin up multiple
+One main programmer, two independent specialist reviewers, and two operators with a
+single launcher each: `nebulaos-build` (builds) and `nebulaos-hardware` (the printer).
+Do not spin up multiple
 general-purpose agents to solve the same implementation task, and do not create agent teams.
 
 **Routine work — main Claude works directly.** Local, single-repo, low-risk changes:

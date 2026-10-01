@@ -21,9 +21,68 @@ PART1_INSTALL_VERIFIED=YES
 ```sh
 run-nebulaos-hardware.sh --device <id> --control <C> inspect
 run-nebulaos-hardware.sh --device <id> --control <C> status
+run-nebulaos-hardware.sh --device <id> --control <C> diagnose
+run-nebulaos-hardware.sh --device <id> --control <C> restart <service>
 run-nebulaos-hardware.sh --device <id> --control <C> verify  <X> <ximage-sha256> <rootfs-sha256>
 run-nebulaos-hardware.sh --device <id> --control <C> install <X> <ximage-sha256> <rootfs-sha256>
 ```
+
+## Who may run it
+
+| operation | kind | main agent | `nebulaos-hardware` |
+|---|---|---|---|
+| `inspect`, `status`, `diagnose`, `verify` | read-only | yes | yes |
+| `restart <service>` | repair | yes | yes |
+| `install` | flash | **no** | yes |
+
+Enforced by the PreToolUse hook, which also binds the launcher to its committed
+bytes and checks the grammar before the sandbox is left. No other agent may run
+it. The main agent is refused `install` so that a flash nobody asked for stays
+mechanically impossible for it, not merely against policy. What makes that
+mechanical is the unsandboxed check, which admits only one lone launcher
+invocation. A sandboxed launcher cannot reach a printer at all: it has no
+network, and the credential store is denied. Either principal touches a printer
+only when the user asks for a hardware task.
+
+The main agent is recognised as a hook payload with no `agent_type`. Any
+subagent kind that sends none would inherit the main agent's rights, which
+include `restart` but not `install`.
+
+## Diagnose and restart
+
+`diagnose` prints a fixed, bounded, read-only report from the enrolled printer,
+after its identity matches the profile:
+
+- processes, memory, disk, the marker;
+- the MCU guard's per-boot state;
+- the update supervisor's locks and component states;
+- Moonraker's `/server/info` and print state;
+- tails of the Moonraker, Klippy and system logs, and `dmesg`;
+- the Moonraker venv's packages.
+
+`restart` is the only repair. It takes one service from a closed list: klipper,
+moonraker, guppyscreen, webcam or nginx. It mirrors the on-device update
+supervisor: stop, wait up to 20 s for the old process to exit, then start. It
+refuses:
+
+- a control commit C that is not published, **whatever the install mode**,
+  because a repair composed from an unpublished commit is code nobody else can
+  see;
+- an open install transaction, and a printer running Stock;
+- a print that is running or paused;
+- any update-supervisor lock, or a component in `validating`, because a restart
+  mid-validation reads as a failed update and can roll back;
+- `klipper` without a proven idle printer, because an unreadable print state
+  refuses.
+
+Every attempt is appended to `~/.local/state/nebulaos-hardware/repairs/<device>.log`.
+
+There is deliberately **no package install**. The Moonraker venv lives in
+persistent `/usr/data`, and DEV_INSTALL writes only p6/p8. A package installed
+there would survive the next install, pass S04's venv smoke test, and be
+snapshotted as the supervisor's last-known-good env, so a later image missing
+the same package would verify PASS. Product defects are fixed in the product and
+reinstalled.
 
 There is no `ssh`, `scp`, `dd`, `marker`, `reboot`, `flash`, raw `usbboot`,
 `--host`, `--password` or `--command`. Not filtered — **absent**. `DeviceSession`
