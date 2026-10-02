@@ -53,7 +53,7 @@ echo; echo "== 4. fast control-layer tests"
 RC=0
 for t in workspace-dev-mode-tests.sh workspace-control-privilege-guard-tests.sh hardware-launcher-grammar-tests.sh; do
   if out=$(bash "$FW/tests/$t" 2>&1); then
-    echo "PASS $t ($(printf '%s\n' "$out" | grep -cE '^\s+PASS'))"
+    echo "PASS $t ($(printf '%s\n' "$out" | grep -cE '^\s*PASS'))"
   else
     echo "FAIL $t"; printf '%s\n' "$out" | grep -E 'FAIL|FATAL' | head -20; RC=1
   fi
