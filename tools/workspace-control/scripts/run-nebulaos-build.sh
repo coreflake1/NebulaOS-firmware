@@ -43,12 +43,19 @@
 #
 # BUILD MODES
 #
-# Exactly two, and they are semantic names, not pass-through options:
+# Semantic names, not pass-through options. DEV is the default; the two
+# release-grade modes are explicit opt-in only (WORKSPACE_RULES section 0).
 #
-#   --qualified   (default) reproduce the already hardware-qualified baseline
+#   --dev         (default) a development build of any LOCAL commit, pushed or
+#                 not. Cloned from the local firmware repository's objects, so
+#                 unrelated dirty or unpushed work elsewhere does not matter -
+#                 only the commit being built does. build.sh dev mode (cache
+#                 reuse). Writes a build record with BUILD_MODE=dev, which
+#                 DEV_INSTALL accepts and a release install refuses.
+#   --qualified   RELEASE: reproduce the already hardware-qualified baseline
 #                 byte-exactly. Any difference from QUALIFIED_BASELINE_TAG is
 #                 a failure, by design.
-#   --candidate   the same resolved-artifact assertions, but the baseline
+#   --candidate   RELEASE: the same resolved-artifact assertions, but the baseline
 #                 comparison is informational. This is the correct mode for
 #                 source that legitimately contains not-yet-hardware-qualified
 #                 changes - see assert-baseline-config.sh's own header, which
@@ -69,7 +76,10 @@
 # duplicating it here would mean writing the very string the hook refuses to
 # accept in tool input.
 #
-# Usage:  tools/run-nebulaos-build.sh [--candidate|--qualified] <expected-firmware-sha>
+# Usage:  tools/run-nebulaos-build.sh [--plan] [--dev|--candidate|--qualified] <expected-firmware-sha>
+#
+# --plan prints the mode and source the launcher WOULD use, after its checks,
+# and exits before cloning. For tests; the PreToolUse grammar does not offer it.
 #
 # The SHA is mandatory and must be the full 40 characters. A build whose source
 # identity was not stated up front is not a qualification build.
@@ -96,39 +106,40 @@ FW="$ROOT/NebulaOS-firmware"
 [ -d "$FW/.git" ] || die "$FW is not a git checkout"
 
 # --- arguments: an optional semantic mode, then exactly one full SHA --------
-MODE=qualified
+PLAN=0
+[ "${1:-}" = --plan ] && { PLAN=1; shift; }
+MODE=dev
 case "${1:-}" in
+  --dev)       MODE=dev; shift ;;
   --candidate) MODE=candidate; shift ;;
   --qualified) MODE=qualified; shift ;;
-  --*) die "unknown option '${1}'. This launcher accepts --candidate or --qualified and forwards no build options." ;;
+  --*) die "unknown option '${1}'. This launcher accepts --dev, --candidate or --qualified and forwards no build options." ;;
 esac
-[ "$#" -eq 1 ] || die "usage: run-nebulaos-build.sh [--candidate|--qualified] <expected-firmware-sha> (got $# non-option argument(s))"
+[ "$#" -eq 1 ] || die "usage: run-nebulaos-build.sh [--dev|--candidate|--qualified] <expected-firmware-sha> (got $# non-option argument(s))"
 EXPECT=$1
 case "$EXPECT" in
   *[!0-9a-f]*|"") die "expected-firmware-sha must be a full lowercase hex SHA" ;;
 esac
 [ "${#EXPECT}" -eq 40 ] || die "expected-firmware-sha must be a full 40-character SHA (got ${#EXPECT})"
 
-# --- the canonical workspace must be sound before it is used as an input ----
-# FULL ONLINE gate here, deliberately NOT the fast --hook gate the PreToolUse
-# path uses. The fast gate is offline by construction: it cannot tell a current
-# checkout from a stale source generation that merely looks self-consistent,
-# because it never resolves the canonical remote. Routine per-tool-call gating
-# is local and cheap; a release boundary is the opposite trade and is meant to
-# be. A build whose source identity was never compared against the canonical
-# remote is not a qualification build.
-"$ROOT/tools/verify-workspace-identity.sh" --full >/dev/null 2>&1 \
-  || die "full online workspace identity gate failed - run tools/verify-workspace-identity.sh and resolve before building.
-       This boundary requires the canonical remotes to be reachable. An unresolved remote is an
-       UNVERIFIED source generation, not a pass; it is refused rather than downgraded to offline."
+# --- RELEASE modes: the canonical workspace must be sound and published -----
+# Full online gate and five clean repositories, exactly as before - but only
+# for --candidate/--qualified. A DEV build depends on the one commit it builds,
+# which is content-addressed, so unrelated dirty or unpushed work cannot leak in.
+if [ "$MODE" != dev ]; then
+  "$ROOT/tools/verify-workspace-identity.sh" --release >/dev/null 2>&1 \
+    || die "release build ($MODE): the full online workspace identity gate failed - run
+       tools/verify-workspace-identity.sh --release and resolve before building. An unresolved
+       remote is an UNVERIFIED source generation, not a pass."
 
-DIRTY=0
-for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
-  [ -d "$ROOT/$r/.git" ] || continue
-  n=$(git -C "$ROOT/$r" status --porcelain --untracked-files=all 2>/dev/null | grep -vc '^?? \.mcp\.json$' || true)
-  [ "$n" -eq 0 ] || { printf 'REASON: %s has %s uncommitted change(s)\n' "$r" "$n" >&2; DIRTY=1; }
-done
-[ "$DIRTY" -eq 0 ] || die "refusing to build from a dirty canonical workspace - a qualification build must come from committed, published source"
+  DIRTY=0
+  for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
+    [ -d "$ROOT/$r/.git" ] || continue
+    n=$(git -C "$ROOT/$r" status --porcelain --untracked-files=all 2>/dev/null | grep -vc '^?? \.mcp\.json$' || true)
+    [ "$n" -eq 0 ] || { printf 'REASON: %s has %s uncommitted change(s)\n' "$r" "$n" >&2; DIRTY=1; }
+  done
+  [ "$DIRTY" -eq 0 ] || die "release build ($MODE): refusing to build from a dirty canonical workspace - a release build must come from committed, published source"
+fi
 
 ORIGIN=$(git -C "$FW" remote get-url origin 2>/dev/null) || die "cannot read the canonical firmware remote"
 [ -n "$ORIGIN" ] || die "the canonical firmware repository has no origin remote"
@@ -149,13 +160,37 @@ case "$BUILD_BASE" in "$ROOT"*) die "build workspace would fall inside the canon
 # own header requires for a clean-room result.
 RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)-$$
 WORK="$BUILD_BASE/$EXPECT/run-$RUN_ID"
-mkdir -p "$BUILD_BASE/$EXPECT" || die "cannot create the build workspace base at $BUILD_BASE/$EXPECT"
+[ "$PLAN" = 1 ] || mkdir -p "$BUILD_BASE/$EXPECT" || die "cannot create the build workspace base at $BUILD_BASE/$EXPECT"
 [ -e "$WORK" ] && die "build workspace $WORK already exists"
 
-printf 'RUN_NEBULAOS_BUILD=CLONING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_WORKSPACE=%s\nORIGIN=%s\n' \
-  "$EXPECT" "$MODE" "$WORK" "$ORIGIN"
+# DEV builds clone the LOCAL repository (any local commit, pushed or not);
+# release builds clone the canonical REMOTE (published commits only).
+if [ "$MODE" = dev ]; then
+  git -C "$FW" cat-file -e "${EXPECT}^{commit}" 2>/dev/null \
+    || die "commit $EXPECT does not exist in the local firmware repository $FW"
+  CLONE_FROM=$FW
+else
+  CLONE_FROM=$ORIGIN
+fi
 
-git clone --quiet "$ORIGIN" "$WORK" || die "cannot clone $ORIGIN into $WORK"
+if [ "$PLAN" = 1 ]; then
+  printf 'RUN_NEBULAOS_BUILD=PLAN\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nCLONE_FROM=%s\n' \
+    "$EXPECT" "$MODE" "$CLONE_FROM"
+  exit 0
+fi
+
+printf 'RUN_NEBULAOS_BUILD=CLONING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_WORKSPACE=%s\nCLONE_FROM=%s\nORIGIN=%s\n' \
+  "$EXPECT" "$MODE" "$WORK" "$CLONE_FROM" "$ORIGIN"
+
+git clone --quiet --no-hardlinks "$CLONE_FROM" "$WORK" || die "cannot clone $CLONE_FROM into $WORK"
+if [ "$MODE" = dev ]; then
+  # A local commit need not be on a branch tip; fetch it explicitly, then point
+  # origin at the canonical remote so build provenance names the real repo.
+  git -C "$WORK" cat-file -e "${EXPECT}^{commit}" 2>/dev/null \
+    || git -C "$WORK" fetch --quiet "$FW" "$EXPECT" 2>/dev/null \
+    || die "cannot fetch local commit $EXPECT into $WORK"
+  git -C "$WORK" remote set-url origin "$ORIGIN"
+fi
 git -C "$WORK" checkout --quiet --detach "$EXPECT" 2>/dev/null \
   || die "commit $EXPECT did not resolve in a fresh clone of $ORIGIN.
        A release build is built from PUBLISHED source. Either the commit is not on the
@@ -183,7 +218,9 @@ printf 'RUN_NEBULAOS_BUILD=STARTING\nBUILD_SOURCE_HEAD=%s\nBUILD_MODE=%s\nBUILD_
 # inheriting a default. --candidate additionally sets NEBULAOS_CANDIDATE_BUILD=1,
 # which build.sh also treats as release-grade on its own, so the two guards are
 # independent: forgetting either one still yields a release-grade build.
-if [ "$MODE" = candidate ]; then
+if [ "$MODE" = dev ]; then
+  ( cd "$WORK" && ./build.sh )
+elif [ "$MODE" = candidate ]; then
   ( cd "$WORK" && NEBULAOS_CANDIDATE_BUILD=1 ./build.sh --release )
 else
   ( cd "$WORK" && ./build.sh --release )
@@ -191,12 +228,16 @@ fi
 RC=$?
 
 # --- the canonical workspace must be untouched by the build ----------------
+# Release only: in DEV, parallel sessions legitimately edit the canonical
+# checkout while a build runs, and the build itself only ever touches $WORK.
 CANON_DIRTY=0
-for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
-  [ -d "$ROOT/$r/.git" ] || continue
-  n=$(git -C "$ROOT/$r" status --porcelain --untracked-files=all 2>/dev/null | grep -vc '^?? \.mcp\.json$' || true)
-  [ "$n" -eq 0 ] || { printf 'CANONICAL_REPO_DIRTIED=%s (%s file(s))\n' "$r" "$n" >&2; CANON_DIRTY=1; }
-done
+if [ "$MODE" != dev ]; then
+  for r in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-kernel NebulaOS-guppyscreen NebulaOS-klipper-mcu; do
+    [ -d "$ROOT/$r/.git" ] || continue
+    n=$(git -C "$ROOT/$r" status --porcelain --untracked-files=all 2>/dev/null | grep -vc '^?? \.mcp\.json$' || true)
+    [ "$n" -eq 0 ] || { printf 'CANONICAL_REPO_DIRTIED=%s (%s file(s))\n' "$r" "$n" >&2; CANON_DIRTY=1; }
+  done
+fi
 
 # --- retention -------------------------------------------------------------
 # Each build workspace is a full clone plus a fetched vendor tree, which is

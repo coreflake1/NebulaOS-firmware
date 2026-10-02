@@ -17,20 +17,30 @@ claude/
   rules/                     architecture-authority.md
   hooks/                     session-start.sh, pre-tool-use-identity.sh
 scripts/
-  verify-workspace-identity.sh   identity gate (--full | --local | --hook)
+  verify-workspace-identity.sh   identity gate (DEV default | --local | --release)
   verify-architecture.sh         architecture invariants
-  sync-workspace-control.sh      the one explicit installer
+  sync-workspace-control.sh      low-level installer (canonical -> root)
+  apply-workspace-control.sh     the ONE human command: commit check, install, verify, test
+  run-nebulaos-build.sh          build launcher (DEV default | --candidate | --qualified)
+  run-nebulaos-hardware.sh       Hardware Agent launcher
 sentinel/settings.local.json machine-local nested-repo launch sentinel
 historian/                   documentation only - deliberately NOT a subagent
 ```
 
 ## Install / repair
 
+Edit the canonical files here, commit, then (human, one command):
+
 ```bash
-tools/sync-workspace-control.sh            # dry run: show what would change
-tools/sync-workspace-control.sh --apply    # install canonical -> root
-tools/verify-workspace-identity.sh         # confirm
+NebulaOS-firmware/tools/workspace-control/scripts/apply-workspace-control.sh
 ```
+
+It refuses uncommitted control files, installs, checks for zero drift, and runs the
+control-layer tests (`workspace-dev-mode-tests.sh`, `workspace-control-privilege-guard-tests.sh`,
+`hardware-launcher-grammar-tests.sh`). Idempotent; non-zero on any partial failure.
+`tools/sync-workspace-control.sh` (dry run) shows what would change.
+
+Drift is a DEV `WARN`, never a block: see WORKSPACE_RULES section 0 and 8.
 
 Verification **never** repairs drift. Silently healing a modified root would destroy the
 evidence that something changed it, so repair is always a deliberate, explicit act.

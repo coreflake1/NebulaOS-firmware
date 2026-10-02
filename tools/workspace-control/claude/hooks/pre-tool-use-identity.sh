@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# PreToolUse hook - fast local identity gate before any source-changing tool.
+# PreToolUse hook - STRICTNESS AT BOUNDARIES, NOT STRICTNESS EVERYWHERE.
 #
-# FAILS CLOSED. If this script cannot prove the workspace is sound, it denies.
-# Every early exit path below emits a deny, including "the gate script is
-# missing" and "jq is unavailable" - a guardrail that silently degrades into
-# allow-everything is not a guardrail.
+# The workspace is in DEV mode unless a human explicitly starts release work
+# (WORKSPACE_RULES section 0). Ordinary edits and sandboxed commands are only
+# checked for being in the right WORKSPACE (identity gate --dev: no network, no
+# clean-tree, branch, worktree or drift requirement). What stays strict here
+# is the privilege boundary: who may leave the sandbox, with which file.
 #
-# It deliberately does NOT do network I/O and does NOT require clean working
-# trees, so ordinary editing stays fast and possible. Source-generation truth
-# is enforced at session start (full check) and by the audit gate.
+# FAILS CLOSED on the boundary: if the privilege guard cannot evaluate a
+# request that asks for privilege, names a launcher or names an engine, it
+# denies.
 #
 set -uo pipefail
 export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0
@@ -84,15 +85,14 @@ esac
 #
 # Exactly these caller/file pairs may run unsandboxed, each running one file:
 #
-#   nebulaos-build     tools/run-nebulaos-build.sh <40-hex sha>
-#   nebulaos-hardware  tools/run-nebulaos-hardware.sh <semantic operation>
-#   main agent         tools/run-nebulaos-hardware.sh <any operation but install>
+#   nebulaos-build, main agent     tools/run-nebulaos-build.sh [mode] <40-hex sha>
+#   nebulaos-hardware, main agent  tools/run-nebulaos-hardware.sh <semantic operation>
 #
 # The main agent is the session's own principal: a payload with NO agent_type
 # key. A present-but-blank, null, padded or non-string agent_type is not the
-# main agent and not any other principal. The main agent may diagnose, verify
-# and restart a service, but not install: a flash nobody asked for stays
-# mechanically impossible for it, not merely against policy.
+# main agent and not any other principal. Reviewers never get either launcher.
+# What makes a launcher safe is its fixed, content-bound bytes and its semantic
+# grammar, not which agent typed it.
 #
 # What makes that mechanical is the UNSANDBOXED check, where the whole command
 # must be one lone launcher invocation. The sandboxed check of rule 3 is an
@@ -133,9 +133,8 @@ esac
 #      above, with verified content, no chaining, no wrapper and no extra
 #      arguments.
 #   3. each launcher is refused to every caller but its own principals,
-#      sandboxed or not: the build launcher to nebulaos-build; the hardware
-#      launcher to nebulaos-hardware, and to the main agent for every operation
-#      except install.
+#      sandboxed or not: the build launcher to nebulaos-build and the main
+#      agent; the hardware launcher to nebulaos-hardware and the main agent.
 #   4. the hardware agent is refused device-contact commands outright. It
 #      reaches a printer only through its launcher, whose command word is not
 #      in the refused set.
@@ -308,10 +307,10 @@ if is_hw and agent!=HW_AGENT:
         out("The hardware launcher may only be invoked by the "+HW_AGENT+" agent or the\n"
             "main agent. Caller: "+(agent or repr(d.get("agent_type")))+".")
 
-if is_build and agent!=BUILD_AGENT:
-    out("The approved build launcher may only be invoked by the "+BUILD_AGENT+" agent.\n"
-        "Caller: "+(agent or "main agent")+".\n\n"
-        "Reviewers do not build, and the main agent delegates: use the nebulaos-build subagent.")
+if is_build and agent!=BUILD_AGENT and not is_main:
+    out("The approved build launcher may only be invoked by the "+BUILD_AGENT+" agent or\n"
+        "the main agent. Caller: "+(agent or repr(d.get("agent_type")))+".\n\n"
+        "Reviewers do not build.")
 
 def content_is_canonical(path):
     # The executed bytes must equal the tracked canonical blob at firmware HEAD.
@@ -336,14 +335,13 @@ def content_is_canonical(path):
 # --- 2. the sandbox escape -------------------------------------------------
 if sandbox_off:
     if not ((agent==BUILD_AGENT and is_build) or (agent==HW_AGENT and is_hw)
-            or (is_main and is_hw)):
+            or (is_main and (is_hw or is_build))):
         out("Unsandboxed execution is refused for "+(agent or "the main agent")+" running this\n"
             "command.\n\n"
             "Leaving the sandbox restores this user full host privilege, so it is granted only\n"
             "to these caller/file pairs, each running exactly one file:\n\n"
-            "  nebulaos-build      tools/run-nebulaos-build.sh <40-hex sha>\n"
-            "  nebulaos-hardware   tools/run-nebulaos-hardware.sh --device <id> --control <C> <op>\n"
-            "  main agent          the same hardware launcher, any op except install\n\n"
+            "  nebulaos-build, main agent     tools/run-nebulaos-build.sh [--dev|--candidate|--qualified] <40-hex sha>\n"
+            "  nebulaos-hardware, main agent  tools/run-nebulaos-hardware.sh --device <id> --control <C> <op>\n\n"
             "The control-layer sync is NOT in that set. Installing the authority layer\n"
             "requires a human running it out of band - that is the control, not a defect.\n\n"
             "Resolved to: "+str(target))
@@ -361,16 +359,18 @@ if sandbox_off:
         # VAR=value facility and no route to the build.sh options, so the build
         # agent gains one mode, not an environment.
         #
-        #   <40-hex sha>
-        #   --candidate <40-hex sha>
-        #   --qualified <40-hex sha>
+        #   <40-hex sha>              DEV build (the default)
+        #   --dev <40-hex sha>        DEV build, explicit
+        #   --candidate <40-hex sha>  RELEASE-grade, explicit opt-in
+        #   --qualified <40-hex sha>  RELEASE-grade baseline reproduction
         ok_args = (len(args)==1 and is_sha(args[0])) or \
-                  (len(args)==2 and args[0] in ("--candidate","--qualified") and is_sha(args[1]))
+                  (len(args)==2 and args[0] in ("--dev","--candidate","--qualified") and is_sha(args[1]))
         if not ok_args:
             out("The approved build launcher accepts exactly one of:\n\n"
-                "  <40-hex sha>\n"
-                "  --candidate <40-hex sha>\n"
-                "  --qualified <40-hex sha>\n\n"
+                "  <40-hex sha>              (DEV build)\n"
+                "  --dev <40-hex sha>\n"
+                "  --candidate <40-hex sha>  (release-grade)\n"
+                "  --qualified <40-hex sha>  (release-grade)\n\n"
                 "and forwards no build options. Refused - a qualification build states its\n"
                 "source identity and its mode up front.")
     else:
@@ -557,91 +557,23 @@ the main agent and let it make the change. If you need to record something, put
 it in your reply, not on disk."
 fi
 
-# --- fast local identity gate ----------------------------------------------
+# --- DEV workspace gate ---------------------------------------------------
+# Only "is this the right workspace" (identity gate --dev). Dirty trees,
+# branches, unpushed commits, worktrees, _scratch/ and control-layer drift are
+# WARN there, so they never block an edit - including the edit that fixes them.
 GATE=$ROOT/tools/verify-workspace-identity.sh
-[ -x "$GATE" ] || deny "NebulaOS guardrail: identity gate missing or not executable at $GATE. Failing closed. Run tools/sync-workspace-control.sh --apply."
+[ -x "$GATE" ] || deny "NebulaOS guardrail: identity gate missing or not executable at $GATE. Failing closed. Ask the human to run NebulaOS-firmware/tools/workspace-control/scripts/apply-workspace-control.sh."
 
-OUT=$("$GATE" --hook 2>&1); RC=$?
+OUT=$("$GATE" --dev 2>&1); RC=$?
 if [ "$RC" -ne 0 ]; then
   REASONS=$(printf '%s\n' "$OUT" | grep -E '^\s+FAIL:' | head -12)
-
-  # --- control-layer drift recovery ---------------------------------------
-  # The only exception in this hook, and deliberately a narrow one.
-  #
-  # Without it the guardrail deadlocks. Editing the tracked canonical control
-  # source is the documented way to change this layer; that makes the root
-  # derived copies stale by design; stale copies then deny every Edit, Write
-  # and Bash - including tools/sync-workspace-control.sh, the very command
-  # the deny message below tells you to run. The repair sits inside the blast
-  # radius of the fault, so the layer cannot be maintained at all.
-  #
-  # The exception opens exactly one command, and only when ALL of:
-  #   - every gate failure is control-file drift that the sync repairs. Any
-  #     other failure - repo identity, stale source generation, topology,
-  #     sentinels, a missing canonical MANIFEST - still denies. Source
-  #     identity is never bypassable this way.
-  #   - the caller is the main agent. nebula-architect and nebula-verifier
-  #     are refused here and, independently, by the reviewer guard above.
-  #   - the tool is Bash and the command is a lone invocation of the canonical
-  #     sync: no chaining, no redirection, no substitution, no extra
-  #     arguments. `sync && rm -rf x` is not a sync.
-  #   - the script resolves, through realpath, to the installed copy or the
-  #     tracked canonical copy. Relative spellings resolve against the
-  #     caller's reported cwd and are refused when cwd is unknown, so an
-  #     earlier `cd` cannot aim the exception at some other file.
-  #
-  # The archive and launch-location guards ran earlier and have already
-  # denied, so neither is reachable from here.
-  if printf '%s\n' "$REASONS" | grep -qE '^[[:space:]]+FAIL: control: root files (drifted from canonical|missing):' \
-  && ! printf '%s\n' "$REASONS" | grep -E '^[[:space:]]+FAIL:' \
-       | grep -qvE '^[[:space:]]+FAIL: control: root files (drifted from canonical|missing):'; then
-    SYNC_VERDICT=$(printf '%s' "$INPUT" | NEBULA_ROOT="$ROOT" python3 -c '
-import json,os,shlex,sys
-try: d=json.load(sys.stdin)
-except Exception: sys.exit(0)
-
-if d.get("agent_type"): sys.exit(0)                    # main agent only
-if (d.get("tool_name") or "Bash") != "Bash": sys.exit(0)
-
-cmd=((d.get("tool_input") or {}).get("command") or "")
-if not cmd.strip(): sys.exit(0)
-
-# one plain command: no chaining, redirection, substitution or expansion
-bad=set(";&|<>(){}$\n\r"); bad.add(chr(96))
-if any(c in cmd for c in bad): sys.exit(0)
-
-try: toks=shlex.split(cmd)
-except Exception: sys.exit(0)
-if not toks: sys.exit(0)
-if toks[0] in ("bash","sh","/bin/bash","/bin/sh","/usr/bin/bash","/usr/bin/sh"):
-    toks=toks[1:]
-if not toks: sys.exit(0)
-script,args=toks[0],toks[1:]
-if args not in ([],["--apply"]): sys.exit(0)
-
-if os.path.isabs(script):
-    target=script
-else:
-    cwd=d.get("cwd")
-    if not cwd: sys.exit(0)            # cannot resolve safely -> refuse
-    target=os.path.join(cwd,script)
-
-root=os.environ["NEBULA_ROOT"]
-allowed={os.path.realpath(os.path.join(root,"tools/sync-workspace-control.sh")),
-         os.path.realpath(os.path.join(root,"NebulaOS-firmware/tools/workspace-control/scripts/sync-workspace-control.sh"))}
-if os.path.realpath(target) in allowed: print("SYNC")
-' 2>/dev/null)
-    [ "$SYNC_VERDICT" = SYNC ] && allow
-  fi
-
-  deny "WORKSPACE_IDENTITY_VALID=NO - source modification blocked.
+  deny "NebulaOS guardrail: this is not a sound NebulaOS DEV workspace.
 
 $REASONS
 
-Do not work around this and do not switch to another checkout. Resolve identity
-first. If root authority files drifted from their tracked canonical source:
-  tools/sync-workspace-control.sh            (show the difference)
-  tools/sync-workspace-control.sh --apply    (install canonical)"
+These are structural problems (a missing canonical repository, an archive or
+legacy authority tree in the active root). Fix the workspace layout; do not
+switch to another checkout."
 fi
 
 allow

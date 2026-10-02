@@ -2,24 +2,18 @@
 
 # Claude-specific notes
 
-**Architecture is not memory.**
+**Default mode is DEV.** Do not treat ordinary development as release work, and do not carry
+"we are in release mode" over from a previous session. Only the human's explicit words start
+RELEASE.
 
-Current architecture must be derived from, in this order:
+**Architecture is not memory.** Derive it from current source, the firmware manifest
+(`NebulaOS-firmware/manifests/dependencies.conf` and the build scripts) and
+`tools/verify-architecture.sh`. Automatic project memory is disabled on purpose.
 
-1. a successful workspace identity gate (`tools/verify-workspace-identity.sh`)
-2. `CURRENT_STATE.md`
-3. the firmware integration manifest / executable source
-   (`NebulaOS-firmware/manifests/dependencies.conf` and the build scripts)
-4. architecture invariants (`tools/verify-architecture.sh`)
+**Be autonomous.** Run tests, builds (`tools/run-nebulaos-build.sh <sha>`) and requested
+hardware operations yourself. Never hand the user a sequence of commands; if a human-only trust
+boundary is genuinely required, give exactly one idempotent command.
 
-Never reconstruct current architecture from historical prose, from a previous
-session's recollection, or from README narrative.
-
-Automatic project memory is disabled for this workspace on purpose. If you
-believe you "remember" a NebulaOS architectural fact, re-derive it from the
-four sources above before acting on it.
-
-Root `AGENTS.md`, `CLAUDE.md`, `WORKSPACE_RULES.md` and `.claude/` are derived
-state, installed from `NebulaOS-firmware/tools/workspace-control/`. Edit the
-canonical copy there and run `tools/sync-workspace-control.sh`; do not hand-edit
-the root copies.
+Root `AGENTS.md`, `CLAUDE.md`, `WORKSPACE_RULES.md` and `.claude/` are installed from
+`NebulaOS-firmware/tools/workspace-control/`. Edit the canonical copy; the human installs it
+with `NebulaOS-firmware/tools/workspace-control/scripts/apply-workspace-control.sh`.

@@ -191,18 +191,25 @@ run_case build DENY nebulaos-build 1 "build.sh option passthrough"        "$BUIL
 echo
 
 REASON="may only be invoked by the"
-echo "[ candidate mode is still bound to the build agent - must DENY ]"
-run_case build DENY ""                0 "main agent, --candidate"      "$BUILDER --candidate $SHA"
+# DEV workflow (WORKSPACE_RULES section 0): the main agent may run the build
+# launcher itself in every mode. What protects a release build is the
+# launcher's own release gate, not which agent typed the command - so the
+# principals that must stay OUT are reviewers and the hardware agent.
+echo "[ build launcher: reviewers and the hardware agent stay out - must DENY ]"
 run_case build DENY nebula-architect  0 "architect, --candidate"       "$BUILDER --candidate $SHA"
 run_case build DENY nebula-verifier   0 "verifier, --candidate"        "$BUILDER --candidate $SHA"
 run_case build DENY nebulaos-hardware 0 "hardware agent, --candidate"  "$BUILDER --candidate $SHA"
-run_case build DENY ""                1 "main agent, --candidate unsandboxed" "$BUILDER --candidate $SHA"
+echo
+echo "[ build launcher: main agent, every mode - must ALLOW ]"
+run_case build ALLOW "" 1 "main agent, DEV build (bare sha)"   "$BUILDER $SHA" ""
+run_case build ALLOW "" 1 "main agent, --dev"                  "$BUILDER --dev $SHA" ""
+run_case build ALLOW "" 1 "main agent, --candidate unsandboxed" "$BUILDER --candidate $SHA" ""
+run_case build ALLOW nebulaos-build 1 "build agent, --dev"     "$BUILDER --dev $SHA" ""
 echo
 
 # --- launchers are bound to their own agent, sandboxed or not --------------
 REASON="may only be invoked by the"
 echo "[ launcher binding - must DENY ]"
-run_case build DENY ""                0 "main agent, build launcher (sandboxed)"  "$BUILDER $SHA"
 run_case build DENY nebula-architect  0 "architect, build launcher"               "$BUILDER $SHA"
 run_case build DENY nebula-verifier   0 "verifier, build launcher"                "$BUILDER $SHA"
 run_case build DENY nebulaos-hardware 0 "hardware agent, build launcher"          "$BUILDER $SHA"
@@ -521,15 +528,17 @@ run_case hw DENY nebulaos-hardware 1 "diagnose with an argument"     "$HWRUN $DE
 run_case hw DENY ""                1 "main agent, restart an unlisted service" "$HWRUN $DEV restart sshd" "$R"
 echo
 
-# The main agent may run the hardware launcher - every operation but install,
-# so a flash nobody asked for stays mechanically impossible for it. The main
-# agent is a payload with NO agent_type key; anything present is not it.
-echo "[ main agent and the hardware launcher: install and impostors - must DENY ]"
-R="may not run the install operation"
-run_case hw DENY "" 1 "main agent, install unsandboxed"  "$HWRUN $DEV install $SHA $X64 $R64" "$R"
-run_case hw DENY "" 0 "main agent, install sandboxed"    "$HWRUN $DEV install $SHA $X64 $R64" "$R"
-run_case hw DENY "" 1 "main agent, install with --control first" \
-  "$HWRUN --control $CSHA --device printer-01 install $SHA $X64 $R64" "$R"
+# The main agent may run every hardware operation, install included (the
+# human asks for a flash; the launcher and agent enforce device safety). The
+# main agent is a payload with NO agent_type key; anything present is not it.
+echo "[ main agent and the hardware launcher: install - must ALLOW ]"
+run_case hw ALLOW "" 1 "main agent, install unsandboxed" "$HWRUN $DEV install $SHA $X64 $R64" ""
+run_case hw ALLOW "" 1 "main agent, install with --control first" \
+  "$HWRUN --control $CSHA --device printer-01 install $SHA $X64 $R64" ""
+echo
+echo "[ hardware launcher impostors - must DENY ]"
+run_typed build DENY '""'  'true' "empty agent_type is not the main agent (build launcher)" "$BUILDER $SHA" "may only be invoked by the"
+run_typed build DENY 'null' 'true' "null agent_type is not the main agent (build launcher)" "$BUILDER $SHA" "may only be invoked by the"
 run_typed hw DENY 'null'  'true' "null agent_type is not the main agent"  "$HWRUN $DEV diagnose" "may only be invoked by the"
 run_typed hw DENY '""'    'true' "empty agent_type is not the main agent" "$HWRUN $DEV diagnose" "may only be invoked by the"
 run_typed hw DENY '"   "' 'true' "blank agent_type is not the main agent" "$HWRUN $DEV diagnose" "may only be invoked by the"

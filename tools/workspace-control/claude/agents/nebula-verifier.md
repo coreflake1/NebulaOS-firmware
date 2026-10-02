@@ -32,7 +32,7 @@ You have **no persistent memory**.
 ## Method
 
 ```bash
-tools/verify-workspace-identity.sh      # right source generation?
+tools/verify-workspace-identity.sh      # DEV workspace sane? (--release only for release work)
 tools/verify-architecture.sh            # architecture still satisfied?
 git -C <repo> status --porcelain        # what actually changed
 git -C <repo> diff                      # review the change itself

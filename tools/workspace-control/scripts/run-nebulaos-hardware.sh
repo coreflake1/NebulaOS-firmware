@@ -15,8 +15,7 @@
 # WHO MAY RUN IT (enforced by the PreToolUse hook, not by this file)
 #
 #   nebulaos-hardware   every operation
-#   main agent          every operation EXCEPT install - so a flash nobody asked
-#                       for stays mechanically impossible, not merely against policy
+#   main agent          every operation
 #   anyone else         nothing
 #
 # Like the build launcher, the escape is bound to this file by REAL PATH **and by
@@ -60,8 +59,8 @@
 # `restart` is the only repair: one service from a closed list (klipper,
 # moonraker, guppyscreen, webcam, nginx), with the on-device update supervisor's
 # stop/wait/start and print-idle semantics, refused while that supervisor holds a
-# lock or is validating. It requires a PUBLISHED control commit whatever the
-# install mode. There is deliberately no package install: the Moonraker venv lives
+# lock or is validating. A RELEASE-mode device additionally requires a published
+# control commit. There is deliberately no package install: the Moonraker venv lives
 # in persistent /usr/data, so a repair there would outlive the next install and
 # hide a broken image. Product defects are fixed in the product and reinstalled.
 #
@@ -143,24 +142,13 @@ case "$OP" in
        operation here." ;;
 esac
 
-# --- the canonical workspace must be sound before hardware is touched -------
-# FULL ONLINE gate, not the fast --hook gate. Flashing is the least reversible
-# boundary in the project: what lands on the printer must correspond to source
-# that was checked against the canonical remote, not merely to a locally
-# self-consistent checkout. Read-only operations require it too - an inspection
-# taken against an unverified source generation is not evidence of anything.
-"$ROOT/tools/verify-workspace-identity.sh" --full >/dev/null 2>&1 \
-  || die "the full online workspace identity gate failed. Run tools/verify-workspace-identity.sh
-       and resolve before any hardware operation. An unresolved remote is an UNVERIFIED
-       source generation, not a pass; it is refused rather than downgraded to offline."
-
-# NOTE what is deliberately NOT checked here any more: whether all five
-# canonical repositories are clean. That blunt rule stood in for several
-# different proofs and had a real cost - an unrelated edit in another session
-# could invalidate an open hardware transaction that had nothing to do with it.
-# The agent now proves the specific things that were meant: control commit C
-# published and content-bound, host control code matching C, helper bytes from
-# C's git objects, product commit X published, a v2 attestation that verifies
-# against the artifact bytes, and a release-or-candidate build profile.
+# --- NO workspace-wide gate here --------------------------------------------
+# DEV hardware work depends on the exact things the agent proves for THIS
+# operation - enrolled device identity, pinned host key, control helper bytes
+# from C's git objects, product build record and artifact hashes, partition
+# targets, idle/heater state, readback - not on whether some unrelated repo is
+# dirty or every commit is pushed. A device profile in RELEASE mode makes the
+# agent itself require the full online identity gate, published C and X, and an
+# authenticated attestation.
 
 exec python3 "$AGENT" --device "$DEVICE" --control-commit "$CONTROL" "$@"

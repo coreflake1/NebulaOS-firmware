@@ -1,92 +1,60 @@
 # AGENTS.md
 
-Read this before doing anything else in this workspace.
+Read [`WORKSPACE_RULES.md`](WORKSPACE_RULES.md) — the operational contract. The short form:
 
-1. **Read [`WORKSPACE_RULES.md`](WORKSPACE_RULES.md) first.** It is the operational contract.
+## Mode: DEV by default
 
-2. **Run `tools/verify-workspace-identity.sh` before any broad investigation, audit, or edit.**
-   If it prints `WORKSPACE_IDENTITY_VALID=NO`, **STOP**. Do not audit, do not conclude, do not
-   switch to some other local checkout, and do not rationalize the contradiction.
+```
+DEFAULT = DEV. RELEASE only when the human explicitly asks for release
+preparation, a release candidate, a release freeze or release qualification.
+Never infer RELEASE from a previous session, a clean tree, a firmware build,
+a package build, or DEV hardware testing.
+```
 
-3. **`CURRENT_STATE.md` is valid only when the identity gate passes.** If the gate fails,
-   treat `CURRENT_STATE.md` as stale until it is regenerated from verified evidence.
+In DEV, work like a normal workspace: edit → targeted test → fix → test → commit whenever
+useful. Dirty trees, unpushed commits, branches, `_worktrees/`, `_scratch/` and parallel
+sessions are fine. Validate what an operation actually depends on, nothing else.
 
-4. **Shipping dependency authority is `NebulaOS-firmware/manifests/dependencies.conf`.**
-   A repository's latest `main` is *not* automatically what NebulaOS ships.
+Strict, in every mode: the printer (§11), the privilege boundary (§12), and RELEASE work once
+the human asks for it.
+
+## Hard rules
+
+1. **Shipping authority is `NebulaOS-firmware/manifests/dependencies.conf`.**
    `REPOSITORY_HEAD != SHIPPING_PIN`.
+2. **Architecture comes from current source**, the manifest and `tools/verify-architecture.sh`
+   — not from historical reports, README prose or memory (auto-memory is disabled).
+   Known-stale: `NebulaOS-firmware/README.md`, `NebulaOS-klipper-extensions/README.md`.
+3. **Never read the archived workspace** (the sibling `*-archive-*` directory) unless the user
+   explicitly asks for historical investigation. A denial is the guardrail working.
+4. **Host Klipper is pristine upstream `Klipper3d/klipper`**, owned by the firmware build. The
+   retired `NebulaOS-klipper` fork is not cloned here.
+5. **The printer** is touched only when the user asks, only through
+   `tools/run-nebulaos-hardware.sh`. Never raw ssh/scp/dd, OTA markers, MCU serial, motion or
+   heaters.
+6. **Do the work.** Do everything you are allowed to do yourself. If a human-only step is
+   unavoidable, prepare and validate everything first and hand over exactly ONE idempotent
+   command that does all of it and verifies the result.
 
-5. **Do not infer current architecture from historical reports or README prose.**
-   Current source and current integration behavior outrank any narrative document,
-   in this workspace or inside the repositories themselves.
-
-6. **Never read or use `../NebulaOS-archive-*` unless the user explicitly asks for
-   historical investigation.** It is preserved evidence, not authority. Archive access is
-   also blocked mechanically; a denial is the guardrail working, not a bug to route around.
-
-7. **The retired `NebulaOS-klipper` fork is not the host runtime source.** It is archived.
-   Do not clone it into this workspace.
-
-8. **Host Klipper is official upstream `Klipper3d/klipper` and must remain pristine.**
-   The firmware build owns its exact dependency checkout; there is no top-level Klipper clone.
-
-Additional hard rules: never operate the printer unless the user explicitly asks for a
-hardware task, and then only through `tools/run-nebulaos-hardware.sh` (see WORKSPACE_RULES
-§11). Never by hand-written SSH, flashing, reboots, OTA markers, MCU serial, motion, or heaters.
-
----
-
-## Architecture is not memory
-
-Automatic project memory is **disabled** for this workspace. Current architecture must be
-derived from: a passing identity gate, `CURRENT_STATE.md`, the firmware integration manifest
-and executable source, and `tools/verify-architecture.sh`. Never from recollection or prose.
-
-## Documentation is not architecture authority
+## Builds and hardware
 
 ```
-README prose is informative.
-Executable source and machine-readable integration state outrank it.
+tools/run-nebulaos-build.sh <sha>                       # DEV build of any local commit
+NebulaOS-firmware/tools/product-inputs.py current-build # is an existing build still current?
+tools/run-nebulaos-hardware.sh --device <id> --control <C> install <X> <ximage> <rootfs>
 ```
 
-Known-stale documents exist today in `NebulaOS-firmware/README.md` and
-`NebulaOS-klipper-extensions/README.md` (they still describe the retired Klipper fork and the
-removed PRTouch stack). They are scheduled for a separate documentation mission. Until then,
-do not treat them as current, and do not "correct" the source to match them.
+A host-side tooling change (Hardware Agent, tests, docs) never requires a Buildroot rebuild.
 
-## Agent-use policy
+## Agents
 
-One main programmer, two independent specialist reviewers, and two operators with a
-single launcher each: `nebulaos-build` (builds) and `nebulaos-hardware` (the printer).
-Do not spin up multiple
-general-purpose agents to solve the same implementation task, and do not create agent teams.
+One main programmer works directly; it may run both launchers. `nebulaos-build` and
+`nebulaos-hardware` are optional operators for long-running work. `nebula-architect` and
+`nebula-verifier` are read-only reviewers: optional in DEV (use them for genuinely
+architecture-sensitive or large changes), required in RELEASE. No agent teams.
 
-**Routine work — main Claude works directly.** Local, single-repo, low-risk changes:
-typo fixes, comments, documentation wording, a contained bug fix, test tweaks.
+## Derived state
 
-**Architecture-sensitive work — run `nebula-architect` BEFORE implementation:**
-
-```
-multi-repo changes            boot/update/recovery
-dependency changes            power-loss recovery (PLR)
-Klipper composition           calibration architecture
-kernel architecture           persistent config ownership
-MCU lifecycle                 public API changes
-                              release candidate composition
-```
-
-The architect returns `ARCHITECTURE_REVIEW=PASS|PASS_WITH_NOTES|FAIL`. On `FAIL`, fix the
-plan before writing code — do not implement and hope the verifier catches it.
-
-**Substantial implementation — run `nebula-verifier` AFTER the change.** It returns
-`VERIFICATION=PASS|FAIL` with evidence. It reports problems; it does not fix them. Fixing is
-the main programmer's job.
-
-Do not invoke either agent for trivial typo or wording changes. Both are read-only with
-respect to source, by configuration as well as by instruction.
-
-## This authority layer is derived state
-
-Root `AGENTS.md`, `CLAUDE.md`, `WORKSPACE_RULES.md` and `.claude/` are installed from
-`NebulaOS-firmware/tools/workspace-control/`, which is version-controlled. The identity gate
-fails on drift. To change them: edit the canonical copy, then run
-`tools/sync-workspace-control.sh`. Never hand-edit the root copies.
+Root `AGENTS.md`, `CLAUDE.md`, `WORKSPACE_RULES.md`, `.claude/` and `tools/*.sh` are installed
+from `NebulaOS-firmware/tools/workspace-control/`. Edit the canonical copy and commit; the human
+installs with `NebulaOS-firmware/tools/workspace-control/scripts/apply-workspace-control.sh`.

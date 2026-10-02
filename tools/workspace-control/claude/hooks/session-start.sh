@@ -7,8 +7,11 @@
 # no project history, no narrative. Pages of history are what caused agents to
 # reason from stale prose in the first place.
 #
-#   session-start.sh             startup | resume | clear  (full check)
-#   session-start.sh --compact   after compaction          (fast re-inject)
+#   session-start.sh             startup | resume | clear
+#   session-start.sh --compact   after compaction
+#
+# Both use the DEV gate: fast and offline. The online canonical-remote check is
+# a RELEASE concern (tools/verify-workspace-identity.sh --release).
 #
 # Never blocks a session: a hook that hard-fails on startup would make the
 # workspace unusable offline. It reports status; PreToolUse is what fails closed.
@@ -24,14 +27,10 @@ man(){ local v; v=$(grep -E "^$1=" "$ROOT/NebulaOS-firmware/manifests/dependenci
 head_of(){ git -C "$ROOT/$1" rev-parse HEAD 2>/dev/null || echo UNRESOLVED; }
 br_of(){ git -C "$ROOT/$1" rev-parse --abbrev-ref HEAD 2>/dev/null || echo UNRESOLVED; }
 
-if [ "$COMPACT" = 1 ]; then
-  GATE=$("$ROOT/tools/verify-workspace-identity.sh" --local 2>&1)
-  MODE="post-compaction re-injection (local check)"
-else
-  GATE=$("$ROOT/tools/verify-workspace-identity.sh" 2>&1)
-  MODE="session start (full check)"
-fi
-IDENT=$(printf '%s\n' "$GATE" | grep -E '^(WORKSPACE_IDENTITY_VALID|LOCAL_IDENTITY_VALID)=' | tail -1)
+GATE=$("$ROOT/tools/verify-workspace-identity.sh" --dev 2>&1)
+if [ "$COMPACT" = 1 ]; then MODE="post-compaction re-injection"; else MODE="session start"; fi
+IDENT=$(printf '%s\n' "$GATE" | grep -E '^(DEV_IDENTITY_VALID)=' | tail -1)
+WARNS=$(printf '%s\n' "$GATE" | grep -E '^\s+WARN:' | head -6)
 CTRL=$(printf '%s\n' "$GATE" | grep -E '^WORKSPACE_CONTROL_VALID=' | tail -1)
 SENT=$(printf '%s\n' "$GATE" | grep -E '^LAUNCH_SENTINELS_OK=' | tail -1)
 
@@ -51,25 +50,16 @@ ARCH=$("$ROOT/tools/verify-architecture.sh" --quick 2>&1 | grep -E '^(ARCHITECTU
 # Bounded on purpose: a plain glob over one directory, no find, no du, no
 # network. This runs at session start and must stay cheap.
 FW_HEAD=$(head_of NebulaOS-firmware)
-BUILD_VERIFIED=NO
-BUILD_VERIFIED_DETAIL=""
-if [ "$FW_HEAD" != UNRESOLVED ]; then
-  for att in /var/tmp/nebulaos-build/"$FW_HEAD"/*/.nebulaos-build-verified; do
-    [ -f "$att" ] || continue
-    v=$(grep -m1 '^BUILD_VERIFIED=' "$att" 2>/dev/null | cut -d= -f2-)
-    h=$(grep -m1 '^SOURCE_HEAD='    "$att" 2>/dev/null | cut -d= -f2-)
-    m=$(grep -m1 '^BUILD_MODE='     "$att" 2>/dev/null | cut -d= -f2-)
-    if [ "$v" = YES ] && [ "$h" = "$FW_HEAD" ]; then
-      BUILD_VERIFIED=YES
-      BUILD_VERIFIED_DETAIL=" (mode=$m)"
-      break
-    fi
-  done
+# A build is current when its PRODUCT inputs equal HEAD's - a tooling-only
+# commit (Hardware Agent, tests, docs) does not make the last build stale.
+PB=$(python3 "$ROOT/NebulaOS-firmware/tools/product-inputs.py" current-build HEAD 2>/dev/null)
+pbget(){ printf '%s\n' "$PB" | grep -m1 "^$1=" | cut -d= -f2-; }
+if [ "$(pbget PRODUCT_BUILD_CURRENT)" = YES ]; then
+  BUILD_LINE="PRODUCT_BUILD_CURRENT=YES (built $(pbget BUILD_SOURCE_HEAD | cut -c1-12), mode=$(pbget BUILD_MODE), $(pbget BUILD_RUN))"
+else
+  BUILD_LINE="PRODUCT_BUILD_CURRENT=NO (no build whose product inputs equal HEAD's)"
 fi
 
-# HARDWARE_QUALIFIED is likewise derived, from a qualification record for this
-# exact source generation. No record for THIS head means NO - never a remembered
-# YES from an earlier one.
 HW_QUALIFIED=NO
 [ "$FW_HEAD" != UNRESOLVED ] \
   && [ -f "$ROOT/evidence/hardware-qualification/$FW_HEAD/QUALIFIED" ] \
@@ -84,9 +74,10 @@ if [ -f "$CAND" ]; then
 fi
 
 cat <<EOF
-NEBULAOS WORKSPACE IDENTITY - $MODE
+NEBULAOS WORKSPACE - $MODE
 
-${IDENT:-WORKSPACE_IDENTITY_VALID=UNRESOLVED}
+WORKSPACE_MODE=DEV   (RELEASE only when the human explicitly starts release work)
+${IDENT:-DEV_IDENTITY_VALID=UNRESOLVED}
 ${CTRL:-WORKSPACE_CONTROL_VALID=UNRESOLVED}
 ${SENT:-LAUNCH_SENTINELS_OK=UNRESOLVED}
 $ARCH
@@ -99,12 +90,15 @@ kernel          HEAD=$(head_of NebulaOS-kernel) pin=$(man KERNEL_PIN)
 guppyscreen     HEAD=$(head_of NebulaOS-guppyscreen) pin=$(man GUPPYSCREEN_PIN)
 mcu             HEAD=$(head_of NebulaOS-klipper-mcu) provenance=$MCUPROV
 
-CURRENT_HEAD_BUILD_VERIFIED=$BUILD_VERIFIED$BUILD_VERIFIED_DETAIL
+$BUILD_LINE
 HARDWARE_QUALIFIED=$HW_QUALIFIED
+${WARNS:+
+DEV warnings (informational, never blocking):
+$WARNS}
 
-Rules: architecture is not memory - derive it from the identity gate,
-CURRENT_STATE.md, the firmware manifest/source, and tools/verify-architecture.sh.
-REPOSITORY_HEAD != SHIPPING_PIN. Auto-memory is disabled. The archive is blocked.
-If identity is not valid, STOP and report rather than proceeding.
+Rules: architecture is not memory - derive it from source, the firmware
+manifest and tools/verify-architecture.sh. REPOSITORY_HEAD != SHIPPING_PIN.
+DEV: edit, test, commit freely. Strict only at the printer, the privilege
+boundary, and explicitly requested RELEASE work. The archive is blocked.
 EOF
 exit 0

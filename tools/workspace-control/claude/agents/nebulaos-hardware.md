@@ -1,6 +1,6 @@
 ---
 name: nebulaos-hardware
-description: NebulaOS work on a real, enrolled printer - install, verify, inspect, diagnose, and restart a service - only through the Hardware Agent launcher, and only when the user asks for a hardware task. The only principal that may run `install`. Returns HARDWARE_QUALIFIED=YES|NO|NOT_ATTEMPTED with evidence.
+description: Optional operator for NebulaOS work on a real, enrolled printer - install, verify, inspect, diagnose, and restart a service - only through the Hardware Agent launcher, and only when the user asks for a hardware task. The main agent may run the same launcher itself. Returns DEV_INSTALL / HARDWARE_QUALIFIED status with evidence.
 tools: Read, Grep, Glob, Bash
 model: opus
 ---
@@ -21,10 +21,12 @@ tools/run-nebulaos-hardware.sh --device <enrolled-id> --control <40-hex C> <oper
 |---|---|
 | `inspect`, `status`, `diagnose` | read-only |
 | `verify <X> <ximage-sha256> <rootfs-sha256>` | read-only |
-| `restart klipper\|moonraker\|guppyscreen\|webcam\|nginx` | repair; needs a published C |
-| `install <X> <ximage-sha256> <rootfs-sha256>` | flash; yours alone |
+| `restart klipper\|moonraker\|guppyscreen\|webcam\|nginx` | repair (published C on a RELEASE device) |
+| `install <X> <ximage-sha256> <rootfs-sha256>` | flash |
 
-The main agent may run every operation except `install`. Flashing is delegated to you.
+The main agent may run every operation too. On the dev printer (`INSTALL_MODE=dev`) this is
+DEV_HARDWARE work: report `DEV_INSTALL=YES RELEASE_QUALIFIED=NO HARDWARE_QUALIFIED=NO`.
+`HARDWARE_QUALIFIED=YES` belongs to explicitly requested RELEASE qualification only.
 
 Run the launcher unsandboxed (`dangerouslyDisableSandbox`), as one lone command: no
 chaining, redirection, substitution or wrapper. The PreToolUse hook checks the grammar
@@ -70,5 +72,5 @@ broader grant, and do not ask the user to disable the sandbox for you.
   until it passes. A partially completed qualification is `NO`, not `YES with notes`.
 
 You have **no persistent memory**. Architecture is not memory: derive it from the
-identity gate, `CURRENT_STATE.md`, `NebulaOS-firmware/manifests/dependencies.conf`, and
+current source, `NebulaOS-firmware/manifests/dependencies.conf`, and
 `tools/verify-architecture.sh`.

@@ -12,19 +12,24 @@
 # must invalidate the audit source BEFORE broad investigation begins.
 #
 # Usage:
-#   tools/verify-workspace-identity.sh            # full check (needs network)
-#   tools/verify-workspace-identity.sh --full     # explicit full check
-#   tools/verify-workspace-identity.sh --local    # fast, no network (hook gate)
-#   tools/verify-workspace-identity.sh --hook     # PreToolUse gate (no clean check)
-#   tools/verify-workspace-identity.sh --offline  # synonym for --local
+#   tools/verify-workspace-identity.sh            # DEV (default): fast, offline
+#   tools/verify-workspace-identity.sh --dev      # explicit DEV (--hook is an alias)
+#   tools/verify-workspace-identity.sh --local    # strict audit checks, offline
+#   tools/verify-workspace-identity.sh --release  # strict + canonical remotes (--full is an alias)
 #
-# --full  is authoritative: every local HEAD is compared against the canonical
-#         remote. Session start and any audit must use this.
-# --local is for the PreToolUse hook. It validates everything that does not
-#         need the network (paths, remotes, branches, cleanliness, topology,
-#         forbidden paths, control-layer drift, launch sentinels) in
-#         milliseconds, and reports LOCAL_IDENTITY_VALID rather than claiming
-#         a full identity it did not check.
+# The workspace is in DEV mode unless a human explicitly starts release work.
+#
+# --dev     fails only on what makes this the wrong WORKSPACE: a missing
+#           canonical repo, an archive or legacy authority tree in the active
+#           root, the root itself being a git repo. Branches, dirty trees,
+#           unpushed commits, extra worktrees, _worktrees/ and _scratch/,
+#           control-layer drift and sentinels are reported as WARN, never
+#           FAIL. Each operation validates its OWN inputs (a build its source
+#           commit and pins, an install its artifact and device).
+# --local   the strict checks without the network: canonical branches, one
+#           worktree, clean trees, no drift, sentinels.
+# --release everything --local checks, plus every HEAD equal to the canonical
+#           remote. Release preparation, freeze and qualification use this.
 #
 # Exit: 0 = valid, 1 = NO.
 #
@@ -33,19 +38,23 @@ export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0
 
 OFFLINE=0
 STRICT_CLEAN=1     # working-tree cleanliness is an audit property, not an identity property
+DEV=0
 case "${1:-}" in
+  ""|--dev|--hook)   DEV=1; OFFLINE=1; STRICT_CLEAN=0 ;;
   --offline|--local) OFFLINE=1 ;;
-  --hook)            OFFLINE=1; STRICT_CLEAN=0 ;;
-  --full|"")         OFFLINE=0 ;;
-  *) echo "usage: $(basename "$0") [--full|--local|--hook]" >&2; exit 2 ;;
+  --full|--release)  OFFLINE=0 ;;
+  *) echo "usage: $(basename "$0") [--dev|--local|--release]" >&2; exit 2 ;;
 esac
 
 # ---- Resolve workspace root canonically (never trust $PWD) -----------------
 SELF=$(readlink -f "${BASH_SOURCE[0]}")
 WORKSPACE_ROOT=$(cd "$(dirname "$SELF")/.." && pwd -P)
 
-FAILURES=()
+FAILURES=(); WARNINGS=()
 fail(){ FAILURES+=("$1"); }
+# strict: a FAIL for --local/--release, a WARN in DEV. Used for every property
+# that is an audit or release concern rather than "is this the right workspace".
+strict(){ if [ "$DEV" = 1 ]; then WARNINGS+=("$1"); else FAILURES+=("$1"); fi; }
 
 GH=https://github.com/coreflake1
 
@@ -79,7 +88,7 @@ manifest(){ # var -> value from the AUTHORITATIVE shipping manifest
 }
 
 echo "WORKSPACE_ROOT=$WORKSPACE_ROOT"
-if   [ "$STRICT_CLEAN" = 0 ]; then echo "MODE=HOOK_FAST"
+if   [ "$DEV" = 1 ];          then echo "MODE=DEV"
 elif [ "$OFFLINE" = 1 ];      then echo "MODE=LOCAL_FAST"
 else                               echo "MODE=FULL_ONLINE"; fi
 echo
@@ -95,10 +104,10 @@ echo "FIRMWARE_REMOTE_MAIN=$FIRMWARE_REMOTE_MAIN"
 echo "FIRMWARE_DIRTY_FILES=$(dirty "$FW")"
 echo "FIRMWARE_WORKTREES=$(wtcount "$FW")"
 [ -d "$FW/.git" ]                                          || fail "firmware: not a git repository at canonical path"
-[ "$(norm "$(rem "$FW")")" = "$(norm "$GH/NebulaOS-firmware")" ] || fail "firmware: remote is not coreflake1/NebulaOS-firmware"
-[ "$(brof "$FW")" = "main" ]                               || fail "firmware: active branch is not main"
+[ "$(norm "$(rem "$FW")")" = "$(norm "$GH/NebulaOS-firmware")" ] || strict "firmware: remote is not coreflake1/NebulaOS-firmware"
+[ "$(brof "$FW")" = "main" ]                               || strict "firmware: active branch is not main"
 [ "$(dirty "$FW")" = "0" ]                                 || [ "$STRICT_CLEAN" = 0 ] || fail "firmware: working tree is not clean"
-[ "$(wtcount "$FW")" = "1" ]                               || fail "firmware: more than one working tree"
+[ "$(wtcount "$FW")" = "1" ]                               || strict "firmware: more than one working tree"
 if [ "$OFFLINE" = 0 ]; then
   [ "$FIRMWARE_REMOTE_MAIN" != UNRESOLVED ]                || fail "firmware: canonical remote main could not be resolved"
   [ "$(loc "$FW")" = "$FIRMWARE_REMOTE_MAIN" ]             || fail "firmware: HEAD != canonical remote main (STALE SOURCE GENERATION)"
@@ -121,12 +130,12 @@ echo "EXTENSIONS_SHIPPING_BRANCH=$EXTENSIONS_SHIPPING_BRANCH"
 echo "EXTENSIONS_SHIPPING_PIN=$EXTENSIONS_SHIPPING_PIN"
 echo "EXTENSIONS_DIRTY_FILES=$(dirty "$EX")"
 [ -d "$EX/.git" ]                                          || fail "extensions: not a git repository at canonical path"
-[ "$(norm "$(rem "$EX")")" = "$(norm "$GH/NebulaOS-klipper-extensions")" ] || fail "extensions: remote is not coreflake1/NebulaOS-klipper-extensions"
-[ "$(brof "$EX")" = "main" ]                               || fail "extensions: active branch is not main"
+[ "$(norm "$(rem "$EX")")" = "$(norm "$GH/NebulaOS-klipper-extensions")" ] || strict "extensions: remote is not coreflake1/NebulaOS-klipper-extensions"
+[ "$(brof "$EX")" = "main" ]                               || strict "extensions: active branch is not main"
 [ "$(dirty "$EX")" = "0" ]                                 || [ "$STRICT_CLEAN" = 0 ] || fail "extensions: working tree is not clean"
-[ "$(wtcount "$EX")" = "1" ]                               || fail "extensions: more than one working tree"
+[ "$(wtcount "$EX")" = "1" ]                               || strict "extensions: more than one working tree"
 # The firmware manifest, not this checkout, decides what actually ships.
-[ "$EXTENSIONS_SHIPPING_BRANCH" = "production" ]           || fail "extensions: firmware manifest runtime branch is not 'production' (got '$EXTENSIONS_SHIPPING_BRANCH')"
+[ "$EXTENSIONS_SHIPPING_BRANCH" = "production" ]           || strict "extensions: firmware manifest runtime branch is not 'production' (got '$EXTENSIONS_SHIPPING_BRANCH')"
 if [ "$OFFLINE" = 0 ]; then
   [ "$EXTENSIONS_REMOTE_MAIN" != UNRESOLVED ]              || fail "extensions: canonical remote main could not be resolved"
   [ "$(loc "$EX")" = "$EXTENSIONS_REMOTE_MAIN" ]           || fail "extensions: HEAD != canonical remote main (STALE SOURCE GENERATION)"
@@ -160,14 +169,14 @@ echo "MCU_INTEGRATION_PROVENANCE=VENDORED_PREBUILT_BINARY(candidate-001.bin)@${M
 echo "MCU_INTEGRATION_BINARY_SHA256_MATCHES_SIDECAR=$MCU_BIN_SHA_OK"
 echo "MCU_DIRTY_FILES=$(dirty "$MC")"
 [ -d "$MC/.git" ]                                          || fail "mcu: not a git repository at canonical path"
-[ "$(norm "$(rem "$MC")")" = "$(norm "$GH/NebulaOS-klipper-mcu")" ] || fail "mcu: remote is not coreflake1/NebulaOS-klipper-mcu"
-[ "$(brof "$MC")" = "main" ]                               || fail "mcu: active branch is not main"
+[ "$(norm "$(rem "$MC")")" = "$(norm "$GH/NebulaOS-klipper-mcu")" ] || strict "mcu: remote is not coreflake1/NebulaOS-klipper-mcu"
+[ "$(brof "$MC")" = "main" ]                               || strict "mcu: active branch is not main"
 [ "$(dirty "$MC")" = "0" ]                                 || [ "$STRICT_CLEAN" = 0 ] || fail "mcu: working tree is not clean"
-[ "$(wtcount "$MC")" = "1" ]                               || fail "mcu: more than one working tree"
-[ "$MCU_BIN_SHA_OK" = YES ]                                || fail "mcu: vendored candidate binary does not match its provenance sidecar sha256"
+[ "$(wtcount "$MC")" = "1" ]                               || strict "mcu: more than one working tree"
+[ "$MCU_BIN_SHA_OK" = YES ]                                || strict "mcu: vendored candidate binary does not match its provenance sidecar sha256"
 if [ -n "$MCU_INTEGRATION_COMMIT" ] && [ "$MCU_INTEGRATION_COMMIT" != UNRESOLVED ]; then
   git -C "$MC" cat-file -e "${MCU_INTEGRATION_COMMIT}^{commit}" 2>/dev/null \
-    || fail "mcu: integration provenance commit $MCU_INTEGRATION_COMMIT not present in the MCU repository"
+    || strict "mcu: integration provenance commit $MCU_INTEGRATION_COMMIT not present in the MCU repository"
 fi
 if [ "$OFFLINE" = 0 ]; then
   [ "$MCU_REMOTE_MAIN" != UNRESOLVED ]                     || fail "mcu: canonical remote main could not be resolved"
@@ -187,17 +196,17 @@ echo "KERNEL_REMOTE_OPENKE=$KERNEL_REMOTE_OPENKE"
 echo "KERNEL_SHIPPING_PIN=$KERNEL_SHIPPING_PIN"
 echo "KERNEL_DIRTY_FILES=$(dirty "$KE")"
 [ -d "$KE/.git" ]                                          || fail "kernel: not a git repository at canonical path"
-[ "$(norm "$(rem "$KE")")" = "$(norm "$GH/NebulaOS-kernel")" ] || fail "kernel: remote is not coreflake1/NebulaOS-kernel"
-[ "$(brof "$KE")" = "openke" ]                             || fail "kernel: active branch is not openke"
+[ "$(norm "$(rem "$KE")")" = "$(norm "$GH/NebulaOS-kernel")" ] || strict "kernel: remote is not coreflake1/NebulaOS-kernel"
+[ "$(brof "$KE")" = "openke" ]                             || strict "kernel: active branch is not openke"
 [ "$(dirty "$KE")" = "0" ]                                 || [ "$STRICT_CLEAN" = 0 ] || fail "kernel: working tree is not clean"
-[ "$(wtcount "$KE")" = "1" ]                               || fail "kernel: more than one working tree"
+[ "$(wtcount "$KE")" = "1" ]                               || strict "kernel: more than one working tree"
 # The shipping pin is derived from the firmware manifest and MAY legitimately
 # be older than the repository HEAD. It must still be a real ancestor.
 if [ "$KERNEL_SHIPPING_PIN" != UNRESOLVED ]; then
   if git -C "$KE" cat-file -e "${KERNEL_SHIPPING_PIN}^{commit}" 2>/dev/null; then
-    is_anc "$KE" "$KERNEL_SHIPPING_PIN" HEAD || fail "kernel: shipping pin is not an ancestor of the active openke checkout"
+    is_anc "$KE" "$KERNEL_SHIPPING_PIN" HEAD || strict "kernel: shipping pin is not an ancestor of the active openke checkout"
   else
-    fail "kernel: shipping pin $KERNEL_SHIPPING_PIN not present in the kernel repository"
+    strict "kernel: shipping pin $KERNEL_SHIPPING_PIN not present in the kernel repository"
   fi
 fi
 if [ "$OFFLINE" = 0 ]; then
@@ -218,15 +227,15 @@ echo "GUPPYSCREEN_REMOTE_MAIN=$GUPPYSCREEN_REMOTE_MAIN"
 echo "GUPPYSCREEN_SHIPPING_PIN=$GUPPYSCREEN_SHIPPING_PIN"
 echo "GUPPYSCREEN_DIRTY_FILES=$(dirty "$GS")"
 [ -d "$GS/.git" ]                                          || fail "guppyscreen: not a git repository at canonical path"
-[ "$(norm "$(rem "$GS")")" = "$(norm "$GH/NebulaOS-guppyscreen")" ] || fail "guppyscreen: remote is not coreflake1/NebulaOS-guppyscreen"
-[ "$(brof "$GS")" = "main" ]                               || fail "guppyscreen: active branch is not main"
+[ "$(norm "$(rem "$GS")")" = "$(norm "$GH/NebulaOS-guppyscreen")" ] || strict "guppyscreen: remote is not coreflake1/NebulaOS-guppyscreen"
+[ "$(brof "$GS")" = "main" ]                               || strict "guppyscreen: active branch is not main"
 [ "$(dirty "$GS")" = "0" ]                                 || [ "$STRICT_CLEAN" = 0 ] || fail "guppyscreen: working tree is not clean"
-[ "$(wtcount "$GS")" = "1" ]                               || fail "guppyscreen: more than one working tree"
+[ "$(wtcount "$GS")" = "1" ]                               || strict "guppyscreen: more than one working tree"
 if [ "$GUPPYSCREEN_SHIPPING_PIN" != UNRESOLVED ]; then
   if git -C "$GS" cat-file -e "${GUPPYSCREEN_SHIPPING_PIN}^{commit}" 2>/dev/null; then
-    is_anc "$GS" "$GUPPYSCREEN_SHIPPING_PIN" HEAD || fail "guppyscreen: shipping pin is not an ancestor of the active main checkout"
+    is_anc "$GS" "$GUPPYSCREEN_SHIPPING_PIN" HEAD || strict "guppyscreen: shipping pin is not an ancestor of the active main checkout"
   else
-    fail "guppyscreen: shipping pin $GUPPYSCREEN_SHIPPING_PIN not present in the repository"
+    strict "guppyscreen: shipping pin $GUPPYSCREEN_SHIPPING_PIN not present in the repository"
   fi
 fi
 if [ "$OFFLINE" = 0 ]; then
@@ -269,7 +278,9 @@ echo "UNEXPECTED_TOPLEVEL_GIT_REPOS=${#UNEXPECTED[@]}${UNEXPECTED[*]:+ (${UNEXPE
 # _project/_evidence trees previously re-entered the active workspace.
 [ -e "$WORKSPACE_ROOT/.git" ]    && fail "topology: workspace root is itself a git repository"
 
-FORBIDDEN=(_worktrees _scratch _project _evidence NebulaOS-klipper NebulaOS roadmap \
+# _worktrees/ and _scratch/ are SANCTIONED development space (WORKSPACE_RULES
+# section 2): they never hold canonical source, so their presence is fine.
+FORBIDDEN=(_project _evidence NebulaOS-klipper NebulaOS roadmap \
            RC2-MANIFEST.txt FINAL-PREHW-RC-MANIFEST.txt PROJECT_CONTEXT.md)
 HITS=()
 for f in "${FORBIDDEN[@]}"; do [ -e "$WORKSPACE_ROOT/$f" ] && HITS+=("$f"); done
@@ -340,8 +351,8 @@ echo "CONTROL_FILES_DRIFTED=${#CONTROL_DRIFTED[@]}${CONTROL_DRIFTED[*]:+ (${CONT
 echo "CONTROL_FILES_MISSING=${#CONTROL_MISSING[@]}${CONTROL_MISSING[*]:+ (${CONTROL_MISSING[*]})}"
 echo "WORKSPACE_CONTROL_VALID=$WORKSPACE_CONTROL_VALID"
 if [ "$WORKSPACE_CONTROL_VALID" = NO ]; then
-  [ "${#CONTROL_DRIFTED[@]}" -gt 0 ] && fail "control: root files drifted from canonical: ${CONTROL_DRIFTED[*]}"
-  [ "${#CONTROL_MISSING[@]}" -gt 0 ] && fail "control: root files missing: ${CONTROL_MISSING[*]}"
+  [ "${#CONTROL_DRIFTED[@]}" -gt 0 ] && strict "control: root files drifted from canonical: ${CONTROL_DRIFTED[*]}"
+  [ "${#CONTROL_MISSING[@]}" -gt 0 ] && strict "control: root files missing: ${CONTROL_MISSING[*]}"
   echo "  -> repair deliberately with: tools/sync-workspace-control.sh --apply"
 fi
 echo
@@ -365,7 +376,7 @@ for e in NebulaOS-firmware NebulaOS-klipper-extensions NebulaOS-klipper-mcu Nebu
 done
 echo "LAUNCH_SENTINELS_OK=$SENTINELS_OK/5"
 echo "LAUNCH_SENTINELS_BAD=${#SENTINELS_BAD[@]}${SENTINELS_BAD[*]:+ (${SENTINELS_BAD[*]})}"
-[ "${#SENTINELS_BAD[@]}" = 0 ] || fail "sentinels: ${SENTINELS_BAD[*]}"
+[ "${#SENTINELS_BAD[@]}" = 0 ] || strict "sentinels: ${SENTINELS_BAD[*]}"
 echo
 if [ "$STRICT_CLEAN" = 0 ]; then
   echo "DIRTY_ACTIVE_REPOS=NOT_CHECKED"
@@ -383,7 +394,18 @@ fi
 echo
 
 # ============================ VERDICT =======================================
+echo "WORKSPACE_MODE=$([ "$DEV" = 1 ] && echo DEV || { [ "$OFFLINE" = 1 ] && echo LOCAL_AUDIT || echo RELEASE; })"
+if [ "${#WARNINGS[@]}" -gt 0 ]; then
+  echo "WARNINGS=${#WARNINGS[@]}"
+  for w in "${WARNINGS[@]}"; do echo "  WARN: $w"; done
+fi
 if [ "${#FAILURES[@]}" -eq 0 ]; then
+  if [ "$DEV" = 1 ]; then
+    echo "DEV_IDENTITY_VALID=YES"
+    echo "WORKSPACE_IDENTITY_VALID=DEV"
+    echo "AUDIT_VERDICT=DEV_WORKSPACE_OK_NOT_AN_AUDIT"
+    exit 0
+  fi
   if [ "$OFFLINE" = 1 ]; then
     # A local run proves what it checked and does not overclaim.
     echo "LOCAL_IDENTITY_VALID=YES"
@@ -397,6 +419,7 @@ if [ "${#FAILURES[@]}" -eq 0 ]; then
   echo "AUDIT_VERDICT=VALID_SOURCE_GENERATION"
   exit 0
 fi
+[ "$DEV" = 1 ] && echo "DEV_IDENTITY_VALID=NO"
 echo "IDENTITY_FAILURES=${#FAILURES[@]}"
 for f in "${FAILURES[@]}"; do echo "  FAIL: $f"; done
 echo "LOCAL_IDENTITY_VALID=NO"

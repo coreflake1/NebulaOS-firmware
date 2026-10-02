@@ -23,9 +23,9 @@
     "by the empty additionalDirectories (the archive is not a permitted working",
     "directory) plus layers 4 and 5, which fail regardless of the working directory.",
     "",
-    "sandbox.autoAllowBashIfSandboxed defaults to TRUE in this build; it is pinned",
-    "false on purpose. The sandbox is an OS filesystem boundary around the archive,",
-    "not a reason to auto-approve shell commands.",
+    "sandbox.autoAllowBashIfSandboxed is TRUE: in DEV mode an ordinary sandboxed",
+    "command needs no prompt - the OS sandbox is the boundary. Leaving the sandbox",
+    "is still gated by the PreToolUse hook (two content-bound launchers only).",
     "",
     "Hardware trust stores are denied to every agent, sandboxed or not:",
     "  ~/.config/nebulaos-attest/      the attestation HMAC key. An agent that can",
@@ -46,6 +46,12 @@
   ],
   "autoMemoryEnabled": false,
   "permissions": {
+    "allow": [
+      "Bash(/home/tim/workspace/NebulaOS/tools/run-nebulaos-build.sh:*)",
+      "Bash(tools/run-nebulaos-build.sh:*)",
+      "Bash(/home/tim/workspace/NebulaOS/tools/run-nebulaos-hardware.sh:*)",
+      "Bash(tools/run-nebulaos-hardware.sh:*)"
+    ],
     "deny": [
       "Read(//home/tim/workspace/NebulaOS-archive-*)",
       "Read(//home/tim/workspace/NebulaOS-archive-*/**)",
@@ -69,7 +75,7 @@
   },
   "sandbox": {
     "enabled": true,
-    "autoAllowBashIfSandboxed": false,
+    "autoAllowBashIfSandboxed": true,
     "filesystem": {
       "disabled": false,
       "denyRead": [

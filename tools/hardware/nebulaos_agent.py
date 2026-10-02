@@ -141,6 +141,25 @@ def resolve_control_dev(control_commit):
         raise AgentRefusal(str(exc))
 
 
+def release_identity_gate():
+    """RELEASE-mode devices only: the full online workspace identity gate.
+
+    DEV hardware work is validated per operation (device, control bytes,
+    product evidence, partitions, idle, readback) and does not depend on the
+    rest of the workspace being clean or published. A release install does."""
+    import subprocess
+    gate = os.path.join(os.path.dirname(FW_ROOT), "tools", "verify-workspace-identity.sh")
+    try:
+        rc = subprocess.run([gate, "--release"], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, timeout=300).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AgentRefusal("release identity gate could not run: %s" % exc)
+    if rc != 0:
+        raise AgentRefusal("this device profile is in RELEASE mode and the full online workspace "
+                           "identity gate failed. Run tools/verify-workspace-identity.sh --release.")
+    say("RELEASE_IDENTITY_GATE=PASS")
+
+
 def resolve_control(control_commit, refresh=True):
     """Resolve control commit C from the protected mirror."""
     import subprocess
@@ -177,6 +196,7 @@ def prove_preconditions(device_id, source_head, artifacts, build_run, control_co
     if mode == "dev":
         control_set = resolve_control_dev(control_commit)
     else:
+        release_identity_gate()
         control_set = resolve_control(control_commit)
     say(control_set.describe())
 
@@ -401,11 +421,10 @@ def _repair_log(device_id, control_commit, op, arg, result, reason):
 
 
 def op_restart(args):
-    """Restart one named service on NebulaOS. A repair, so it proves more than
-    the read-only operations: the control commit that composes the device
-    command must be PUBLISHED whatever the install mode - otherwise whoever can
-    run this launcher could commit a change and execute it with nobody else
-    ever able to see it.
+    """Restart one named service on NebulaOS. On a RELEASE-mode device the
+    control commit that composes the device command must be PUBLISHED; on the
+    DEV printer a local control commit is enough (its bytes still come from a
+    commit, never the working tree).
 
     Every attempt is logged, refusals included: a repair log that only records
     what reached the device cannot show what was tried."""
@@ -427,10 +446,14 @@ def _restart(args):
                            % (args.service, ", ".join(sorted(device.RESTARTABLE_SERVICES))))
     profile, control_set, _ = prove_preconditions(
         args.device, None, None, None, args.control_commit, destructive=False)
-    published, why = control_is_published(control_set.commit)
-    if not published:
-        raise AgentRefusal("repairs require a published control commit: %s" % why)
-    say("CONTROL_PUBLISHED=YES (%s)" % why)
+    if profile.install_mode() == "dev":
+        say("CONTROL_PUBLISHED=not required (DEV device)")
+    else:
+        published, why = control_is_published(control_set.commit)
+        if not published:
+            raise AgentRefusal("repairs on a RELEASE device require a published control commit: %s"
+                               % why)
+        say("CONTROL_PUBLISHED=YES (%s)" % why)
 
     with journal.HostLock(args.device):
         txn = journal.Transaction.open(args.device)

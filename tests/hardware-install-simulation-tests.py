@@ -1456,7 +1456,8 @@ def case_capability_vs_policy():
 def case_diagnose_and_restart():
     """diagnose is read-only; restart is a guarded repair through the real agent ops.
 
-    Proves: restart needs a PUBLISHED control commit even in DEV mode; refuses
+    Proves: restart on a DEV device runs from a local (unpublished) control
+    commit, while a RELEASE device still requires a published one; refuses
     an unknown service, an open install transaction, Stock, a busy printer,
     the update supervisor's lock or validation, and klipper without proven
     idle; and a successful restart is recorded in the host repair log.
@@ -1466,7 +1467,8 @@ def case_diagnose_and_restart():
     import io
     import nebulaos_agent as agent
 
-    saved = (agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published)
+    saved = (agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published,
+             agent.release_identity_gate)
     fx, root = scenario("repair")
     try:
         os.environ[journal.ENV_STATE_HOME] = os.path.join(root, "jstate")
@@ -1502,7 +1504,28 @@ def case_diagnose_and_restart():
 
         published["ok"] = False
         rc, out = run("restart", "moonraker")
-        check("restart refuses an UNPUBLISHED control commit, even in DEV mode",
+        check("DEV device: restart runs from an UNPUBLISHED local control commit",
+              rc == 0 and p.restarts == ["moonraker"]
+              and "CONTROL_PUBLISHED=not required (DEV device)" in out, out[-300:])
+        p.restarts.clear()
+
+        # The same request against a RELEASE-mode profile must still refuse.
+        # The release identity gate is stubbed so the refusal is provably the
+        # publication rule, not an unrelated gate failure.
+        text = open(conf).read()
+        with open(conf, "w") as fh:
+            fh.write(text.replace("INSTALL_MODE=dev", "INSTALL_MODE=release"))
+        saved_resolve = agent.resolve_control
+        agent.release_identity_gate = lambda: None
+        agent.resolve_control = lambda c, refresh=True: agent.resolve_control_dev(c)
+        try:
+            rc, out = run("restart", "moonraker")
+        finally:
+            with open(conf, "w") as fh:
+                fh.write(text)
+            agent.release_identity_gate = saved[3]
+            agent.resolve_control = saved_resolve
+        check("RELEASE device: restart refuses an UNPUBLISHED control commit",
               rc == 2 and "published control commit" in out and not p.restarts, out[-200:])
         published["ok"] = True
 
@@ -1548,16 +1571,17 @@ def case_diagnose_and_restart():
               rc == 0 and "RESTART_RESULT=DONE" in out and p.restarts[-1] == "klipper", out[-300:])
         check("the device-side lock is released afterwards", p.flash_lock_holder is None)
         log = open(os.path.join(root, "jstate", "repairs", "printer-sim.log")).read()
-        # 10 attempts so far: 4 refused on the host, 4 refused on the device, 2 done.
+        # 11 attempts so far: 4 refused on the host, 4 refused on the device, 3 done.
         check("every restart attempt is in the host repair log, refusals included",
-              log.count("OP=restart") == 10 and log.count("RESULT=REFUSED") == 8
+              log.count("OP=restart") == 11 and log.count("RESULT=REFUSED") == 8
               and "ARG=sshd RESULT=REFUSED" in log and "ARG=klipper RESULT=DONE" in log, log[-400:])
 
         p.running_os = device.OS_STOCK
         rc, out = run("restart", "moonraker")
         check("restart never runs against Stock", rc == 2 and p.restarts[-1] == "klipper", out[-200:])
     finally:
-        agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published = saved
+        (agent.FW_ROOT, agent.ssh_session_factory, agent.control_is_published,
+         agent.release_identity_gate) = saved
         shutil.rmtree(root, ignore_errors=True)
 
 
