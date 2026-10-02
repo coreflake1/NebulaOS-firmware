@@ -44,10 +44,13 @@ NebulaOS-firmware/tools/product-inputs.py current-build # is an existing build s
 tools/run-nebulaos-hardware.sh --device <id> --control <C> install <X> <ximage> <rootfs>
 ```
 
-The enrolled printer is **`ke-dev`**. "flash" / "install" means: install the build that
-`product-inputs.py current-build` reports (`BUILD_RUN` commit as `<X>`, `BUILD_XIMAGE_SHA256`,
-`BUILD_ROOTFS_SQUASHFS_SHA256`) on `--device ke-dev`, with `<C>` = firmware HEAD. Do not ask the
-human for these. Past runs are journaled in `~/.local/state/nebulaos-hardware/transactions/`.
+The enrolled printer is **`ke-dev`**. The printer runs **Buildroot 2025**: until it is merged
+into `main`, the product is the tip of firmware branch `origin/buildroot-2025.02-migration`, not
+`main` (which still pins the old `lone0/buildroot-x2000`). "flash" / "install" means: build that
+tip if no verified build exists, then install it on `--device ke-dev` with `<X>` = that commit,
+the hashes from its run's `.nebulaos-build-verified`, and `<C>` = full 40-hex firmware HEAD. Do
+not ask the human for these. Past runs are journaled in
+`~/.local/state/nebulaos-hardware/transactions/`.
 
 A host-side tooling change (Hardware Agent, tests, docs) never requires a Buildroot rebuild.
 
