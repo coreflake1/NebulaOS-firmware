@@ -1,0 +1,7 @@
+config BR2_PACKAGE_PYTHON_IMPORTLIB_METADATA
+	bool "python-importlib-metadata"
+	select BR2_PACKAGE_PYTHON_ZIPP
+	help
+	  Moonraker imports the BACKPORT explicitly: moonraker/utils/source_info.py does `from importlib_metadata import Distribution, PathDistribution, PackageMetadata`. Python 3.12's stdlib importlib.metadata does NOT satisfy that import, so this is required even on 3.12.
+
+	  https://pypi.org/project/importlib_metadata/

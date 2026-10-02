@@ -92,6 +92,43 @@ log() {
 	echo "$_ts $1" >> "$DIAG_LOG" 2>/dev/null || true
 }
 
+# Shared persistent-venv predicate - see /usr/libexec/nebulaos-venv-lib.sh.
+# Sourced AFTER log() so the library's messages go to this script's own log.
+# Non-fatal if absent: S05's other work (bind mounts for apps, config) must
+# still happen, and the one call site below fails closed on its own.
+# Locate the shared persistent-venv helpers.
+#
+# The same expression has to work in two places. On the device this script is
+# /etc/init.d/S04nebulaos-factory-seed and the library is
+# /usr/libexec/nebulaos-venv-lib.sh. In the overlay source tree - which is what
+# every test harness runs against - they are <overlay>/etc/init.d/... and
+# <overlay>/usr/libexec/... So `<dir of this script>/../../usr/libexec/...`
+# resolves correctly in BOTH, and an absolute /usr/libexec path resolves only
+# on the device.
+#
+# An earlier revision hardcoded the absolute path and hard-failed when it was
+# missing. That was fail-closed in the right direction but it broke seven test
+# suites that stage the init script without a full rootfs - the script aborted
+# before doing any of its real work. Try the override, then the device path,
+# then the script-relative path; fail closed only if none exists.
+# $0 is not reliable here: the test harnesses source this script inside
+# `sh -c ". <path>"`, where $0 is empty and `dirname ""` errors out. Guard it.
+if [ -n "${0:-}" ]; then _venv_lib_dir=$(dirname "$0"); else _venv_lib_dir=.; fi
+for _cand in \
+	"${NEBULAOS_VENV_LIB:-}" \
+	/usr/libexec/nebulaos-venv-lib.sh \
+	"$_venv_lib_dir/../../usr/libexec/nebulaos-venv-lib.sh"; do
+	[ -n "$_cand" ] && [ -r "$_cand" ] || continue
+	NEBULAOS_VENV_LIB=$_cand
+	break
+done
+if [ -n "${NEBULAOS_VENV_LIB:-}" ] && [ -r "$NEBULAOS_VENV_LIB" ]; then
+	. "$NEBULAOS_VENV_LIB"
+else
+	log "WARNING: nebulaos-venv-lib.sh not found - treating the klipper venv as unusable"
+	venv_is_usable() { return 1; }
+fi
+
 # Records one app's activation decision. Appended as simple key=value lines
 # to a working file, assembled into JSON at the end of start() - avoids
 # needing a JSON-aware tool in a BusyBox ash environment.
@@ -311,10 +348,16 @@ start() {
 	# hasn't already had a lucky prior boot persist Klipper's real
 	# executable path into Moonraker's own database - i.e. always, on a
 	# genuinely fresh device.
-	if [ -x "$NEBULAOS_ROOT/envs/klipper/bin/python3" ]; then
+	# Same predicate S04nebulaos-factory-seed uses, from the same file - a
+	# bare `-x bin/python3` is true for a venv built against an interpreter
+	# this image no longer ships (persistent envs survive an A/B slot change
+	# in BOTH directions), and bind-mounting such a venv onto /root/klippy-env
+	# is worse than leaving it unmounted: Moonraker's update_manager would
+	# then infer a klipper venv that cannot execute.
+	if venv_is_usable "$NEBULAOS_ROOT/envs/klipper" "import greenlet, cffi, jinja2, serial, can"; then
 		bind_if_not_already "$NEBULAOS_ROOT/envs/klipper" /root/klippy-env
 	else
-		log "klipper venv not present at $NEBULAOS_ROOT/envs/klipper - leaving /root/klippy-env unmounted (update_manager's klipper slot will fail to load until S04 provisions it)"
+		log "klipper venv at $NEBULAOS_ROOT/envs/klipper is absent or not usable by this image's python - leaving /root/klippy-env unmounted (S04nebulaos-factory-seed provisions/replaces it on the next seeding pass)"
 	fi
 
 	if validate_app mainsail "$NEBULAOS_ROOT/apps/mainsail" "index.html"; then

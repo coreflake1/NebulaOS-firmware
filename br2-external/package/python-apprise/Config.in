@@ -1,0 +1,11 @@
+config BR2_PACKAGE_PYTHON_APPRISE
+	bool "python-apprise"
+	select BR2_PACKAGE_PYTHON_REQUESTS
+	select BR2_PACKAGE_PYTHON_REQUESTS_OAUTHLIB
+	select BR2_PACKAGE_PYTHON_MARKDOWN
+	select BR2_PACKAGE_PYTHON_YAML
+	select BR2_PACKAGE_PYTHON_CLICK
+	help
+	  Moonraker notification backend (scripts/moonraker-requirements.txt: apprise>=1.9.3,<=1.9.8).
+
+	  https://pypi.org/project/apprise/

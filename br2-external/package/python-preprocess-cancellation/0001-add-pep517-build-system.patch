@@ -1,0 +1,27 @@
+Add the [build-system] table this sdist is missing.
+
+preprocess_cancellation 0.2.1 ships a pyproject.toml that declares
+[tool.poetry] but no [build-system] section at all, and it ships no setup.py
+and no setup.cfg. Under PEP 518 the fallback for a pyproject.toml with no
+[build-system] is setuptools' legacy backend, which then finds no setup.py and
+fails. Declaring the backend the project actually uses is the minimal fix and
+changes nothing about the built artifact.
+
+Upstream is unmaintained at this version and Moonraker pins it exactly
+(preprocess-cancellation==0.2.1), so bumping to a fixed release is not an
+option here.
+
+NOTE: this file uses CRLF line endings upstream; this patch preserves them.
+
+Signed-off-by: NebulaOS build <noreply@anthropic.com>
+
+--- a/pyproject.toml	2024-01-31 16:27:37.702213300 +0100
++++ b/pyproject.toml	2026-09-27 12:17:20.297479578 +0200
+@@ -1,3 +1,7 @@
++[build-system]
++requires = ["poetry-core>=1.0.0"]
++build-backend = "poetry.core.masonry.api"
++
+ [tool.poetry]
+ name = "preprocess_cancellation"
+ version = "0.2.1"

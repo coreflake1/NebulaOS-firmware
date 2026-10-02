@@ -1,0 +1,19 @@
+config BR2_PACKAGE_PYTHON_WHEEL_TARGET
+	bool "python-wheel (target)"
+	help
+	  The `wheel` distribution, installed into TARGET site-packages.
+
+	  Buildroot 2025.02.18 packages wheel as host-only
+	  (package/python-wheel uses host-python-package and ships an empty
+	  Config.in), so there is no upstream way to get it onto the target.
+	  The current qualified NebulaOS image does have it in target
+	  site-packages - it arrived as a side effect of the `pip3 download`
+	  step this migration removed - so it is re-provided here rather than
+	  dropped.
+
+	  This exists for PARITY, not because a shipped component imports it.
+	  Neither klippy-requirements.txt nor moonraker-requirements.txt lists
+	  wheel. It is a candidate for the deferred cleanup mission, where it
+	  can be removed against evidence rather than assumption.
+
+	  https://pypi.org/project/wheel/

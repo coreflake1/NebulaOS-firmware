@@ -150,9 +150,18 @@ else
     # the excluded path but not untracked ones, which is how a stale,
     # TIMESTAMP-based .pyc (PEP 552 flag word 0, carrying a per-build source
     # mtime) reached a release seed. It must not survive into the archive.
+    # The ABI tag is derived, not written as "cpython-311". The invariant
+    # under test is "a stale, untracked, timestamp-based .pyc must not reach
+    # the archive", and that is independent of the interpreter version - but
+    # a hardcoded tag makes the fixture progressively less representative of
+    # what a real build actually leaves behind, and unlike a hardcoded tag in
+    # a PRESENCE check, a stale tag here fails SILENTLY: the test still
+    # passes while no longer exercising a realistic filename.
     mkdir -p "$W/src/lib/vendored/__pycache__"
+    _abi=$(python3 -c 'import sys; print("cpython-%d%d" % sys.version_info[:2])' 2>/dev/null)
+    [ -n "$_abi" ] || _abi=cpython-312
     printf '%b' '\0247\015\015\012\0\0\0\0\336\255\276\357\1\0\0\0' \
-      > "$W/src/lib/vendored/__pycache__/stale.cpython-311.pyc"
+      > "$W/src/lib/vendored/__pycache__/stale.$_abi.pyc"
   ) >/dev/null 2>&1
   if [ ! -d "$W/src/.git" ]; then
     bad "could not build the seed-archive fixture - determinism test did not run"

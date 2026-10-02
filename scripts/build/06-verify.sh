@@ -107,24 +107,29 @@ check_vendor_pin pellcorp-creality "$PELLCORP_CREALITY_PIN" \
 # config layer) - expected every time, not accidental drift.
 # board/nebulaos-post-build.sh is the same thing: copied in by
 # 02-configure-buildroot.sh from the tracked scripts/build/nebulaos-post-build.sh
-# because BR2_ROOTFS_POST_BUILD_SCRIPT names it by a buildroot-relative path,
-# so it has to sit inside the vendor tree. Listed here for the same reason the
-# board/ configs are - it is a deterministic, tracked-source copy, not drift.
-# squashfs.mk/squashfs.hash: 02-configure-buildroot.sh idempotently
-# switches squashfs-tools from GitHub's mutable auto-generated archive to
-# the stable release asset (upstream Buildroot fix backported to our
-# pinned checkout).
+# Buildroot 2025.02.18 migration (2026-09-27): this allowlist IS the
+# acceptance test for "official Buildroot stays pristine", and it is now down
+# to a single entry.
+#
+# It previously permitted nine expected modifications. Seven of them were
+# NebulaOS content injected into the upstream tree
+# (board/halley5-nebulaos-{fragment,busybox-fragment}.config,
+# board/nebulaos-post-build.sh, board/halley5-nebulaos-overlay/,
+# board/halley5-nebulaos-wheels/) or outright edits to upstream package files
+# (package/python-matplotlib/python-matplotlib.mk overwritten wholesale,
+# package/squashfs/squashfs.{mk,hash} sed-patched). All seven are gone: the
+# NebulaOS content moved to br2-external/, matplotlib and numpy come from
+# upstream packages, and the squashfs fix is already upstream in 2025.02.18.
+#
+# local.mk is the only survivor, and it is structural rather than incidental:
+# it carries LINUX_OVERRIDE_SRCDIR, which Buildroot only reads from
+# $(TOPDIR)/local.mk, so it genuinely has nowhere else to live.
+#
+# Anything else appearing here is an UNMET migration goal, not something to
+# add to this list.
 check_vendor_pin buildroot-x2000 "$BUILDROOT_PIN" \
 	"$BUILDROOT_REPO" 0 \
-	package/python-matplotlib/python-matplotlib.mk \
-	board/halley5-nebulaos-busybox-fragment.config \
-	board/halley5-nebulaos-fragment.config \
-	board/nebulaos-post-build.sh \
-	board/halley5-nebulaos-overlay/ \
-	board/halley5-nebulaos-wheels/ \
-	local.mk \
-	package/squashfs/squashfs.mk \
-	package/squashfs/squashfs.hash
+	local.mk
 check_vendor_pin k1-ustreamer "$K1_USTREAMER_PIN" \
 	"$K1_USTREAMER_REPO" 0
 # k1-ustreamer's own real git submodules (jpeg-9d, ustreamer) - pinned via
@@ -501,6 +506,33 @@ check() {
 	fi
 }
 
+# Buildroot 2025.02.18 / Python 3.12 migration: the target Python version is
+# DISCOVERED from the image, never spelled here.
+#
+# These checks used to say /usr/lib/python3.11/... and /usr/bin/python3.11
+# literally. A hardcoded version in a PRESENCE check is the good case - it
+# fails loudly after a bump - but it still has to be hand-edited in several
+# places, and mission rule 10 is that a future minor bump must not require
+# repeating this cleanup. Discovering it also lets the gate assert something
+# the literals could not: that there is EXACTLY ONE target python, so a
+# half-migrated image carrying both 3.11 and 3.12 trees is a hard failure
+# rather than a passing check against whichever one was named.
+discover_target_python() {
+	_found=$(debugfs -R "ls -l /usr/lib" ${IMAGES}/rootfs.ext2 2>/dev/null \
+		| tr -s ' ' '\n' | grep -oE '^python3\.[0-9]+$' | sort -u)
+	_n=$(printf '%s\n' "$_found" | grep -c .)
+	if [ "$_n" -eq 0 ]; then
+		echo "FATAL: no /usr/lib/python3.* directory found in rootfs.ext2 - the target Python is missing entirely" >&2
+		exit 1
+	fi
+	if [ "$_n" -gt 1 ]; then
+		echo "FATAL: rootfs.ext2 contains MORE THAN ONE target Python tree: $(printf '%s ' $_found)" >&2
+		echo "       That is a half-migrated image. Exactly one is expected." >&2
+		exit 1
+	fi
+	printf '%s' "$_found"
+}
+
 check_required() {
 	path="$1"; why="${2:-}"
 	if debugfs -R "stat $path" ${IMAGES}/rootfs.ext2 2>&1 | grep -q "Inode:"; then
@@ -558,15 +590,66 @@ check /usr/lib/libstdc++.so.6
 # runtime, but 04-cross-compile-app-stack.sh downloaded it with --no-deps,
 # so zipp itself was never fetched. Moonraker died with
 # ModuleNotFoundError: No module named zipp, before opening its own log.
-check /usr/lib/python3.11/site-packages/zipp
+TARGET_PY=$(discover_target_python)
+echo "OK   target python discovered from the image: $TARGET_PY"
+
+# --- native Python extension ABI gate --------------------------------------
+#
+# Every CPython extension in the image must be named with THIS target's ABI
+# tag. A wrong tag is not a cosmetic problem: CPython's importlib only
+# considers its own suffixes (.cpython-<ver>-mipsel-linux-gnu.so, .abi3.so,
+# .so), so a differently-tagged file is invisible to `import` even when the
+# object inside it is a perfectly good MIPS shared library.
+#
+# This gate exists because that exact thing happened, and NOTHING else caught
+# it. Buildroot 2025.02.18's package/python-contourpy/python-contourpy.mk uses
+# $(eval $(meson-package)) but, unlike python-matplotlib and python-numpy, sets
+# no CONF_ENV exporting _PYTHON_SYSCONFIGDATA_NAME - so meson-python read the
+# HOST interpreter's sysconfigdata and emitted
+# _contourpy.cpython-312-x86_64-linux-gnu.so. Correct MIPS32 rel2 object,
+# unusable filename. The build was green, `file` on the target reported zero
+# x86-64 binaries, and matplotlib - which hard-depends on contourpy - would
+# have failed on the printer at first import, taking NebulaOS's calibration and
+# graphing paths with it.
+#
+# So: assert every tag is identical AND is the expected one. Derived from the
+# discovered interpreter version, never written out, so a Python minor bump
+# needs no edit here.
+TARGET_PY_XY=$(printf '%s' "$TARGET_PY" | sed 's/^python//; s/\.//')
+EXPECTED_ABI="cpython-${TARGET_PY_XY}-mipsel-linux-gnu"
+if command -v unsquashfs >/dev/null 2>&1 && [ -f "$IMAGES/rootfs.squashfs" ]; then
+	ABI_TAGS=$(unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null \
+		| grep -oE 'cpython-[0-9]+[A-Za-z0-9_-]*\.so$' \
+		| sed 's/\.so$//' | sort -u)
+	if [ -z "$ABI_TAGS" ]; then
+		echo "MISS no CPython extension modules found in rootfs.squashfs at all - expected many"
+	else
+		_bad=0
+		for t in $ABI_TAGS; do
+			if [ "$t" != "$EXPECTED_ABI" ]; then
+				echo "FATAL native Python extension ABI tag '$t' != expected '$EXPECTED_ABI'"
+				unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null | grep -E "$t\.so$" | sed 's/^/        /'
+				_bad=1
+			fi
+		done
+		if [ "$_bad" = 0 ]; then
+			echo "OK   every CPython extension in the image uses $EXPECTED_ABI ($(unsquashfs -l "$IMAGES/rootfs.squashfs" 2>/dev/null | grep -cE 'cpython-[0-9]+[A-Za-z0-9_-]*\.so$') modules)"
+		else
+			echo "FATAL a differently-tagged extension is INVISIBLE to import on the target, even though the object inside it may be valid MIPS - see 02-configure-buildroot.sh's local.mk note"
+		fi
+	fi
+else
+	echo "MISS unsquashfs unavailable or rootfs.squashfs absent - native extension ABI gate NOT RUN (this is a SKIP, not a pass)"
+fi
+check /usr/lib/$TARGET_PY/site-packages/zipp
 # FIRMWARE.md sec 23 (2026-07-23): numpy is a soft/lazy Klipper dependency -
 # shaper_calibrate.py only raises a clean, user-facing error if it is
 # missing (not a crash), and only when a user actually runs resonance
 # testing. Not launch-blocking, but a real completeness gap for a near-
 # universal Klipper workflow, and available as a ready Buildroot package
 # (BR2_PACKAGE_PYTHON_NUMPY), so enabled rather than left missing.
-check /usr/lib/python3.11/site-packages/numpy
-check /usr/bin/python3.11
+check /usr/lib/$TARGET_PY/site-packages/numpy
+check /usr/bin/$TARGET_PY
 check /opt/klipper/klippy/klippy.py
 check /opt/klipper/klippy/chelper/c_helper.so
 # Clean-Update + Virgin Baseline mission, Phase 6: nebulaos_version.py
@@ -613,7 +696,46 @@ else
 		echo "MISS moonraker-sqlite-nolock.patch did NOT reach the shipped database.py (helper defs=$mdb_defs, call sites=$mdb_calls expected 4, raw sqlite3.connect(=$mdb_raw expected 1) - the image would ship stock Moonraker database code"
 	fi
 fi
-check /usr/lib/python3.11/site-packages/streaming_form_data
+check /usr/lib/$TARGET_PY/site-packages/streaming_form_data
+check_required /usr/lib/$TARGET_PY/site-packages/smart_open "streaming_form_data imports it at module load; without it Moonraker dies at import"
+
+# --- Python distribution metadata closure ----------------------------------
+#
+# Every installed distribution's declared runtime requirements must be
+# installed too. Buildroot packages a distribution without its Requires-Dist,
+# so nothing else in the build notices a missing one - and an import test is
+# not possible here, because the image is MIPS.
+#
+# This gate exists because that happened. streaming-form-data 1.19.1 declares
+# smart-open>=7.0.5 and imports it at module load. The first Buildroot
+# 2025.02.18 image shipped without smart_open; the ELF and ABI-tag gates above
+# passed, because the missing piece was a pure-Python module that simply was
+# not there. Moonraker died at import on the printer, and its own pip recovery
+# could not fix it. The metadata said exactly what was needed.
+#
+# Only the METADATA files are extracted. Requirements behind an `extra` are
+# optional and are not checked. Release-blocking.
+#
+# Run with Buildroot's own host python (the output/host/bin/dtc pattern
+# above), which always has `packaging`: host-python-setuptools-scm depends on
+# host-python-packaging. The build machine's python3 is only a fallback.
+echo "=== Python distribution metadata closure ==="
+CLOSURE_PY="$REPO_ROOT/vendor/buildroot-x2000/output/host/bin/python3"
+[ -x "$CLOSURE_PY" ] || CLOSURE_PY=python3
+CLOSURE_SITE="/usr/lib/$TARGET_PY/site-packages"
+CLOSURE_DIR="$(mktemp -d)"
+for d in $(debugfs -R "ls -p $CLOSURE_SITE" ${IMAGES}/rootfs.ext2 2>/dev/null \
+		| awk -F/ '$6 ~ /\.dist-info$/ {print $6}'); do
+	mkdir -p "$CLOSURE_DIR/$d"
+	debugfs -R "dump $CLOSURE_SITE/$d/METADATA $CLOSURE_DIR/$d/METADATA" ${IMAGES}/rootfs.ext2 >/dev/null 2>&1 || true
+done
+if CLOSURE_OUT=$("$CLOSURE_PY" "$SCRIPT_DIR/lib/check-python-dist-closure.py" "$CLOSURE_DIR" "${TARGET_PY#python}" 2>&1); then
+	echo "$CLOSURE_OUT"
+else
+	echo "$CLOSURE_OUT" | sed 's/^UNMET \(.*\)$/MISS \1   <== REQUIRED/'
+	MISS_REQUIRED=$((MISS_REQUIRED + 1))
+fi
+rm -rf "$CLOSURE_DIR"
 check /usr/sbin/nginx
 check /usr/share/mainsail/index.html
 check /etc/init.d/S55klipper

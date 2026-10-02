@@ -1,0 +1,6 @@
+config BR2_PACKAGE_PYTHON_INOTIFY_SIMPLE
+	bool "python-inotify-simple"
+	help
+	  Moonraker filesystem watching (moonraker-requirements.txt: inotify-simple==2.0.1). Distinct from Buildroot's python-pyinotify, which is a different library with a different API.
+
+	  https://pypi.org/project/inotify_simple/

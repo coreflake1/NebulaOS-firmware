@@ -1,0 +1,18 @@
+# Populated at configure time by scripts/build/02-configure-buildroot.sh, which
+# is the single owner of this directory's contents:
+#
+#   overlay/                          <- scripts/build/overlay/ plus build-time
+#                                        payloads added by 04-cross-compile
+#   post-build.sh                     <- scripts/build/nebulaos-post-build.sh
+#   halley5-nebulaos-fragment.config  <- artifacts/buildroot-halley5-v30-image/
+#   halley5-nebulaos-busybox-fragment.config
+#
+# The TRACKED sources of truth stay where they are. In particular the two
+# fragment configs remain tracked under artifacts/buildroot-halley5-v30-image/
+# because baseline-difference-gate.sh and assert-baseline-config.sh diff them
+# verbatim against the qualified baseline tag - moving them would silently stop
+# those gates matching a real file.
+overlay/
+post-build.sh
+halley5-nebulaos-fragment.config
+halley5-nebulaos-busybox-fragment.config

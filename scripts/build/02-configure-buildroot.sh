@@ -78,6 +78,14 @@ flock -n 9 || { echo "another build stage already owns $REPO_ROOT/.nebulaos-buil
 
 BUILDROOT_DIR="$REPO_ROOT/vendor/buildroot-x2000"
 ARTIFACTS="$REPO_ROOT/artifacts/buildroot-halley5-v30-image"
+# The NebulaOS BR2_EXTERNAL tree. Everything this project adds to Buildroot
+# lives here; nothing under $BUILDROOT_DIR is written except local.mk (which
+# carries LINUX_OVERRIDE_SRCDIR and has nowhere else to go). That property is
+# the acceptance test for the migration - 06-verify.sh's check_vendor_pin()
+# allowlist encodes it.
+BR2_EXT="$REPO_ROOT/br2-external"
+BR2_EXT_BOARD="$BR2_EXT/board/nebulaos-x2000"
+export BR2_EXTERNAL="$BR2_EXT"
 KERNEL_SRCDIR="$REPO_ROOT/vendor/x2000_kernel_6.6/kernel/kernel-6.6"
 
 if [ ! -d "$BUILDROOT_DIR/.git" ]; then
@@ -85,16 +93,36 @@ if [ ! -d "$BUILDROOT_DIR/.git" ]; then
 	exit 1
 fi
 
-cp "$ARTIFACTS/buildroot.config" "$BUILDROOT_DIR/.config"
-mkdir -p "$BUILDROOT_DIR/board"
-# BR2_ROOTFS_POST_BUILD_SCRIPT names this by a buildroot-relative path, so it
-# has to live inside the buildroot tree. It pins the /etc/shadow root hash
-# after the finalize hooks and the overlay have run - see the script itself
-# for why neither BR2_TARGET_GENERIC_ROOT_PASSWD nor the overlay can do it.
-cp "$SCRIPT_DIR/nebulaos-post-build.sh" "$BUILDROOT_DIR/board/nebulaos-post-build.sh"
-chmod 755 "$BUILDROOT_DIR/board/nebulaos-post-build.sh"
-cp "$ARTIFACTS/halley5-nebulaos-fragment.config" "$BUILDROOT_DIR/board/halley5-nebulaos-fragment.config"
-cp "$ARTIFACTS/halley5-nebulaos-busybox-fragment.config" "$BUILDROOT_DIR/board/halley5-nebulaos-busybox-fragment.config"
+# Buildroot 2025.02.18 migration (2026-09-27): the configuration is now
+# produced by Buildroot's own defconfig workflow from a minimal, maintainable
+# input, instead of copying a 4258-line frozen .config over the tree.
+#
+#   br2-external/configs/nebulaos_x2000_defconfig   <- INPUT  (84 lines, tracked)
+#   artifacts/buildroot-halley5-v30-image/buildroot.config <- OUTPUT (written below)
+#
+# Both are kept deliberately. The defconfig is what a human edits; the full
+# resolved .config is still written back to artifacts/ at the end of this
+# script because it is a GATED artifact, not merely a build input -
+# baseline-difference-gate.sh and assert-baseline-config.sh diff it verbatim
+# against the qualified baseline tag, and a savedefconfig shares almost no
+# lines with a full .config, so substituting one for the other would make
+# those diffs 100% noise WITHOUT any gate failing. That silence is the danger.
+#
+# The old duplicate-line hazard this script used to guard against (appending
+# "X=y" onto a .config that already had another copy of X, which a later
+# olddefconfig then resolved from the OTHER copy) is gone by construction:
+# nothing appends to .config any more. `make <defconfig>` writes it from
+# scratch every time.
+mkdir -p "$BR2_EXT_BOARD"
+# BR2_ROOTFS_POST_BUILD_SCRIPT now names this through
+# $(BR2_EXTERNAL_NEBULAOS_PATH), so it no longer has to live inside the
+# Buildroot tree. It pins the /etc/shadow root hash after the finalize hooks
+# and the overlay have run - see the script itself for why neither
+# BR2_TARGET_GENERIC_ROOT_PASSWD nor the overlay can do it.
+cp "$SCRIPT_DIR/nebulaos-post-build.sh" "$BR2_EXT_BOARD/post-build.sh"
+chmod 755 "$BR2_EXT_BOARD/post-build.sh"
+cp "$ARTIFACTS/halley5-nebulaos-fragment.config" "$BR2_EXT_BOARD/halley5-nebulaos-fragment.config"
+cp "$ARTIFACTS/halley5-nebulaos-busybox-fragment.config" "$BR2_EXT_BOARD/halley5-nebulaos-busybox-fragment.config"
 # Phase 11 (2026-08-15): CONFIG_EXTRA_FIRMWARE_DIR in the tracked fragment
 # is a literal "/src/board/halley5-nebulaos-overlay/lib/firmware" - valid
 # only under the old nested pellcorp/k1-bash-build container, which always
@@ -108,17 +136,61 @@ cp "$ARTIFACTS/halley5-nebulaos-busybox-fragment.config" "$BUILDROOT_DIR/board/h
 # diff verbatim against the accepted baseline tag) to point at where the
 # overlay's firmware actually lands post-copy below: real host path, so it
 # works from any checkout location.
-sed -i "s#/src/board/halley5-nebulaos-overlay#$BUILDROOT_DIR/board/halley5-nebulaos-overlay#" \
-	"$BUILDROOT_DIR/board/halley5-nebulaos-fragment.config"
+sed -i "s#/src/board/halley5-nebulaos-overlay#$BR2_EXT_BOARD/overlay#" \
+	"$BR2_EXT_BOARD/halley5-nebulaos-fragment.config"
+# local.mk is Buildroot's own package-override file
+# (BR2_PACKAGE_OVERRIDE_FILE defaults to "$(CONFIG_DIR)/local.mk"). The
+# Makefile `-include`s it at line 547, immediately BEFORE
+# `include $(sort $(wildcard package/*/*.mk))` at line 550, so variables set
+# here are visible to every package .mk as it is evaluated. It is the one
+# supported way to influence a package without editing upstream files, and it
+# is the single entry on 06-verify.sh's pristineness allowlist.
 cat > "$BUILDROOT_DIR/local.mk" <<EOF
 LINUX_OVERRIDE_SRCDIR = $KERNEL_SRCDIR
+
+# --- upstream bug workaround: python-contourpy names its extension for the
+# --- HOST, not the target.
+#
+# Found by inspecting a real built rootfs, not by a build failure - the build
+# SUCCEEDS and produces a correctly cross-compiled MIPS32 rel2 object. It is
+# only the FILENAME that is wrong:
+#
+#   site-packages/contourpy/_contourpy.cpython-312-x86_64-linux-gnu.so
+#
+# CPython looks for exactly its own importlib extension suffixes
+# (.cpython-312-mipsel-linux-gnu.so, .abi3.so, .so). That name matches none of
+# them, so 'import contourpy' fails at runtime - and contourpy is a hard
+# dependency of matplotlib, so NebulaOS's calibration and graphing paths break
+# with a green build. Exactly the failure mode that makes "it compiled" an
+# unsafe proxy for "it works".
+#
+# Cause: package/python-contourpy/python-contourpy.mk uses \$(eval
+# \$(meson-package)) but, unlike its siblings python-matplotlib and
+# python-numpy, sets no CONF_ENV. Those two export
+# _PYTHON_SYSCONFIGDATA_NAME so the build-time interpreter reads the TARGET's
+# sysconfigdata and meson-python derives the correct EXT_SUFFIX. contourpy
+# reads the host's instead.
+#
+# The fix below is byte-for-byte what python-matplotlib and python-numpy
+# already do, applied through the override file so no upstream file is
+# touched. Recursive (=) assignment, not :=, because PKG_PYTHON_* and
+# PYTHON3_PATH are defined later in package/pkg-python.mk and
+# package/python3/python3.mk.
+#
+# Worth reporting upstream; remove this when a Buildroot release carries the
+# CONF_ENV in the package itself. 06-verify.sh now fails the build if ANY
+# target extension carries a foreign ABI tag, so a regression here cannot go
+# unnoticed again.
+PYTHON_CONTOURPY_CONF_ENV += \\
+	_PYTHON_SYSCONFIGDATA_NAME=\$(PKG_PYTHON_SYSCONFIGDATA_NAME) \\
+	PYTHONPATH=\$(PYTHON3_PATH)
 EOF
-rm -rf "$BUILDROOT_DIR/board/halley5-nebulaos-overlay"
-mkdir -p "$BUILDROOT_DIR/board/halley5-nebulaos-overlay"
-cp -r "$REPO_ROOT/scripts/build/overlay/." "$BUILDROOT_DIR/board/halley5-nebulaos-overlay/"
-mkdir -p "$BUILDROOT_DIR/board/halley5-nebulaos-overlay/opt/printer_data/comms" \
-         "$BUILDROOT_DIR/board/halley5-nebulaos-overlay/opt/printer_data/logs" \
-         "$BUILDROOT_DIR/board/halley5-nebulaos-overlay/opt/printer_data/gcodes"
+rm -rf "$BR2_EXT_BOARD/overlay"
+mkdir -p "$BR2_EXT_BOARD/overlay"
+cp -r "$REPO_ROOT/scripts/build/overlay/." "$BR2_EXT_BOARD/overlay/"
+mkdir -p "$BR2_EXT_BOARD/overlay/opt/printer_data/comms" \
+         "$BR2_EXT_BOARD/overlay/opt/printer_data/logs" \
+         "$BR2_EXT_BOARD/overlay/opt/printer_data/gcodes"
 # Real bug found live on 2026-07-28: this rm -rf/cp only cleans the BOARD
 # overlay staging dir (above), not output/target/ or
 # output/build/buildroot-fs/ext2/target/ - per the IMPORTANT comment near
@@ -144,39 +216,76 @@ for obsolete_rel in \
 	rm -f "$BUILDROOT_DIR/output/target/$obsolete_rel" \
 	      "$BUILDROOT_DIR/output/build/buildroot-fs/ext2/target/$obsolete_rel" 2>/dev/null || true
 done
-rm -rf "$BUILDROOT_DIR/board/halley5-nebulaos-wheels"
-mkdir -p "$BUILDROOT_DIR/board/halley5-nebulaos-wheels"
-cp "$REPO_ROOT/scripts/build/vendor-wheels/"*.whl "$BUILDROOT_DIR/board/halley5-nebulaos-wheels/"
-cp "$REPO_ROOT/scripts/build/vendor-patches/python-matplotlib/python-matplotlib.mk" "$BUILDROOT_DIR/package/python-matplotlib/python-matplotlib.mk"
+# Buildroot 2025.02.18 migration: two edits to UPSTREAM Buildroot files used to
+# happen here and are both gone.
+#
+#   1. package/python-matplotlib/python-matplotlib.mk was overwritten wholesale
+#      with a vendored copy pinned to matplotlib 3.4.3 and pointed at a local
+#      wheel directory (board/halley5-nebulaos-wheels/, carrying a prebuilt
+#      numpy cp311 mipsel wheel). That workaround existed because matplotlib
+#      3.4.3 built via setup.py, whose legacy setup_requires/fetch_build_eggs
+#      path ran a nested pip that inherited _PYTHON_HOST_PLATFORM=linux-mipsel
+#      and tried to resolve host build dependencies as target ones.
+#      2025.02.18 ships python-matplotlib 3.10.0 and python-numpy 1.25.0 as
+#      ordinary packages, and 3.10.0 builds through meson-python - the
+#      setup_requires mechanism that caused the problem does not exist in that
+#      path at all. Stock packages are used now; the vendored .mk and the
+#      cp311 wheel are deleted.
+#
+#   2. package/squashfs/squashfs.{mk,hash} were sed-patched to switch from
+#      GitHub's mutable auto-generated tag archive to the immutable release
+#      asset. That was a backport of an upstream fix; 2025.02.18 already sets
+#      SQUASHFS_SITE to the releases/download URL and already hashes
+#      squashfs-tools-4.6.1.tar.gz. The sed was verified to be a no-op there
+#      (its `call github,plougher` precondition is false), so it is deleted
+#      rather than left as dead code guarding nothing.
+#
+# The rule this encodes: NO file under $BUILDROOT_DIR is modified by this
+# project. A package Buildroot does not provide goes in br2-external/package/,
+# never as a cp over package/.
 
-# squashfs-tools 4.6.1: GitHub's auto-generated tag archives are mutable —
-# the hash changed after Buildroot pinned it. Upstream Buildroot fixed this
-# by switching to the stable release asset (same content, immutable URL).
-# Apply the same fix idempotently to our pinned buildroot-x2000 checkout.
-_sq_mk="$BUILDROOT_DIR/package/squashfs/squashfs.mk"
-_sq_hash="$BUILDROOT_DIR/package/squashfs/squashfs.hash"
-if grep -q 'call github,plougher' "$_sq_mk" 2>/dev/null; then
-	sed -i \
-		-e 's|^SQUASHFS_SITE = .*|SQUASHFS_SOURCE = squashfs-tools-$(SQUASHFS_VERSION).tar.gz\nSQUASHFS_SITE = https://github.com/plougher/squashfs-tools/releases/download/$(SQUASHFS_VERSION)|' \
-		"$_sq_mk"
-	sed -i \
-		-e 's|squashfs-4\.6\.1\.tar\.gz|squashfs-tools-4.6.1.tar.gz|' \
-		"$_sq_hash"
-	echo "== squashfs-tools: switched to stable release asset (upstream Buildroot fix) =="
-else
-	echo "== squashfs-tools: already using stable release asset =="
-fi
-if grep -q 'call github,plougher' "$_sq_mk" 2>/dev/null; then
-	echo "FATAL: squashfs-tools still uses GitHub auto-generated archive after fix" >&2
-	exit 1
-fi
-if ! grep -q 'squashfs-tools-4\.6\.1\.tar\.gz' "$_sq_hash" 2>/dev/null; then
-	echo "FATAL: squashfs.hash does not reference the stable release asset filename" >&2
-	exit 1
-fi
+# NOTE: the defconfig is deliberately NOT copied into $BUILDROOT_DIR/configs/.
+#
+# Buildroot's %_defconfig rule already searches every BR2_EXTERNAL tree -
+# Makefile line 1056-1060 iterates $(call reverse,$(TOPDIR) $(BR2_EXTERNAL_DIRS))
+# - so `make BR2_EXTERNAL=... nebulaos_x2000_defconfig` resolves it straight out
+# of br2-external/configs/ with no staging at all. Verified against a pristine
+# 2025.02.18 checkout: the defconfig resolves, GCC comes out 13.4.0, and
+# `git status --porcelain -uall` on the Buildroot tree stays completely empty.
+#
+# An earlier revision did copy it "so the name resolves identically whether or
+# not BR2_EXTERNAL is exported". That was unnecessary, and it cost real ground:
+# it left configs/nebulaos_x2000_defconfig as an untracked file inside the
+# upstream checkout, which 06-verify.sh correctly reported as an unexplained
+# working-tree change. The whole point of the BR2_EXTERNAL move is that nothing
+# but local.mk is written there.
 
+echo "== generating .config from nebulaos_x2000_defconfig =="
+( cd "$BUILDROOT_DIR" && make BR2_EXTERNAL="$BR2_EXT" nebulaos_x2000_defconfig )
 echo "== normalizing .config (resolves any derived Kconfig selects) =="
-( cd "$BUILDROOT_DIR" && make olddefconfig )
+( cd "$BUILDROOT_DIR" && make BR2_EXTERNAL="$BR2_EXT" olddefconfig )
+
+# A configuration that still selects options Buildroot has REMOVED sets
+# BR2_LEGACY, and Buildroot refuses to build in that state. Catch it here with
+# a clear message rather than several minutes into `make`.
+if grep -qE '^BR2_LEGACY=y$' "$BUILDROOT_DIR/.config"; then
+	echo "FATAL: the resolved .config sets BR2_LEGACY=y - it still selects options that" >&2
+	echo "Buildroot 2025.02.18 has removed. Resolve them in" >&2
+	echo "br2-external/configs/nebulaos_x2000_defconfig; do not mask them." >&2
+	grep -B2 'BR2_LEGACY' "$BUILDROOT_DIR/.config" | head -20 >&2
+	exit 1
+fi
+
+# Write the fully resolved .config back to the tracked artifact. This is NOT a
+# convenience copy: artifacts/buildroot-halley5-v30-image/buildroot.config is a
+# GATED baseline artifact. baseline-difference-gate.sh and
+# assert-baseline-config.sh diff it verbatim against QUALIFIED_BASELINE_TAG,
+# and lib/baseline-config-compare.sh carries filters written specifically for
+# a full .config's shape. Keeping the defconfig as the human-edited INPUT and
+# this file as the generated OUTPUT is what lets the minimal defconfig exist
+# without silently disarming those gates.
+cp "$BUILDROOT_DIR/.config" "$ARTIFACTS/buildroot.config"
+echo "== resolved .config written back to artifacts/buildroot-halley5-v30-image/buildroot.config =="
 
 # Reproducibility fix (2026-07-26, NebulaOS mutable-runtime mission): a real
 # bug found by directly inspecting the built rootfs.squashfs with unsquashfs

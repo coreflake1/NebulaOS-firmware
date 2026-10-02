@@ -1,0 +1,7 @@
+config BR2_PACKAGE_PYTHON_STREAMING_FORM_DATA
+	bool "python-streaming-form-data"
+	select BR2_PACKAGE_PYTHON_SMART_OPEN # runtime
+	help
+	  Moonraker streaming multipart upload parser (moonraker-requirements.txt: streaming-form-data>=1.11.0,<=1.19.1). Ships a NATIVE CPython extension, _parser.
+
+	  https://pypi.org/project/streaming_form_data/
